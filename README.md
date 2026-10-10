@@ -354,6 +354,13 @@ original loading functions; callers bypassing the prompt server must invoke
 - `Lazy If / Else` switches values of any ComfyUI type while lazily evaluating
   only the selected branch, unless another workflow output also needs the
   unselected branch.
+- `Sigmas To String` exports a native `SIGMAS` tensor as comma-separated decimal
+  text without truncating values, reordering points or changing endpoints.
+  Connect its `STRING` output to core `Preview Any` to copy the schedule, or
+  to core `ManualSigmas` for the reverse conversion. Scientific notation is
+  expanded because the current core parser does not support it. Float32
+  schedules round-trip exactly; ManualSigmas always produces float32, even
+  when the exported source was float64.
 - `Stage Barrier` forwards eight fixed, optional arbitrary-value pairs and treats its
   non-negative `stage` widget as a reusable phase label. The scheduler derives
   dependency rounds automatically: increasing or equal labels stay in the
@@ -404,12 +411,78 @@ original loading functions; callers bypassing the prompt server must invoke
   first/last keyframes must still be single-frame latents matching the target
   spatial grid. Semantic embeddings and their token tags are kept unchanged;
   reference meaning and ordering are controlled by the workflow.
+- `MiniMax H3 KSampler` combines native KSampler controls, explicit sigma curves,
+  and an optional learned spatial-upscale second pass. Connect
+  `model`, `conditioning`, and `latent`; without `latent_second` it is single-pass.
+  The automatic, unmasked single-pass path uses the same schedule,
+  noise, sampler, CFG and denoise semantics as native KSampler. `negative` is
+  required when CFG is not 1. Existing LoRA, shift and attention patches on MODEL
+  are respected; the node does not load or repatch the DiT.
+  Standalone video latents get an implicit empty audio stream internally because
+  the native H3 DiT requires both streams; that generated stream is carried through
+  both passes but omitted from the final standalone-video output.
+  - `first_sigmas` selects **automatic** (default) or **manual**. Automatic shows
+    native `steps` (default 8), `scheduler` and `denoise`; these control only the
+    complete first pass. Manual shows a sigma text field instead. `second_sigmas`
+    selects **preset** (default) or **manual**, never a split of a combined schedule.
+    Both passes finish at zero. Shared seed/CFG/sampler apply to both passes.
+    Manual curves are FP32, accept commas/whitespace/newlines/scientific notation,
+    and require positive descending points followed by one terminal zero. They
+    are not sorted, deduplicated, refined, or processed by scheduler/denoise or
+    the automatic sampler-specific penultimate-discard rule. Logs report intervals
+    (`len(sigmas)-1`); a solver can perform multiple model evaluations per interval.
+  - Second-pass presets are explicit curves: 3 steps `0.9035, 0.6316, 0.3158, 0`;
+    4 steps `0.9035, 0.8, 0.6316, 0.3158, 0`; 5 steps
+    `0.9231, 0.8780, 0.8, 0.6316, 0.3158, 0`. These are editable alternatives
+    derived from the upscaler author's example workflow, not quality guarantees.
+    Switch to manual to change the curve. Use `Sigmas To String` with core
+    `Preview Any` to copy a native scheduler curve into either text field; core
+    `ManualSigmas` converts the exported plain-decimal string back to SIGMAS.
+  - Connecting `latent_second` enables second sampling. Its exact latent H/W
+    define the output canvas, while time, batch and audio come from the first
+    latent. Its samples/mask/audio are otherwise ignored unless the first video
+    mask protects some pixels. `conditioning_second` defaults to conditioning;
+    mismatching FL2VA keyframes require an explicit matching second condition.
+    Ref2VA reference images/videos may have their own size. Both stages' guide
+    time indexes are checked against the **first** latent before sampling.
+  - The first sampler completes its **entire curve** before its final latent is
+    upscaled. The second sampler re-noises using its own starting sigma and native
+    H3 audio scaling. For example, automatic first steps=4 and the 3-step second
+    preset execute 4+3 intervals, not 4+2 with an implicit extra step. Automatic
+    denoise=0 skips only the first sampler; an enabled second pass still samples.
+    Without a second latent, its curve and connected second conditions are ignored.
+    A resolution-changing restart is not equivalent to uninterrupted sampling.
+  - Choose `upscale.model_name` from models/latent_upscale_models only when H/W
+    change. Its loader is lazy and shared with other samplers/upscale applications
+    through ComfyUI's node/model cache, not a separate persistent weight cache.
+    Same-size second passes and all-zero video masks need no upscaler. The learned
+    model executes the whole temporal volume. Unequal H/W multipliers stretch
+    spatial content (not crop/outpaint); quality at changed aspect ratios needs
+    manual verification.
+  - A first video mask is binary by positive coverage, unioned across channels
+    and closed to the actual DiT spatial patches before first sampling. The
+    second mask conservatively covers every overlapping low-resolution cell,
+    closes high-resolution patches, then optionally grows by `inpaint.mask_grow`
+    patch rings (default 0). No temporal interpolation/growth is used. If the
+    first mask has any zeros, second-pass base T must match the first T, and its
+    batch must be 1 or match the first batch. Upscaled clean predictions replace
+    only selected areas; the same final mask drives second denoising and restores
+    protected base pixels afterwards. All-zero is **not** absent. The second
+    latent's mask is ignored. Audio masks are inherited unchanged, without
+    spatial resampling, binarization or growth. Latent protection does not promise
+    pixel-identical decoded boundaries through a VAE.
+  - There is one final LATENT output, no cached first-pass output. Advanced
+    upscale/inpaint inputs use the native advanced toggle on the classic
+    canvas and Nodes 2.0; existing ordinary nodes are unchanged.
 - `MiniMax H3 Latent Upscale` includes model/precision selection and loads the attention-free 3D learned latent
   upscaler through ComfyUI's normal offload lifecycle. Place compatible weights
   from [LBH-123-AI/Minimax_h3_latent_Upscaler](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler)
   in `models/latent_upscale_models/`.
 - `MiniMax H3 Latent Upscale` enlarges only the video stream by a continuous
-  1x--4x multiplier and passes the audio stream through exactly. Its optional
+  1x--16x pixel/token multiplier (1x--4x per spatial axis) and passes the audio
+  stream through exactly. It runs the full temporal volume without chunking;
+  ComfyUI's memory budget includes residual features, convolution workspace,
+  and outputs retained on the GPU. Its optional
   `CONDITIONING` input enlarges FL2AV first/last keyframe latents with the same
   learned model, while Ref2AV image/video/audio references retain their
   independent geometry. Without it, only the AV latent is processed. No text

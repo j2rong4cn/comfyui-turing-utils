@@ -7,6 +7,12 @@ from collections.abc import Mapping
 
 # Application -> (loader, worker, model socket, loader defaults).
 APPLICATIONS = {
+    "TuringUtilsMiniMaxH3KSampler": (
+        "_TuringUtilsH3UpscaleLoader",
+        "_TuringUtilsH3KSamplerApply",
+        "upscale_model",
+        {"precision": "auto"},
+    ),
     "TuringUtilsMiniMaxH3LatentUpscale": (
         "_TuringUtilsH3UpscaleLoader",
         "_TuringUtilsH3UpscaleApply",
@@ -34,6 +40,11 @@ def compile_shared_loaders(prompt):
         inputs = dict(node.get("inputs", {}))
         if "model_name" not in inputs:
             continue  # Let normal prompt validation report the missing input.
+        if (
+            node.get("class_type") == "TuringUtilsMiniMaxH3KSampler"
+            and inputs["model_name"] == "none"
+        ):
+            continue  # The optional, lazy upscaler must not validate a nonexistent file.
         loading = {"model_name": inputs.pop("model_name")}
         loading.update(
             {name: inputs.pop(name, default) for name, default in defaults.items()}

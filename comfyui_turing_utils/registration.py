@@ -8,6 +8,7 @@ from .nodes.latent import SetVideoLatentNoiseMask, VideoLatentCompositeMasked
 from .nodes.loaders import ConvRotCLIPLoader, ConvRotDiffusionModelLoader
 from .nodes.logic import IsInputPresent, LazyIfElse, StageBarrier, StagePath
 from .nodes.media import ResizeImageIfPresent, VideoMotionContactSheet
+from .nodes.sigmas import SigmasToString
 from .nodes.multimodal_chat import MultimodalPromptChat
 from .nodes.sec import _SeCLoader, SeCTrackVisualConcept, _SeCApply
 from .nodes.minimax import (
@@ -20,6 +21,7 @@ from .nodes.minimax_vae import (
     MiniMaxH3VideoVAEDecode,
     MiniMaxH3VideoVAEEncode,
 )
+from .nodes.minimax_sampler import MiniMaxH3KSampler, _H3KSamplerApply
 from .nodes.minimax_references import (
     H3AudioReference,
     H3BuildConditioning,
@@ -64,6 +66,7 @@ NODE_CLASS_MAPPINGS = {
     "TuringUtilsLazyIfElse": LazyIfElse,
     "TuringUtilsStageBarrier": StageBarrier,
     "TuringUtilsStagePath": StagePath,
+    "TuringUtilsSigmasToString": SigmasToString,
     "TuringUtilsH3AddNoise": H3AddNoise,
     "TuringUtilsH3LatentInfo": H3LatentInfo,
     "TuringUtilsH3KeyframeReference": H3KeyframeReference,
@@ -75,6 +78,8 @@ NODE_CLASS_MAPPINGS = {
     "_TuringUtilsH3UpscaleLoader": _H3UpscaleLoader,
     "TuringUtilsMiniMaxH3LatentUpscale": MiniMaxH3LatentUpscale,
     "_TuringUtilsH3UpscaleApply": _H3UpscaleApply,
+    "TuringUtilsMiniMaxH3KSampler": MiniMaxH3KSampler,
+    "_TuringUtilsH3KSamplerApply": _H3KSamplerApply,
     "TuringUtilsResizeImageIfPresent": ResizeImageIfPresent,
     "TuringUtilsVideoMotionContactSheet": VideoMotionContactSheet,
     "TuringUtilsMultimodalPromptChat": MultimodalPromptChat,
@@ -110,6 +115,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TuringUtilsLazyIfElse": "Lazy If / Else",
     "TuringUtilsStageBarrier": "Stage Barrier",
     "TuringUtilsStagePath": "Stage Path (Internal)",
+    "TuringUtilsSigmasToString": "Sigmas To String",
     "TuringUtilsH3AddNoise": "H3 Add Noise",
     "TuringUtilsH3LatentInfo": "H3 Latent Info",
     "TuringUtilsH3KeyframeReference": "H3 Keyframe Reference",
@@ -121,6 +127,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "_TuringUtilsH3UpscaleLoader": "H3 Upscale Loader (Internal)",
     "TuringUtilsMiniMaxH3LatentUpscale": "MiniMax H3 Latent Upscale",
     "_TuringUtilsH3UpscaleApply": "MiniMax H3 Latent Upscale Apply (Internal)",
+    "TuringUtilsMiniMaxH3KSampler": "MiniMax H3 KSampler",
+    "_TuringUtilsH3KSamplerApply": "MiniMax H3 KSampler Apply (Internal)",
     "TuringUtilsResizeImageIfPresent": "Resize Image If Present",
     "TuringUtilsVideoMotionContactSheet": "Video Motion Contact Sheet (Experimental)",
     "TuringUtilsMultimodalPromptChat": "Multimodal Prompt Chat",

@@ -26,7 +26,7 @@ def finalized(node, values):
 
 
 class NodeConfigurationTest(unittest.TestCase):
-    def test_only_chat_options_are_advanced_in_public_ordinary_nodes(self):
+    def test_only_explicitly_requested_nodes_have_advanced_inputs(self):
         from comfyui_turing_utils.registration import NODE_CLASS_MAPPINGS
         from comfyui_turing_utils.nodes.multimodal_chat import _chat_option_inputs
 
@@ -52,6 +52,17 @@ class NodeConfigurationTest(unittest.TestCase):
                     )
                     if metadata.get("advanced"):
                         found.add(key)
+                elif name == "TuringUtilsMiniMaxH3KSampler":
+                    self.assertEqual(
+                        bool(metadata.get("advanced")),
+                        key
+                        in {
+                            "mask_grow",
+                            "model_name",
+                            "precision",
+                        },
+                        key,
+                    )
                 else:
                     self.assertFalse(metadata.get("advanced"), (name, key))
         self.assertEqual(found, expected)
@@ -82,7 +93,7 @@ class NodeConfigurationTest(unittest.TestCase):
                 self.assertEqual(len(category.split("/")), 2, name)
                 self.assertTrue(category.startswith("Turing Utils/"), name)
                 categories.add(category.split("/")[1])
-        self.assertEqual((public, internal), (44, 13))
+        self.assertEqual((public, internal), (46, 14))
         self.assertEqual(
             categories,
             {

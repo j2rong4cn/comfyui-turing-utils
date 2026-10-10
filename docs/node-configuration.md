@@ -11,8 +11,16 @@ SeC positive_coords and negative_coords are optional socket-only STRING inputs,
 in that order immediately before bounding_box. Use native force_input rather
 than JavaScript widget hiding; their JSON point format is unchanged.
 
-Only Multimodal Prompt Chat's former Options parameters are advanced;
-system_prompt remains ordinary. web/chat_advanced.js opts Chat into the small
+Only Multimodal Prompt Chat's former Options parameters and the explicitly
+requested MiniMax H3 KSampler upscale/inpaint details are advanced;
+system_prompt and existing ordinary-node inputs remain ordinary.
+H3 KSampler uses native DynamicCombo branches: first_sigmas automatic/manual,
+second_sigmas preset/manual. Only automatic first sampling exposes steps,
+scheduler and denoise; only manual branches expose sigma text. Both curves
+finish independently at zero. Advanced fields are upscale.model_name,
+upscale.precision and inpaint.mask_grow. The seven fixed media inputs keep their
+order when switching modes. No Refiner or combined-step split is retained.
+web/chat_advanced.js opts these two nodes into the small
 enableAdvancedLayout helper in web/lib/advanced_layout.js. On classic frontend
 1.53.6, construction sets options.advanced but drawing reads widget.advanced;
 native layout also includes advanced widgets even while drawing omits them.
@@ -84,7 +92,8 @@ tests/browser/native_parameter_layout.mjs compares each ordinary public node
 against native registration of the same schema: order, widget/socket geometry,
 DynamicCombo modes, connections, resizing and serialized reloads. Crop and SeC
 also have dedicated link and disabled-editor tests. Chat checks the native
-advanced toggle. Run these on the classic canvas, not only Nodes 2.0.
+advanced toggle. The new H3 sampler has dedicated classic/Nodes 2.0 coverage in
+tests/browser/h3_sampler.mjs. Run layout checks on the classic canvas, not only Nodes 2.0.
 
 tests/browser/chat_advanced_layout.mjs additionally compares actual widget
 positions, allocated heights and free resize space with native hidden-widget

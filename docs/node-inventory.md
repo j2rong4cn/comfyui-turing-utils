@@ -1,6 +1,6 @@
 # Turing Utils 节点清单
 
-当前开发工作树有 **44 个公开节点、13 个隐藏内部执行节点**（不含按需注册的素材计算适配类）。
+当前开发工作树有 **46 个公开节点、14 个隐藏内部执行节点**（不含按需注册的素材计算适配类）。
 右键菜单只使用 `Turing Utils/分类` 一层子目录，搜索仍可按节点名定位。
 
 ## 完整公开清单
@@ -11,15 +11,17 @@
 | Prompt | 1 | Multimodal Prompt Chat |
 | Video | 13 | Video Frames Padding；Resize Image If Present；Video Motion Contact Sheet；Load Indexed Video Segment；Save Indexed Video Segment；Merge Indexed Video Segments；Video Prefix Context Noise；Video Continuation Concat；Trim Video Continuation Prefix；H3 Set Audio Prefix Noise Mask；Video Mask Guided Crop；Video Mask Guided Stitch；Video Pad For Outpaint |
 | Mask | 4 | Set Video Latent Noise Mask；Video Latent Composite Masked；Mask to Visual Prompts；SeC Track Visual Concept |
-| MiniMax H3 | 11 | H3 Add Noise；H3 Latent Info；H3 Keyframe Reference；H3 Image Reference；H3 Video Reference；H3 Audio Reference；H3 Semantic Reference；H3 Build Conditioning；MiniMax H3 Latent Upscale；MiniMax H3 Video VAE Encode；MiniMax H3 Video VAE Decode |
+| MiniMax H3 | 12 | H3 Add Noise；H3 Latent Info；H3 Keyframe Reference；H3 Image Reference；H3 Video Reference；H3 Audio Reference；H3 Semantic Reference；H3 Build Conditioning；MiniMax H3 KSampler；MiniMax H3 Latent Upscale；MiniMax H3 Video VAE Encode；MiniMax H3 Video VAE Decode |
 | Bernini | 2 | Bernini Context Windows；Bernini Inpaint Condition |
 | Krea2 | 1 | Krea2 Identity Edit Conditioning |
-| Workflow | 3 | Is Input Present；Lazy If / Else；Stage Barrier |
+| Workflow | 4 | Is Input Present；Lazy If / Else；Stage Barrier；Sigmas To String |
 | Materials | 6 | Text Material；Image Material；Video Material；Audio Material；Canvas Inputs；Canvas Outputs |
 
 H3 音频保护节点放在 Video，与延续拼接、截断工具相邻。
+Sigmas To String 将原生 SIGMAS 转为可复制的十进制 STRING，正向转换复用官方 ManualSigmas。
 Configure Attention Strategy 放在 Models；Sol/SLA/Veda 通过 DynamicCombo 选择，
-只显示相关参数，参数保持普通控件；只有 Chat 的原 Options 参数使用高级设置。
+只显示相关参数，参数保持普通控件；Chat 的原 Options 参数及新增 H3 KSampler
+的放大/mask 微调使用高级设置。两阶段曲线用原生 DynamicCombo 切换，仅显示当前模式参数。
 不引入全局配置、侧栏状态或额外模型缓存。
 
 ## 已删除的公开入口
@@ -37,10 +39,11 @@ Configure Attention Strategy 放在 Models；Sol/SLA/Veda 通过 DynamicCombo �
 
 ## 隐藏执行单元与共享模型
 
-普通工作流保留五个内部单元：Stage Path、SeC Loader/Apply、H3 Upscale Loader/Apply。
+普通工作流保留六个内部单元：Stage Path、SeC Loader/Apply、H3 Upscale Loader/Apply、H3 KSampler Apply。
 内部单元使用原生开发者模式标记隐藏；开启开发者模式后允许显示。
 显示名统一以 (Internal) 结尾，节点说明标注内部用途，公开入口保留原名。
-只有 Chat 的原 Options 参数为高级参数，其余普通节点完全使用原生参数布局，
+Chat 的原 Options 参数及新增 H3 KSampler 的放大/mask 微调为高级参数；
+其余普通节点完全使用原生参数布局，
 不再排序、修补输入接口或迁移旧工作流。SeC/Crop 接线后的控件行为交由 ComfyUI。
 H3 Keyframe Reference 固定三组输入/输出，Stage Barrier 固定八组输入/输出；
 未连接的位置保持为空，不再动态增减输出。
@@ -50,7 +53,7 @@ H3 Keyframe Reference 固定三组输入/输出，Stage Barrier 固定八组输�
 内部单元不是正常用户入口，仅按原生开发者模式规则显示。
 加载/应用使用新的私有 ID，旧加载入口不再注册。
 
-多个 SeC 或 Upscaler 应用节点若模型加载参数相同，提交时共享同一个加载节点，
+多个 SeC 或 Upscaler/H3 KSampler 应用节点若模型加载参数相同，提交时共享同一个加载节点，
 应用参数仍各自独立。模型使用 ComfyUI 正常缓存和卸载管理，不维护额外常驻权重副本。
 真实 PromptExecutor 测试覆盖多个应用共享一次加载、跨执行缓存复用、
 应用参数变化不重载、加载参数变化触发重载。

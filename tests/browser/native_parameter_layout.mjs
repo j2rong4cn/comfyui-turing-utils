@@ -77,6 +77,7 @@ try {
         !name.startsWith("TuringUtils") ||
         def.is_dev_only ||
         name === "TuringUtilsMultimodalPromptChat" ||
+        name === "TuringUtilsMiniMaxH3KSampler" ||
         name === "TuringUtilsStagePath"
       )
         continue;

@@ -74,6 +74,8 @@ class SharedLoaderTest(unittest.TestCase):
                 pass
 
         for app, (loader, worker, socket, defaults) in APPLICATIONS.items():
+            if app == "TuringUtilsMiniMaxH3KSampler":
+                continue  # Its lazy branch/executor contract is tested in test_minimax_sampler.
             for cache_type in (execution.CacheType.CLASSIC, execution.CacheType.NONE):
                 with self.subTest(app=app, cache=cache_type):
                     sentinel = object()

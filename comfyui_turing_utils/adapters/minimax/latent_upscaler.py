@@ -247,15 +247,6 @@ class H3LatentResizer3D(nn.Module):
     def get_dtype(self):
         return self.conv_in.weight.dtype
 
-    @staticmethod
-    def _run_blocks(blocks: nn.ModuleList, x: torch.Tensor, emb: torch.Tensor):
-        for block in blocks:
-            if isinstance(block, ResBlockEmb3D):
-                x = block(x, emb.expand(x.shape[0], -1))
-            else:
-                x = block(x)
-        return x
-
     def forward(
         self,
         latent: torch.Tensor,
@@ -265,9 +256,19 @@ class H3LatentResizer3D(nn.Module):
         x = (latent - self.latent_mean) / self.latent_std
         scale_emb = x.new_tensor([[float(scale) - 1.0]])
         emb = self.embed(scale_emb)
-        x = self._run_blocks(self.in_blocks, self.conv_in(x), emb)
-        x = F.interpolate(x, size=target_size, mode="trilinear", align_corners=False)
-        x = self._run_blocks(self.out_blocks, x, emb)
+        x = self.conv_in(x)
+        # Calling a whole stage with x keeps its entry feature alive in the
+        # caller. Iterate here so only the current block retains its residual.
+        for stage, blocks in enumerate((self.in_blocks, self.out_blocks)):
+            if stage == 1:
+                x = F.interpolate(
+                    x, size=target_size, mode="trilinear", align_corners=False
+                )
+            for block in blocks:
+                if isinstance(block, ResBlockEmb3D):
+                    x = block(x, emb.expand(x.shape[0], -1))
+                else:
+                    x = block(x)
         x = self.conv_out(F.silu(self.norm_out(x)))
         return x * self.latent_std + self.latent_mean
 
@@ -459,9 +460,12 @@ def estimate_upscale_memory(
         video.shape[0] * video.shape[2] * video.shape[3] * video.shape[4]
     )
     target_voxels = int(video.shape[0] * video.shape[2] * target_height * target_width)
-    # Two neighboring feature volumes plus cuDNN workspace and normalized input.
-    return max(source_voxels, target_voxels) * channels * element_size * 3 + (
-        video.numel() * element_size * 2
+    feature_bytes = max(source_voxels, target_voxels) * channels * element_size
+    # Residual input and affine-normalization temporaries can coexist. cuDNN's
+    # workspace depends on its selected algorithm; this remains a budget estimate.
+    workspace_bytes = max(64 * 1024**2, feature_bytes * 5)
+    return feature_bytes * 4 + workspace_bytes + (
+        (source_voxels + target_voxels) * int(video.shape[1]) * element_size * 2
     )
 
 
@@ -548,20 +552,23 @@ def _upscale_tensors(
     groups = {}
     for tensor in tensors:
         groups.setdefault(tuple(tensor.shape[1:]), []).append(tensor)
+    device = upscale_model.load_device
+    output_device = comfy.model_management.intermediate_device()
     memory_required = max(
         sum(
             estimate_upscale_memory(
-                tensor,
-                target_height,
-                target_width,
-                channels,
-                dtype,
+                tensor, target_height, target_width, channels, dtype
             )
             for tensor in group
         )
         for group in groups.values()
     )
-    device = upscale_model.load_device
+    if output_device == device:
+        memory_required += sum(
+            int(tensor.shape[0] * tensor.shape[1] * tensor.shape[2])
+            * target_height * target_width * tensor.element_size()
+            for tensor in tensors
+        )
 
     def execute():
         comfy.model_management.load_models_gpu(
@@ -569,24 +576,38 @@ def _upscale_tensors(
             memory_required=memory_required,
             force_full_load=True,
         )
-        output_device = comfy.model_management.intermediate_device()
         outputs = {}
         for group in groups.values():
-            batch_sizes = [int(tensor.shape[0]) for tensor in group]
-            source = torch.cat(
-                [tensor.to(device=device, dtype=dtype) for tensor in group],
-                dim=0,
-            )
+            if len(group) == 1:
+                source = group[0].to(
+                    device=device, dtype=dtype, memory_format=torch.contiguous_format
+                ).contiguous()
+            else:
+                batch_sizes = [int(tensor.shape[0]) for tensor in group]
+                source = torch.empty(
+                    (sum(batch_sizes), *group[0].shape[1:]), device=device, dtype=dtype
+                )
+                offset = 0
+                for tensor, batch_size in zip(group, batch_sizes):
+                    source.narrow(0, offset, batch_size).copy_(tensor)
+                    offset += batch_size
             result = model(
                 source,
                 float(scale),
                 (int(source.shape[2]), target_height, target_width),
             )
-            for tensor, upscaled in zip(group, result.split(batch_sizes, dim=0)):
-                outputs[id(tensor)] = upscaled.to(
-                    device=output_device,
-                    dtype=tensor.dtype,
+            if len(group) == 1:
+                tensor = group[0]
+                outputs[id(tensor)] = result.to(
+                    device=output_device, dtype=tensor.dtype
                 )
+            else:
+                for tensor, upscaled in zip(group, result.split(batch_sizes, dim=0)):
+                    outputs[id(tensor)] = upscaled.to(
+                        device=output_device, dtype=tensor.dtype, copy=True
+                    )
+                del upscaled
+            del source, result
         return outputs
 
     return WORKFLOW_TIMELINE.call("latent_upscale", device, execute)
@@ -622,6 +643,22 @@ def _resize_video_mask(mask: torch.Tensor, target_height: int, target_width: int
         source.reshape(-1, 1, *source.shape[-2:]), (target_height, target_width)
     ).reshape(*mask.shape[:-2], target_height, target_width)
     return resized.to(original_dtype)
+
+
+def upscale_h3_video_to_size(upscale_model, video, target_height, target_width):
+    """Resize a clean video to an exact latent canvas; never alter guide conditioning."""
+    _validate_video(video)
+    if (target_height, target_width) == tuple(video.shape[-2:]):
+        return video
+    if target_height < 1 or target_width < 1:
+        raise ValueError("Target latent height and width must be positive.")
+    # The learned resizer takes a linear multiplier even when H/W differ.
+    linear_scale = math.sqrt(
+        (target_height * target_width) / (video.shape[-2] * video.shape[-1])
+    )
+    return _upscale_tensors(
+        upscale_model, [video], linear_scale, target_height, target_width
+    )[id(video)]
 
 
 def upscale_h3_latent(upscale_model, latent, conditioning, scale: float):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -21,7 +22,9 @@ import comfy.nested_tensor  # noqa: E402
 from comfyui_turing_utils.adapters.minimax.latent_upscaler import (  # noqa: E402
     H3LatentResizer3D,
     _resize_video_mask,
+    _upscale_tensors,
     detect_h3_latent_upscaler_architecture,
+    estimate_upscale_memory,
     load_h3_latent_upscaler,
 )
 from comfyui_turing_utils.nodes.latent import (
@@ -40,9 +43,13 @@ class _FakeUpscaler(nn.Module):
         super().__init__()
         self.conv_in = SimpleNamespace(out_channels=32)
         self.calls = []
+        self.input_data_ptrs = []
+        self.input_contiguous = []
 
     def forward(self, latent, scale, target_size):
         self.calls.append((tuple(latent.shape), float(scale), tuple(target_size)))
+        self.input_data_ptrs.append(latent.data_ptr())
+        self.input_contiguous.append(latent.is_contiguous())
         return F.interpolate(
             latent, size=target_size, mode="trilinear", align_corners=False
         )
@@ -316,6 +323,131 @@ class MiniMaxH3LatentUpscaleTest(unittest.TestCase):
         self.assertEqual((width, height), (128, 96))
         self.assertEqual(len(patcher.model.calls), 1)
         load_models_gpu.assert_called_once()
+
+    @mock.patch("comfy.model_management.load_models_gpu")
+    def test_single_input_reuses_contiguous_storage(self, _load_models_gpu):
+        patcher = _FakePatcher()
+        video = torch.randn(1, 24, 3, 4, 6)
+        with mock.patch("torch.cat", wraps=torch.cat) as concatenate:
+            outputs = _upscale_tensors(patcher, [video], 1.5, 6, 10)
+        concatenate.assert_not_called()
+        self.assertEqual(patcher.model.input_data_ptrs, [video.data_ptr()])
+        torch.testing.assert_close(
+            outputs[id(video)],
+            F.interpolate(video, size=(3, 6, 10), mode="trilinear", align_corners=False),
+            rtol=0, atol=0,
+        )
+
+    @mock.patch("comfy.model_management.load_models_gpu")
+    def test_noncontiguous_input_uses_contiguous_storage_without_mutating_source(
+        self, _load_models_gpu
+    ):
+        patcher = _FakePatcher()
+        video = torch.randn(1, 24, 3, 6, 4).transpose(-1, -2)
+        original = video.clone()
+        outputs = _upscale_tensors(patcher, [video], 1.5, 6, 10)
+        self.assertEqual(patcher.model.input_contiguous, [True])
+        self.assertNotEqual(patcher.model.input_data_ptrs[0], video.data_ptr())
+        torch.testing.assert_close(video, original, rtol=0, atol=0)
+        torch.testing.assert_close(
+            outputs[id(video)],
+            F.interpolate(video, size=(3, 6, 10), mode="trilinear", align_corners=False),
+            rtol=0, atol=0,
+        )
+
+    @mock.patch("comfy.model_management.load_models_gpu")
+    def test_batched_inputs_preserve_order_dtype_and_own_output_storage(self, _load_models_gpu):
+        patcher = _FakePatcher()
+        first = torch.randn(1, 24, 1, 4, 6, dtype=torch.float16)
+        last = torch.randn(2, 24, 1, 4, 6)
+        with mock.patch("torch.cat", wraps=torch.cat) as concatenate:
+            outputs = _upscale_tensors(patcher, [first, last], 1.5, 6, 10)
+        concatenate.assert_not_called()
+        self.assertEqual(patcher.model.calls[0][0], (3, 24, 1, 4, 6))
+        for tensor in (first, last):
+            output = outputs[id(tensor)]
+            expected = F.interpolate(
+                tensor.float(), size=(1, 6, 10), mode="trilinear", align_corners=False
+            ).to(tensor.dtype)
+            self.assertEqual(output.dtype, tensor.dtype)
+            self.assertEqual(
+                output.untyped_storage().nbytes(), output.numel() * output.element_size()
+            )
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    @mock.patch("comfy.model_management.load_models_gpu")
+    def test_completed_group_is_released_before_next_forward(self, _load_models_gpu):
+        patcher = _FakePatcher()
+        references = []
+        original_forward = patcher.model.forward
+
+        def forward(source, scale, target_size):
+            if references:
+                self.assertIsNone(references[-1]())
+            result = original_forward(source, scale, target_size)
+            references.append(weakref.ref(result))
+            return result
+
+        first = torch.randn(1, 24, 3, 4, 6, dtype=torch.float16)
+        last = torch.randn(1, 24, 1, 4, 6, dtype=torch.float16)
+        with mock.patch.object(patcher.model, "forward", side_effect=forward):
+            outputs = _upscale_tensors(patcher, [first, last], 1.5, 6, 10)
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(all(reference() is None for reference in references))
+
+    def test_memory_budget_covers_residual_temporaries_and_workspace(self):
+        video = torch.empty(2, 24, 95, 30, 54, device="meta")
+        feature_bytes = 2 * 95 * 48 * 86 * 512 * 2
+        budget = estimate_upscale_memory(video, 48, 86, 512, torch.float16)
+        self.assertGreaterEqual(budget, feature_bytes * 9)
+        self.assertLess(
+            budget,
+            estimate_upscale_memory(video, 48, 86, 512, torch.float32),
+        )
+
+    @mock.patch("comfy.model_management.load_models_gpu")
+    def test_gpu_only_budget_accounts_for_retained_outputs(self, load_models_gpu):
+        patcher = _FakePatcher()
+        video = torch.randn(1, 24, 3, 4, 6)
+        first = torch.randn(1, 24, 1, 4, 6)
+        last = torch.randn_like(first)
+        tensors = [video, first, last]
+        with mock.patch(
+            "comfy.model_management.intermediate_device", return_value=patcher.load_device
+        ):
+            _upscale_tensors(patcher, tensors, 1.5, 6, 10)
+        working_budget = max(
+            estimate_upscale_memory(video, 6, 10, 32, torch.float32),
+            estimate_upscale_memory(first, 6, 10, 32, torch.float32) * 2,
+        )
+        output_bytes = sum(
+            tensor.shape[0] * tensor.shape[2] * 24 * 6 * 10 * tensor.element_size()
+            for tensor in tensors
+        )
+        self.assertEqual(
+            load_models_gpu.call_args.kwargs["memory_required"],
+            working_budget + output_bytes,
+        )
+
+    def test_output_stage_releases_its_entry_feature_after_first_block(self):
+        model = self._tiny_model()
+        entry = []
+
+        def capture_entry(_module, inputs):
+            entry.append(weakref.ref(inputs[0]))
+
+        def check_released(_module, _inputs):
+            self.assertIsNone(entry[0]())
+
+        capture = model.out_blocks[0].register_forward_pre_hook(capture_entry)
+        check = model.out_blocks[1].register_forward_pre_hook(check_released)
+        try:
+            with torch.inference_mode():
+                output = model(torch.randn(1, 24, 2, 4, 6), 1.5, (2, 6, 10))
+        finally:
+            capture.remove()
+            check.remove()
+        self.assertEqual(tuple(output.shape), (1, 24, 2, 6, 10))
 
     def test_detected_3d_architecture_round_trips_numerically(self):
         torch.manual_seed(1)

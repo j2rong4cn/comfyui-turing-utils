@@ -25,7 +25,10 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
     )
     actual = {}
     with patch("folder_paths.get_filename_list", return_value=["contract.safetensors"]):
-        for name, node in NODE_CLASS_MAPPINGS.items():
+        # The pre-refactor snapshot freezes existing workflows, not additions.
+        assert expected.keys() <= NODE_CLASS_MAPPINGS.keys()
+        for name in expected:
+            node = NODE_CLASS_MAPPINGS[name]
             actual[name] = normalize(
                 {
                     "inputs": node.INPUT_TYPES(),

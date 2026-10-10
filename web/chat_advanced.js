@@ -4,7 +4,12 @@ import { enableAdvancedLayout } from "./lib/advanced_layout.js";
 app.registerExtension({
   name: "TuringUtils.ChatAdvanced",
   nodeCreated(node) {
-    if (node.comfyClass !== "TuringUtilsMultimodalPromptChat") return;
+    if (
+      !["TuringUtilsMultimodalPromptChat", "TuringUtilsMiniMaxH3KSampler"].includes(
+        node.comfyClass,
+      )
+    )
+      return;
     enableAdvancedLayout(node);
   },
 });

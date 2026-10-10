@@ -78,6 +78,22 @@ def _map_video_mask(video, mask, model_type, *, hard=False):
     return mask.unsqueeze(1).expand(batch, 1, latent_frames, height, width).clone()
 
 
+def binary_video_latent_mask(video, mask):
+    """Validate latent-space coverage and union channels without losing tiny positives."""
+    if not isinstance(mask, torch.Tensor) or mask.is_nested or mask.ndim != 5:
+        raise ValueError("Video noise_mask must be standalone [B,1 or C,T,H,W].")
+    _validate_mask_values(mask)
+    if (
+        mask.shape[0] not in (1, video.shape[0])
+        or mask.shape[1] not in (1, video.shape[1])
+        or mask.shape[2:] != video.shape[2:]
+    ):
+        raise ValueError(
+            "Video noise_mask must match latent T/H/W, with batch 1 or B and channels 1 or C."
+        )
+    return (mask.amax(dim=1, keepdim=True) > 0).to(video.device)
+
+
 def composite_video_latents(
     original_latent, replacement_latent, type="minimax", mask=None
 ):
@@ -95,24 +111,7 @@ def composite_video_latents(
     coverage = None
     inherited = replacement_latent.get("noise_mask")
     if inherited is not None:
-        if (
-            not isinstance(inherited, torch.Tensor)
-            or getattr(inherited, "is_nested", False)
-            or inherited.ndim != 5
-        ):
-            raise ValueError(
-                "replacement_latent noise_mask must be standalone [B,1 or C,T,H,W]. Use Set Video Latent Noise Mask first."
-            )
-        _validate_mask_values(inherited)
-        if (
-            inherited.shape[0] not in (1, batch)
-            or inherited.shape[1] not in (1, channels)
-            or inherited.shape[2:] != original.shape[2:]
-        ):
-            raise ValueError(
-                "Inherited noise_mask must match replacement_latent T/H/W, with batch 1 or B and channels 1 or C."
-            )
-        coverage = (inherited.amax(dim=1, keepdim=True) > 0).to(original.device)
+        coverage = binary_video_latent_mask(original, inherited)
     if mask is not None:
         additional = _map_video_mask(original, mask, type, hard=True).to(
             device=original.device, dtype=torch.bool
