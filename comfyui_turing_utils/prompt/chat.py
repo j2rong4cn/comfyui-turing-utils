@@ -337,11 +337,12 @@ def build_chat_request(
     )
     if options.temperature >= 0.0:
         body["temperature"] = options.temperature
-    if options.disable_thinking:
-        template_options = body.get("chat_template_kwargs", {})
-        if not isinstance(template_options, dict):
-            raise ValueError("extra_body_json.chat_template_kwargs must be an object")
-        body["chat_template_kwargs"] = dict(template_options, enable_thinking=False)
+    template_options = body.get("chat_template_kwargs", {})
+    if not isinstance(template_options, dict):
+        raise ValueError("extra_body_json.chat_template_kwargs must be an object")
+    body["chat_template_kwargs"] = dict(
+        template_options, enable_thinking=not options.disable_thinking
+    )
     return body
 
 

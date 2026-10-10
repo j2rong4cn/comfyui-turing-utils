@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import sys
@@ -38,7 +39,8 @@ class MultimodalPromptChatTest(unittest.TestCase):
             ["prompt", "system_prompt", "base_url", "model", "api_key"],
         )
         inputs = {item.id: item for item in schema.inputs}
-        self.assertEqual(schema.inputs[5].id, "cache_buster")
+        self.assertEqual(schema.inputs[5].id, "thinking")
+        self.assertEqual(schema.inputs[6].id, "cache_buster")
         self.assertEqual(inputs["cache_buster"].default, 0)
         self.assertTrue(inputs["cache_buster"].control_after_generate)
         self.assertEqual(inputs["first_frame"].io_type, "IMAGE")
@@ -50,8 +52,8 @@ class MultimodalPromptChatTest(unittest.TestCase):
         self.assertTrue(inputs["images"].optional)
         self.assertTrue(inputs["videos"].optional)
         self.assertNotIn("options", inputs)
-        self.assertTrue(inputs["disable_thinking"].advanced)
-        self.assertTrue(inputs["disable_thinking"].optional)
+        self.assertNotIn("disable_thinking", inputs)
+        self.assertFalse(inputs["thinking"].advanced)
         self.assertFalse(inputs["system_prompt"].advanced)
         self.assertTrue(all(item.optional for item in schema.inputs[11:]))
 
@@ -68,7 +70,7 @@ class MultimodalPromptChatTest(unittest.TestCase):
 
     def test_inline_options_preserve_defaults(self):
         inputs = {item.id: item for item in MultimodalPromptChat.define_schema().inputs}
-        self.assertTrue(inputs["disable_thinking"].default)
+        self.assertFalse(inputs["thinking"].default)
         self.assertEqual(inputs["max_output_tokens"].default, 8192)
         self.assertEqual(build_chat_options(), DEFAULT_CHAT_OPTIONS)
 
@@ -122,6 +124,33 @@ class MultimodalPromptChatTest(unittest.TestCase):
             request["chat_template_kwargs"],
             {"custom": 1, "enable_thinking": False},
         )
+
+    def test_thinking_request_explicitly_enables_or_disables_the_extension(self):
+        for enabled in (False, True):
+            with self.subTest(thinking=enabled):
+                body = build_chat_request(
+                    "model",
+                    "system",
+                    "user",
+                    ChatOptions(
+                        disable_thinking=not enabled,
+                        extra_body_json='{"chat_template_kwargs":{"custom":1,"enable_thinking":"override"}}',
+                    ),
+                )
+                self.assertEqual(
+                    body["chat_template_kwargs"],
+                    {"custom": 1, "enable_thinking": enabled},
+                )
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            build_chat_request(
+                "model",
+                "system",
+                "user",
+                ChatOptions(
+                    disable_thinking=False,
+                    extra_body_json='{"chat_template_kwargs":false}',
+                ),
+            )
 
     def test_extra_body_cannot_replace_core_request_fields(self):
         with self.assertRaisesRegex(ValueError, "must not override"):
@@ -234,6 +263,39 @@ class MultimodalPromptChatTest(unittest.TestCase):
 
 
 class MultimodalPromptChatExecutionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_thinking_switch_and_legacy_api_keep_their_semantics(self):
+        for settings, enabled in (
+            ({}, False),
+            ({"thinking": False}, False),
+            ({"thinking": True}, True),
+            ({"disable_thinking": True}, False),
+            ({"disable_thinking": False}, True),
+            ({"thinking": False, "disable_thinking": False}, False),
+            ({"thinking": True, "disable_thinking": True}, True),
+        ):
+            with (
+                self.subTest(settings=settings),
+                patch(
+                    "comfyui_turing_utils.nodes.multimodal_chat.request_chat_completion",
+                    return_value={"choices": [{"message": {"content": "response"}}]},
+                ) as request,
+            ):
+                result = await MultimodalPromptChat.execute(
+                    "user",
+                    "system",
+                    "http://localhost:9200",
+                    "test-model",
+                    "",
+                    **settings,
+                )
+                self.assertEqual(
+                    request.call_args.args[2]["chat_template_kwargs"]["enable_thinking"],
+                    enabled,
+                )
+                metadata = json.loads(result.result[1])
+                self.assertEqual(metadata["thinking"], enabled)
+                self.assertEqual(metadata["thinking_disabled"], not enabled)
+
     async def test_inline_options(self):
         with patch(
             "comfyui_turing_utils.nodes.multimodal_chat.request_chat_completion",

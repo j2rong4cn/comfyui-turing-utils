@@ -22,11 +22,6 @@ from ..prompt.chat import (
 
 def _chat_option_inputs():
     return [
-        io.Boolean.Input(
-            "disable_thinking",
-            default=DEFAULT_CHAT_OPTIONS.disable_thinking,
-            tooltip="Send chat_template_kwargs.enable_thinking=false. Disable this option if the server rejects that extension.",
-        ),
         io.Float.Input(
             "temperature",
             default=DEFAULT_CHAT_OPTIONS.temperature,
@@ -181,6 +176,11 @@ class MultimodalPromptChat(io.ComfyNode):
                     default="",
                     tooltip="Literal key, $NAME, or ${NAME}. Empty sends the placeholder key 'not-needed'. Literal keys are stored in the workflow.",
                 ),
+                io.Boolean.Input(
+                    "thinking",
+                    default=False,
+                    tooltip="Send chat_template_kwargs.enable_thinking with this value. Requires a server that supports this extension.",
+                ),
                 io.Int.Input(
                     "cache_buster",
                     default=0,
@@ -246,6 +246,7 @@ class MultimodalPromptChat(io.ComfyNode):
         last_frame=None,
         images=None,
         videos=None,
+        thinking: bool | None = None,
         **chat_settings,
     ) -> io.NodeOutput:
         if not prompt.strip() and not system_prompt.strip():
@@ -254,6 +255,13 @@ class MultimodalPromptChat(io.ComfyNode):
         if not model:
             raise ValueError("model must not be empty")
         chat_settings = dict(chat_settings)
+        # Old direct API callers may still use the inverse name. The new switch wins.
+        legacy_disabled = chat_settings.pop(
+            "disable_thinking", DEFAULT_CHAT_OPTIONS.disable_thinking
+        )
+        chat_settings["disable_thinking"] = (
+            legacy_disabled if thinking is None else not thinking
+        )
         image_format = chat_settings.get("image_format")
         if isinstance(image_format, dict):
             encoding = image_format["image_format"]
@@ -298,6 +306,7 @@ class MultimodalPromptChat(io.ComfyNode):
             "finish_reason": choice.get("finish_reason"),
             "usage": response.get("usage", {}),
             "media": media,
+            "thinking": not options.disable_thinking,
             "thinking_disabled": options.disable_thinking,
             "cache_buster": int(cache_buster),
             "elapsed_seconds": round(time.monotonic() - started, 3),

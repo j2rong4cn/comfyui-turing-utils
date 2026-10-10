@@ -32,6 +32,15 @@ try {
     app.graph.add(chat);
     app.graph.add(reference);
     await tick();
+    const names = chat.widgets.map((w) => w.name);
+    const thinking = chat.widgets.find((w) => w.name === "thinking");
+    check(thinking?.value === false, "Thinking must default to false");
+    check(
+      names.indexOf("thinking") === names.indexOf("api_key") + 1 &&
+        names.indexOf("cache_buster") === names.indexOf("thinking") + 1,
+      "Thinking must be between api_key and cache_buster",
+    );
+    check(!names.includes("disable_thinking"), "Legacy switch remains visible");
     const wrapped = chat.getLayoutWidgets;
     enableAdvancedLayout(chat);
     check(
@@ -58,6 +67,10 @@ try {
       }
       const a = chat.getLayoutWidgets(),
         b = reference.getLayoutWidgets();
+      check(
+        a.some((w) => w.name === "thinking" && !w.advanced),
+        "Thinking was folded with advanced settings",
+      );
       check(
         JSON.stringify(a.map((w) => w.name)) === JSON.stringify(b.map((w) => w.name)),
         "Hidden advanced controls still reserve layout space",
@@ -108,7 +121,85 @@ try {
       await tick();
       for (const shown of [false, true, false]) await audit(shown, 640, 1000);
     }
-    return { cases, classic: true, nativeLayoutReference: true, reload: true };
+    let migrated = 0;
+    for (const enabled of [false, true]) {
+      for (const format of ["png", "jpeg"]) {
+        const values = {
+          prompt: "Migration test",
+          system_prompt: "Keep this system prompt",
+          base_url: "http://localhost:9200",
+          model: "test-model",
+          api_key: "",
+          thinking: enabled,
+          cache_buster: 37,
+          control_after_generate: "fixed",
+          temperature: 0.35,
+          max_output_tokens: 2048,
+          image_detail: "high",
+          image_format: format,
+          video_max_frames: 9,
+        };
+        for (const [name, value] of Object.entries(values)) {
+          const w = chat.widgets.find((w) => w.name === name);
+          check(w, "Missing test widget " + name);
+          w.value = value;
+          w.callback?.(value);
+        }
+        const saved = app.graph.serialize();
+        const old = saved.nodes.find((n) => String(n.id) === String(id));
+        check(old, "Missing serialized chat node");
+        const current = old.widgets_values;
+        check(typeof current[5] === "boolean", "Unexpected native widget order");
+        old.widgets_values = [
+          ...current.slice(0, 5),
+          current[6],
+          current[7],
+          !current[5],
+          ...current.slice(8),
+        ];
+        const snapshot = JSON.stringify(old.widgets_values);
+        await app.loadGraphData(saved);
+        chat = app.graph.getNodeById(id);
+        reference = app.graph.getNodeById(refId);
+        await tick();
+        check(
+          JSON.stringify(old.widgets_values) === snapshot,
+          "Migration mutated source data",
+        );
+        for (const [name, value] of Object.entries(values))
+          check(
+            chat.widgets.find((w) => w.name === name)?.value === value,
+            "Migration changed " + name,
+          );
+        const prompt = (await app.graphToPrompt()).output[String(id)].inputs;
+        check(
+          prompt.thinking === enabled && prompt.cache_buster === 37,
+          "Migration compiled the wrong thinking/cache value",
+        );
+        check(
+          !("disable_thinking" in prompt),
+          "Legacy switch leaked into new API input",
+        );
+        await audit(false, 480, 1100);
+        const upgraded = app.graph.serialize();
+        await app.loadGraphData(upgraded);
+        chat = app.graph.getNodeById(id);
+        reference = app.graph.getNodeById(refId);
+        await tick();
+        check(
+          chat.widgets.find((w) => w.name === "thinking").value === enabled,
+          "Upgraded workflow was inverted twice",
+        );
+        migrated++;
+      }
+    }
+    return {
+      cases,
+      classic: true,
+      nativeLayoutReference: true,
+      reload: true,
+      migrated,
+    };
   });
   assert.ok(result.cases >= 14);
   console.log("Chat folded layout:", result);
