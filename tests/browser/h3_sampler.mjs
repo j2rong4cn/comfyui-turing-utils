@@ -62,9 +62,9 @@ try {
     check(!node.widgets.some((widget) => widget.options?.advanced || widget.advanced),
       "H3 must not have advanced parameters");
     const labels = {
-      conditioning_second: "upscaled condition",
-      latent_second: "upscaled latent",
-      second_sigmas: "upscaled sigmas",
+      conditioning_second: "upscale condition",
+      latent_second: "upscale latent",
+      second_sigmas: "upscale sigmas",
       model_name: "upscaler model",
       mask_grow: "mask grow",
     };
@@ -266,8 +266,8 @@ try {
     await tick();
     if (node.widgets.some((widget) => widget.options?.advanced || widget.advanced))
       throw Error("Nodes 2.0 still has advanced H3 parameters");
-    if (node.widgets.find((widget) => widget.name === "second_sigmas").label !== "upscaled sigmas")
-      throw Error("Nodes 2.0 has the wrong upscaled selector label");
+    if (node.widgets.find((widget) => widget.name === "second_sigmas").label !== "upscale sigmas")
+      throw Error("Nodes 2.0 has the wrong upscale selector label");
     node.widgets.find((w) => w.name === "sigmas.values").value = "1, .5, .05, 0";
     node.widgets.find((w) => w.name === "second_sigmas.sigmas").value = ".3, .05, 0";
     const order = node.inputs.map((input) => input.name);

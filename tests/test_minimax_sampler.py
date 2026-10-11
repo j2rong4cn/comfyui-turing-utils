@@ -247,7 +247,7 @@ class H3SamplerTest(unittest.TestCase):
         self.assertEqual(result["samples"].shape, (1, 24, 2, 7, 11))
 
     def test_reused_keyframes_fail_before_first_dit_call(self):
-        with self.assertRaisesRegex(ValueError, "Connect matching upscaled condition"):
+        with self.assertRaisesRegex(ValueError, "Connect matching upscale condition"):
             sampling.sample_h3(
                 self.model,
                 conditioning(4, 6),
@@ -1082,9 +1082,9 @@ class H3SamplerLoaderTest(unittest.TestCase):
         )
         self.assertTrue(all(not item.advanced for item in schema.inputs))
         for field, label in {
-            "conditioning_second": "upscaled condition",
-            "latent_second": "upscaled latent",
-            "second_sigmas": "upscaled sigmas",
+            "conditioning_second": "upscale condition",
+            "latent_second": "upscale latent",
+            "second_sigmas": "upscale sigmas",
             "model_name": "upscaler model",
             "mask_grow": "mask grow",
         }.items():

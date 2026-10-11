@@ -14,7 +14,7 @@ than JavaScript widget hiding; their JSON point format is unchanged.
 Only Multimodal Prompt Chat's former Options parameters are advanced;
 system_prompt and existing ordinary-node inputs remain ordinary.
 H3 KSampler uses native DynamicCombo branches: sigmas preset/scheduler/manual
-(default: preset 4+1), upscaled sigmas preset/manual (default: 3 steps).
+(default: preset 4+1), upscale sigmas preset/manual (default: 3 steps).
 Preset names describe base steps plus supplemental points within a complete
 first curve; they are not an upscale split. Only scheduler mode exposes steps,
 scheduler and denoise; only manual branches expose sigma text. Manual defaults
@@ -22,7 +22,7 @@ are the 4+1 first curve and the 3-step second curve. Both curves
 finish independently at zero. The upscaler model and mask grow are ordinary
 inputs; upscaler precision is fixed to auto, without a precision control.
 H3 has no advanced, negative or CFG inputs. Upscale sockets are displayed as
-upscaled condition and upscaled latent; their saved IDs remain unchanged.
+upscale condition and upscale latent; their saved IDs remain unchanged.
 The five fixed model/condition/latent inputs keep their
 order when switching modes. No Refiner or combined-step split is retained.
 web/chat_advanced.js opts only Multimodal Prompt Chat into the small

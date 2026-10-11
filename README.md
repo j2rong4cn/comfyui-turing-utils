@@ -413,7 +413,7 @@ original loading functions; callers bypassing the prompt server must invoke
   reference meaning and ordering are controlled by the workflow.
 - `MiniMax H3 KSampler` combines native KSampler controls, explicit sigma curves,
   and an optional learned spatial-upscale second pass. Connect
-  `model`, `conditioning`, and `latent`; without `upscaled latent` it is single-pass.
+  `model`, `conditioning`, and `latent`; without `upscale latent` it is single-pass.
   Scheduler mode uses the same schedule, noise, sampler and denoise semantics
   as native KSampler at CFG=1. H3 uses one condition per stage; no negative or CFG
   controls are exposed. Existing LoRA, shift and attention patches on MODEL
@@ -432,7 +432,7 @@ original loading functions; callers bypassing the prompt server must invoke
 
     These names describe base steps plus supplemental points within one full
     first-pass curve, not an upscale split. No extra points are inserted.
-    `upscaled sigmas`
+    `upscale sigmas`
     selects **preset** (default) or **manual**, never a split of a combined schedule.
     Both passes finish at zero. Shared seed/sampler apply to both passes.
     Manual curves are FP32, accept commas/whitespace/newlines/scientific notation,
@@ -449,10 +449,10 @@ original loading functions; callers bypassing the prompt server must invoke
     Switch to manual to change the curve. Use `Sigmas To String` with core
     `Preview Any` to copy a native scheduler curve into either text field; core
     `ManualSigmas` converts the exported plain-decimal string back to SIGMAS.
-  - Connecting `upscaled latent` enables second sampling. Its exact latent H/W
+  - Connecting `upscale latent` enables second sampling. Its exact latent H/W
     define the output canvas, while time, batch and audio come from the first
     latent. Its samples/mask/audio are otherwise ignored unless the first video
-    mask protects some pixels. `upscaled condition` defaults to conditioning;
+    mask protects some pixels. `upscale condition` defaults to conditioning;
     mismatching FL2VA keyframes require an explicit matching second condition.
     Ref2VA reference images/videos may have their own size. Both stages' guide
     time indexes are checked against the **first** latent before sampling.
@@ -498,7 +498,7 @@ original loading functions; callers bypassing the prompt server must invoke
   - There is one final LATENT output, no cached first-pass output. All parameters,
     including the upscaler model and `mask grow`, are ordinary inputs on the
     classic canvas and Nodes 2.0; there are no advanced parameters. Upscale
-    inputs are named `upscaled condition`, `upscaled latent` and `upscaled sigmas`
+    inputs are named `upscale condition`, `upscale latent` and `upscale sigmas`
     in the UI, retaining their saved IDs for workflow links and serialization.
 - `MiniMax H3 Latent Upscale` includes model/precision selection and loads the attention-free 3D learned latent
   upscaler through ComfyUI's normal offload lifecycle. Place compatible weights

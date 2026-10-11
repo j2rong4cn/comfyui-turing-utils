@@ -43,14 +43,14 @@ class _H3KSamplerApply(io.ComfyNode):
                 io.Latent.Input("latent"),
                 io.Conditioning.Input(
                     "conditioning_second",
-                    display_name="upscaled condition",
+                    display_name="upscale condition",
                     optional=True,
                     lazy=True,
                     tooltip="Optional high-resolution condition. Empty reuses conditioning; keyframes must match second-pass H/W and first-pass time.",
                 ),
                 io.Latent.Input(
                     "latent_second",
-                    display_name="upscaled latent",
+                    display_name="upscale latent",
                     optional=True,
                     tooltip="Connect to enable second sampling. Supplies exact output H/W, and the protected high-resolution base for masked inpainting. Its own mask/audio are ignored.",
                 ),
@@ -111,7 +111,7 @@ class _H3KSamplerApply(io.ComfyNode):
                 ),
                 io.DynamicCombo.Input(
                     "second_sigmas",
-                    display_name="upscaled sigmas",
+                    display_name="upscale sigmas",
                     options=[
                         io.DynamicCombo.Option(
                             "preset",
@@ -128,7 +128,7 @@ class _H3KSamplerApply(io.ComfyNode):
                             [
                                 io.String.Input(
                                     "sigmas",
-                                    display_name="upscaled sigmas",
+                                    display_name="upscale sigmas",
                                     default=SECOND_PASS_PRESETS[0][1],
                                     multiline=True,
                                     tooltip="Complete second-pass curve, ending at zero. Its first sigma controls native re-noising after upscale.",
@@ -136,7 +136,7 @@ class _H3KSamplerApply(io.ComfyNode):
                             ],
                         ),
                     ],
-                    tooltip="Used only when upscaled latent is connected. Actual steps are the number of intervals in the selected curve.",
+                    tooltip="Used only when upscale latent is connected. Actual steps are the number of intervals in the selected curve.",
                 ),
                 H3LatentUpscaleModel.Input("upscale_model", optional=True, lazy=True),
                 io.Int.Input(

@@ -109,7 +109,7 @@ def second_pass_sigmas(settings):
     mode = settings.get("second_sigmas", "preset")
     if mode == "manual":
         return parse_sigmas(
-            settings.get("sigmas", SECOND_PASS_PRESETS[0][1]), "upscaled sigmas"
+            settings.get("sigmas", SECOND_PASS_PRESETS[0][1]), "upscale sigmas"
         )
     if mode != "preset":
         raise ValueError(f"Unknown second sigma mode: {mode!r}.")
@@ -117,7 +117,7 @@ def second_pass_sigmas(settings):
     curves = dict(SECOND_PASS_PRESETS)
     if preset not in curves:
         raise ValueError(f"Unknown second-pass sigma preset: {preset!r}.")
-    return parse_sigmas(curves[preset], "upscaled sigmas preset")
+    return parse_sigmas(curves[preset], "upscale sigmas preset")
 
 
 def close_patch_mask(mask, patch_size, grow=0):
@@ -231,7 +231,7 @@ def _validate_conditioning(conditioning, video, audio, label):
                 if tuple(guide.shape[-2:]) != tuple(video.shape[-2:]):
                     raise ValueError(
                         f"{label} keyframe H/W {tuple(guide.shape[-2:])} does not match "
-                        f"stage H/W {tuple(video.shape[-2:])}. Connect matching upscaled condition"
+                        f"stage H/W {tuple(video.shape[-2:])}. Connect matching upscale condition"
                         "; low-resolution keyframes are not resized automatically."
                     )
                 if guide.shape[0] not in (1, video.shape[0]):
@@ -448,7 +448,7 @@ def sample_h3(
             conditioning if conditioning_second is None else conditioning_second
         )
         _validate_conditioning(
-            positive_second, stage_video, audio, "upscaled condition"
+            positive_second, stage_video, audio, "upscale condition"
         )
         if mask is not None:
             second_mask = close_patch_mask(
