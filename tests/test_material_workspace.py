@@ -405,6 +405,17 @@ class WorkspaceTest(unittest.TestCase):
                 )
             )
 
+    def test_endpoints_reject_blank_names(self):
+        for endpoint in (CanvasInputs, CanvasOutputs):
+            for name in ("", " ", "\t\n", "\u3000"):
+                ports = json.dumps([
+                    dict(id="a", slot=0, name=name, kind="value", type="STRING")
+                ])
+                with self.subTest(endpoint=endpoint.ENDPOINT, name=name):
+                    with self.assertRaisesRegex(ValueError, "must not be empty"):
+                        parse_ports(ports, endpoint=endpoint.ENDPOINT)
+                    self.assertIn("must not be empty", endpoint.VALIDATE_INPUTS(ports, {}))
+
     def test_endpoint_parameter_types_and_defaults(self):
         ports = [
             dict(id="count", name="Count", type="INT", default=8),

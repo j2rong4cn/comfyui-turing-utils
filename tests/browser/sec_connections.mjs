@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { selectRenderer } from "./renderer.mjs";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH,
@@ -10,11 +11,10 @@ try {
   await page.waitForFunction(
     () => window.LiteGraph?.registered_node_types?.TuringUtilsSeCTrackVisualConcept,
   );
-  await page.waitForTimeout(1500);
+  await selectRenderer(page);
   console.log(
     await page.evaluate(async () => {
       const { app } = await import("/scripts/app.js");
-      if (LiteGraph.vueNodesMode) throw Error("Classic canvas required");
       app.graph.clear();
       let target = LiteGraph.createNode("TuringUtilsSeCTrackVisualConcept");
       app.graph.add(target);

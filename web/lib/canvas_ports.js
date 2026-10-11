@@ -109,7 +109,40 @@ export function syncDynamicTargets(node, port) {
 export function entries(node) {
   return JSON.parse(node.widgets.find((w) => w.name === "ports").value || "[]");
 }
+
+export function restoreEndpointSlots(node) {
+  // Serialized slots are descriptors, not native slots. Rehydrate through the
+  // same factories as a newly created node, without removing or reconnecting
+  // graph links. Endpoint rows never belong to the hidden metadata widget.
+  for (const [slots, add] of [
+    [node.inputs, node.addInput],
+    [node.outputs, node.addOutput],
+  ]) {
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i];
+      const options = {};
+      for (const key of [
+        "label",
+        "localized_name",
+        "_portId",
+        "_append",
+        "pos",
+        "color_on",
+        "color_off",
+        "shape",
+        "dir",
+      ])
+        if (slot[key] !== undefined) options[key] = slot[key];
+      const native = add.call(node, slot.name, slot.type, options);
+      slots.pop();
+      slots[i] = native;
+    }
+  }
+}
+
 export function syncPorts(node, ports, { syncTargets = true } = {}) {
+  if (ports.some((port) => typeof port.name !== "string" || !port.name.trim()))
+    throw Error("Endpoint names must not be empty");
   const width = node.size[0];
   node._syncingPorts = true;
   try {
@@ -205,6 +238,10 @@ export function syncPorts(node, ports, { syncTargets = true } = {}) {
   alignInputs(node);
   const minimum = node.computeSize();
   node.setSize([Math.max(width, minimum[0]), minimum[1]]);
+  // Nodes 2.0 consumes native slot-label events; canvas invalidation alone does
+  // not notify its DOM labels after a rename or a late template restoration.
+  for (const slotType of [LiteGraph.INPUT, LiteGraph.OUTPUT])
+    node.graph?.trigger("node:slot-label:changed", { nodeId: node.id, slotType });
   node.graph?.setDirtyCanvas(true, true);
 }
 export function appendSocket(node) {
@@ -238,6 +275,9 @@ export function alignInputs(node) {
   }
 }
 export function addPort(node, name, type = "STRING", kind = "value", definition = {}) {
+  if (typeof name !== "string" || !name.trim())
+    throw Error("Endpoint names must not be empty");
+  name = name.trim();
   if (
     (kind === "value" && !MATERIAL_TYPES.has(type)) ||
     (kind === "position" && type !== POSITION) ||

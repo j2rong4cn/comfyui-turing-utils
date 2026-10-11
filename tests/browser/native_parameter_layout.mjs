@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { selectRenderer } from "./renderer.mjs";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH,
@@ -11,9 +12,9 @@ try {
   await page.waitForFunction(
     () => window.LiteGraph?.registered_node_types?.TuringUtilsVideoMaskGuidedCrop,
   );
+  await selectRenderer(page);
   const report = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
-    if (LiteGraph.vueNodesMode) throw Error("Classic canvas required");
     const defs = await (await fetch("/object_info")).json();
     const check = (ok, msg) => {
       if (!ok) throw Error(msg);
@@ -24,13 +25,16 @@ try {
       fields = 0,
       branches = 0;
     const scalar = new Set(["number", "text", "string", "combo", "toggle"]);
-    const audit = (node, native, phase) => {
+    const audit = async (node, native, phase) => {
       const size = [
         Math.max(node.size[0], native.size[0]),
         Math.max(node.size[1], native.size[1]),
       ];
       node.setSize(size);
       native.setSize(size);
+      // Vue measures native DOM controls after resizing, not synchronously in
+      // setSize. Compare only once both renderers have settled their layout.
+      await tick();
       node.arrange();
       native.arrange();
       node.arrange();
@@ -54,10 +58,14 @@ try {
           node.inputs[slot]?.widget?.name === w.name,
           `${node.type}.${w.name} ${phase}: detached binding`,
         );
-        check(
-          Math.abs(w.y - ref.y) < 0.1,
-          `${node.type}.${w.name} ${phase}: row differs from native (${w.y}/${ref.y})`,
-        );
+        // Absolute classic rows are synchronous. Nodes 2.0 measures DOM widget
+        // heights per instance; compare binding and socket-to-widget alignment,
+        // not the preceding controls' measured height in another node.
+        if (!LiteGraph.vueNodesMode)
+          check(
+            Math.abs(w.y - ref.y) < 0.1,
+            `${node.type}.${w.name} ${phase}: row differs from native (${w.y}/${ref.y})`,
+          );
         const offset = node.getConnectionPos(true, slot)[1] - node.pos[1] - w.y;
         const nativeOffset =
           native.getConnectionPos(true, nativeSlot)[1] - native.pos[1] - ref.y;
@@ -91,10 +99,12 @@ try {
         native = LiteGraph.createNode(nativeName);
       app.graph.add(node);
       app.graph.add(native);
+      node.pos = [100, 100];
+      native.pos = [650, 100];
       await tick();
-      audit(node, native, "created");
+      await audit(node, native, "created");
       node.setSize([node.size[0] + 200, node.size[1] + 100]);
-      audit(node, native, "resized");
+      await audit(node, native, "resized");
       // Exercise every mode and nested DynamicCombo branch using the backend schema.
       async function modes(inputs, prefix = "") {
         for (const [key, spec] of Object.entries({
@@ -112,7 +122,7 @@ try {
               w.callback?.(w.value);
             }
             await tick();
-            audit(node, native, field + "=" + option.key);
+            await audit(node, native, field + "=" + option.key);
             branches++;
             await modes(option.inputs, field + ".");
           }
@@ -144,7 +154,7 @@ try {
           );
         }
         await tick();
-        audit(node, native, "connected " + field);
+        await audit(node, native, "connected " + field);
       }
       const id = node.id,
         nativeId = native.id;
@@ -153,7 +163,7 @@ try {
       node = app.graph.getNodeById(id);
       native = app.graph.getNodeById(nativeId);
       await tick();
-      audit(node, native, "reloaded");
+      await audit(node, native, "reloaded");
       const prompt = await app.graphToPrompt();
       for (const field of names) {
         check(
@@ -177,7 +187,7 @@ try {
           n.disconnectInput(n.inputs.findIndex((s) => s.name === field));
       }
       await tick();
-      audit(node, native, "disconnected");
+      await audit(node, native, "disconnected");
       for (const field of names)
         check(
           !node.widgets.find((w) => w.name === field).disabled,

@@ -5,7 +5,8 @@
 - 项目创建必须显式选择空目录；读取不创建项目。核心文件不合法就报错，不静默恢复为空图。
 - 目录浏览限于所属实例 output。项目、模板及素材路径都由后端检查。
 - 节点使用默认标题、插槽、按钮、文本框和 combo；不自绘卡片皮肤或缩放系统。
-  端点允许局部拖拽手柄、插入标记和动画，不覆盖整张节点。
+  端点名称右键直接显示改名、移动和删除；不保留拖拽排序、手柄或动画。
+  经典节点与 Nodes 2.0 共用操作逻辑，名称不能为空或纯空白。
 - 按画布标记启用菜单和队列限制，不改变普通工作流的行为。经典 LiteGraph 必须可用。
 - 卡片模板和实例分离，稳定 ID 不依赖显示名称和顺序；复制一个原生节点不能冒充新实例。
 - 素材文本内联保存；视频使用 VIDEO。中间结果不能直接成为跨卡片输出。
@@ -43,7 +44,7 @@
 - web/lib/canvas_ports.js、endpoint_interaction.js：普通工作流端点的动态插槽。
 - web/lib/parameter_widget.js：端点与卡片共享的原生表单控件。
 - web/lib/dynamic_parameter.js、workspace/parameters.py：原生分支表单、标量校验与执行输入展开。
-- web/lib/port_reorder.js：端口排序、取消和局部动画；不维护另一份图。
+- web/lib/endpoint_dom.js：仅将两种渲染器的端点名称事件转发到共用操作，不改其他节点。
 - web/lib/material_combo.js、directory_picker.js：原生文件下拉适配和受限目录弹窗。
 - workspace/native.py：项目图表示及保存校验。
 - workspace/store.py、workflow_files.py、runs.py：素材与实例持久化、可恢复发布。
@@ -57,5 +58,12 @@
 使用 ops/test-dev.sh -q -k material_workspace 检查数据与执行边界。
 tests/test_canvas_dynamic_parameters.py 和 tests/browser/canvas_dynamic_parameters.mjs
 检查嵌套分支、保存恢复、模板隔离、重复切换及实际分支执行。
-tests/browser/material_native.mjs 检查经典编辑器的原生控件、新标签页、项目布局与局部执行。
+浏览器测试通过 NODES_MODE=classic / vue 分别运行经典界面与 Nodes 2.0；
+renderer.mjs 只隔离官方 UI 偏好写入，不拦截项目设置或素材 API。
+tests/browser/material_native.mjs 检查原生控件、新标签页、项目布局与局部执行。
+canvas_endpoint_interaction.mjs 覆盖名称菜单、排序连线、空名称、旧槽位恢复和子图，
+通过显式 DOM MouseEvent 检查事件链路，不替代真实鼠标验收。
+canvas_endpoint_labels.mjs 额外检查经典绘制、克隆、旧模板与嵌套子图。
+native_parameter_layout.mjs、sec_connections.mjs、crop_connections.mjs、
+ordinary_subgraphs.mjs、chat_advanced_layout.mjs 检查普通节点的控件、连线与恢复。
 修改项目或节点协议时同步增加回归；不保留依赖已删除页面的测试和兼容接口。

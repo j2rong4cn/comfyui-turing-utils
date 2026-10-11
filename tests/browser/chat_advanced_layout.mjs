@@ -1,22 +1,23 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { selectRenderer } from "./renderer.mjs";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH,
   args: ["--no-sandbox"],
 });
 try {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } });
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18188");
   await page.waitForFunction(
     () => window.LiteGraph?.registered_node_types?.TuringUtilsMultimodalPromptChat,
   );
+  await selectRenderer(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const { enableAdvancedLayout } = await import(
       "/extensions/comfyui-turing-utils/lib/advanced_layout.js"
     );
-    if (LiteGraph.vueNodesMode) throw Error("Classic canvas required");
     const check = (ok, msg) => {
       if (!ok) throw Error(msg);
     };
@@ -31,6 +32,8 @@ try {
       reference = LiteGraph.createNode(refType);
     app.graph.add(chat);
     app.graph.add(reference);
+    chat.pos = [100, 100];
+    reference.pos = [800, 100];
     await tick();
     const names = chat.widgets.map((w) => w.name);
     const thinking = chat.widgets.find((w) => w.name === "thinking");
@@ -76,16 +79,24 @@ try {
         "Hidden advanced controls still reserve layout space",
       );
       for (let i = 0; i < a.length; i++) {
-        check(Math.abs(a[i].y - b[i].y) < 0.1, "Widget position differs: " + a[i].name);
-        check(
-          Math.abs(a[i].computedHeight - b[i].computedHeight) < 0.1,
-          "Widget height differs: " + a[i].name,
-        );
+        if (!LiteGraph.vueNodesMode) {
+          check(Math.abs(a[i].y - b[i].y) < 0.1, "Widget position differs: " + a[i].name);
+          check(
+            Math.abs(a[i].computedHeight - b[i].computedHeight) < 0.1,
+            "Widget height differs: " + a[i].name,
+          );
+        } else {
+          // Vue measures DOM text areas per instance; their heights need not
+          // match the classic layout oracle. Visibility and values still must.
+          check(chat.isWidgetVisible(a[i]) && reference.isWidgetVisible(b[i]),
+            "Visible control was hidden: " + a[i].name);
+        }
       }
-      check(
-        Math.abs(chat.freeWidgetSpace - reference.freeWidgetSpace) < 0.1,
-        "Hidden controls consume resize space",
-      );
+      if (!LiteGraph.vueNodesMode)
+        check(
+          Math.abs(chat.freeWidgetSpace - reference.freeWidgetSpace) < 0.1,
+          "Hidden controls consume resize space",
+        );
       cases++;
     }
     const values = JSON.stringify(chat.serialize().widgets_values);
@@ -195,7 +206,7 @@ try {
     }
     return {
       cases,
-      classic: true,
+      renderer: LiteGraph.vueNodesMode ? "vue" : "classic",
       nativeLayoutReference: true,
       reload: true,
       migrated,

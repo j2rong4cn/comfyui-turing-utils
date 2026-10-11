@@ -8,7 +8,6 @@ import {
   syncDynamicTargets,
 } from "./canvas_ports.js";
 import { DYNAMIC_COMBO, dynamicSpec } from "./dynamic_parameter.js";
-import { PortReorder } from "./port_reorder.js";
 
 // All mutation is local to endpoint nodes; the native graph still owns links and undo.
 export function installEndpoint(node) {
@@ -80,57 +79,82 @@ export function installEndpoint(node) {
     const port = entries(this).find((p) => p.id === this.outputs[slot]?._portId);
     if (port) syncDynamicTargets(this, port);
   };
-  const rename = (id) => {
+  const rename = (id, event) => {
     const port = entries(node).find((p) => p.id === id);
-    node.graph.list_of_graphcanvas[0].prompt("端口名称", port.name, (value) => {
-      if (!value?.trim()) return;
-      commit(() => {
-        const ps = entries(node);
-        ps.find((p) => p.id === id).name = value.trim();
-        syncPorts(node, ps);
-      });
-    });
-  };
-  node.portReorder = new PortReorder(node, rename);
-  node.getExtraMenuOptions = function (_, options) {
-    options.push({
-      content: "端口设置",
-      submenu: {
-        options: entries(this).map((p, index) => ({
-          content: p.name,
-          submenu: {
-            options: [
-              {
-                content: "重命名",
-                callback: () => rename(p.id),
-              },
-              ...[-1, 1]
-                .filter(
-                  (delta) => index + delta >= 0 && index + delta < entries(this).length,
-                )
-                .map((delta) => ({
-                  content: delta < 0 ? "上移" : "下移",
-                  callback: () =>
-                    commit(() => {
-                      const ps = entries(this);
-                      [ps[index], ps[index + delta]] = [ps[index + delta], ps[index]];
-                      syncPorts(this, ps);
-                    }),
-                })),
-              {
-                content: "删除",
-                callback: () =>
-                  commit(() =>
-                    syncPorts(
-                      this,
-                      entries(this).filter((v) => v.id !== p.id),
-                    ),
-                  ),
-              },
-            ],
-          },
-        })),
+    if (!port) return;
+    node.graph.list_of_graphcanvas[0].prompt(
+      "端口名称",
+      port.name,
+      (value) => {
+        if (!value?.trim()) {
+          alert("端口名称不能为空");
+          return;
+        }
+        commit(() => {
+          const ps = entries(node);
+          const current = ps.find((p) => p.id === id);
+          if (!current) return;
+          current.name = value.trim();
+          syncPorts(node, ps);
+        });
       },
-    });
+      event,
+    );
+  };
+  const options = (id) => {
+    const ports = entries(node);
+    const index = ports.findIndex((p) => p.id === id);
+    if (index < 0) return [];
+    return [
+      { content: "重命名", callback: (_, __, event) => rename(id, event) },
+      ...[-1, 1].map((delta) => ({
+        content: delta < 0 ? "上移" : "下移",
+        disabled: index + delta < 0 || index + delta >= ports.length,
+        callback: () =>
+          commit(() => {
+            const ps = entries(node);
+            const current = ps.findIndex((p) => p.id === id);
+            const target = current + delta;
+            if (current < 0 || target < 0 || target >= ps.length) return;
+            [ps[current], ps[target]] = [ps[target], ps[current]];
+            syncPorts(node, ps);
+          }),
+      })),
+      {
+        content: "删除",
+        callback: () =>
+          commit(() =>
+            syncPorts(node, entries(node).filter((p) => p.id !== id)),
+          ),
+      },
+    ];
+  };
+  // One action model for the classic canvas and Nodes 2.0. Port IDs, not row
+  // indices, identify the action target; native graph operations own undo/links.
+  node.endpointMenu = {
+    rename,
+    portAt(pos) {
+      if (pos[0] <= 24 || pos[0] >= node.size[0] - 24) return;
+      return entries(node).find((_, i) =>
+        Math.abs(pos[1] - (node.getConnectionPos(false, i)[1] - node.pos[1])) <
+          LiteGraph.NODE_SLOT_HEIGHT / 2,
+      )?.id;
+    },
+    show(id, event) {
+      LiteGraph.closeAllContextMenus();
+      new LiteGraph.ContextMenu(options(id), { event });
+    },
+  };
+  node.getSlotMenuOptions = (slot) => options((slot.input || slot.output)?._portId);
+  const doubleClick = node.onDblClick;
+  node.onDblClick = function (event, pos, ...args) {
+    if (!LiteGraph.vueNodesMode) {
+      const id = this.endpointMenu.portAt(pos);
+      if (id) {
+        rename(id, event);
+        return true;
+      }
+    }
+    return doubleClick?.call(this, event, pos, ...args);
   };
 }

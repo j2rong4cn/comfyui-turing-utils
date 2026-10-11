@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { selectRenderer } from "./renderer.mjs";
 
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
@@ -22,6 +23,7 @@ try {
       window.app.extensionManager.workflow.activeWorkflow?.isLoaded &&
       !window.app.extensionManager.workflow.isBusy,
   );
+  await selectRenderer(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const workspace = await import(
@@ -141,6 +143,9 @@ try {
       for (const slot of [...node.inputs, ...node.outputs]) {
         slot.label = "stale label";
         slot.localized_name = "*";
+        // A stale widget binding suppresses labels, despite correct label text.
+        // Recreate happens to remove it; normal restore must do the same.
+        slot.widget = { name: "ports" };
       }
       return node;
     };

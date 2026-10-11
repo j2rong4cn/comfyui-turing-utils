@@ -5,14 +5,17 @@ import {
   entries,
   syncPorts,
   syncDynamicTargets,
+  restoreEndpointSlots,
 } from "./lib/canvas_ports.js";
 import { installEndpoint } from "./lib/endpoint_interaction.js";
 import { expandDynamicParameters } from "./lib/dynamic_parameter.js";
 import { hideMetadataSocket, restoreMaterialWidgets } from "./lib/workflow_metadata.js";
+import { installEndpointDomEvents } from "./lib/endpoint_dom.js";
 
 app.registerExtension({
   name: "TuringUtils.CanvasEndpoints",
   setup() {
+    installEndpointDomEvents(app);
     const graphToPrompt = app.graphToPrompt;
     app.graphToPrompt = async function (...args) {
       const result = await graphToPrompt.apply(this, args);
@@ -80,7 +83,7 @@ app.registerExtension({
     const configure = node.onConfigure;
     node.onConfigure = function (data) {
       configure?.call(this, data);
-      this.portReorder.finish(false);
+      restoreEndpointSlots(this);
       // loadedGraphNode is not called for clone/paste/direct configure. Repair
       // every local restoration too; labels/IDs mirror workspace/templates.py.
       // During graph.configure peers have not restored their DynamicCombo

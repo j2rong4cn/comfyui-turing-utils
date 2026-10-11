@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { selectRenderer } from "./renderer.mjs";
 
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
@@ -19,11 +20,8 @@ try {
       errors.push(event.text());
   });
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18188");
-  await page.waitForFunction(
-    () =>
-      window.app?.extensionManager.workflow.activeWorkflow?.isLoaded &&
-      !window.app.extensionManager.workflow.isBusy,
-  );
+  await page.waitForFunction(() => window.LiteGraph?.registered_node_types.TuringCanvasInputs);
+  await selectRenderer(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
@@ -39,10 +37,6 @@ try {
     const check = (condition, message) => {
       if (!condition) throw Error(message);
     };
-    check(
-      !LiteGraph.vueNodesMode,
-      "This regression must run in the classic node editor",
-    );
     const change = async (node, name, value) => {
       const w = node.widgets.find((w) => w.name === name);
       check(w, `Missing widget ${name}`);

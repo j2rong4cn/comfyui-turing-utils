@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { selectRenderer } from "./renderer.mjs";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH,
@@ -10,10 +11,9 @@ try {
   await page.waitForFunction(
     () => window.LiteGraph?.registered_node_types?.TuringUtilsVideoMaskGuidedCrop,
   );
-  await page.waitForTimeout(1500);
+  await selectRenderer(page);
   console.log(
     await page.evaluate(async () => {
-      if (LiteGraph.vueNodesMode) throw Error("Classic canvas required");
       app.graph.clear();
       const add = (type) => {
         const n = LiteGraph.createNode(type);

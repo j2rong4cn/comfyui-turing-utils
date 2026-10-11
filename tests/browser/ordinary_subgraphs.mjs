@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { selectRenderer } from "./renderer.mjs";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH,
@@ -10,10 +11,9 @@ try {
   await page.waitForFunction(
     () => window.LiteGraph?.registered_node_types?.TuringUtilsVideoMaskGuidedCrop,
   );
-  await page.waitForTimeout(1500);
+  await selectRenderer(page);
   console.log(
     await page.evaluate(async () => {
-      if (LiteGraph.vueNodesMode) throw Error("Classic canvas required");
       app.graph.clear();
       const check = (ok, msg) => {
         if (!ok) throw Error(msg);
@@ -64,7 +64,7 @@ try {
       app.canvas.setGraph(restored);
       audit(restored);
       app.canvas.setGraph(app.graph);
-      return `Classic subgraph enter/reload: ${saved.size} ordinary nodes retain values and parameter order`;
+      return `Subgraph enter/reload: ${saved.size} ordinary nodes retain values and parameter order`;
     }),
   );
 } finally {

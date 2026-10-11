@@ -45,6 +45,8 @@ def parse_ports(value, *, endpoint=INPUTS):
             or not isinstance(port.get("type"), str)
         ):
             raise ValueError("Each endpoint needs a name and ComfyUI type")
+        if not port["name"].strip():
+            raise ValueError("Endpoint names must not be empty")
         if (
             not isinstance(port.get("id"), str)
             or not port["id"]

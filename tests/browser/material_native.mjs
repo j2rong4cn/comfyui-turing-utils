@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
+import { selectRenderer } from "./renderer.mjs";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH,
@@ -29,11 +30,7 @@ try {
     () =>
       window.app?.graph && window.LiteGraph?.registered_node_types.TuringCanvasProject,
   );
-  await page.waitForFunction(
-    () =>
-      window.app.extensionManager.workflow.activeWorkflow?.isLoaded &&
-      !window.app.extensionManager.workflow.isBusy,
-  );
+  await selectRenderer(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const m = await import("/extensions/comfyui-turing-utils/material_workspace.js");
@@ -310,27 +307,10 @@ try {
       text,
       text.inputs.findIndex((s) => s.name === "text"),
     );
-    const y = endpoint.getConnectionPos(false, a.slot)[1] - endpoint.pos[1];
-    endpoint.onMouseDown(
-      { button: 0, detail: 1 },
-      [endpoint.size[0] / 2, y],
-      app.canvas,
-    );
-    if (!endpoint.portReorder.drag) throw Error("Port label cannot be dragged");
-    endpoint.onMouseMove(
-      {},
-      [endpoint.size[0] / 2, y + LiteGraph.NODE_SLOT_HEIGHT],
-      app.canvas,
-    );
-    await new Promise((resolve) =>
-      requestAnimationFrame(() => requestAnimationFrame(resolve)),
-    );
-    if (!endpoint.outputs.some((s) => s.pos)) throw Error("No drag animation");
-    endpoint.onMouseUp(
-      {},
-      [endpoint.size[0] / 2, y + LiteGraph.NODE_SLOT_HEIGHT],
-      app.canvas,
-    );
+    const menu = endpoint.getSlotMenuOptions({ output: endpoint.outputs[a.slot] });
+    if (menu.map((item) => item.content).join() !== "重命名,上移,下移,删除")
+      throw Error("Endpoint actions must be flat");
+    menu.find((item) => item.content === "下移").callback();
     if (entries(endpoint).at(-1).id !== a.id) throw Error("Port order not changed");
     for (const input of endpoint.inputs.filter((s) => !s._append)) {
       const output = endpoint.outputs.findIndex((s) => s._portId === input._portId);
@@ -352,11 +332,7 @@ try {
       ordered.find((x) => x.id === a.id).slot
     )
       throw Error("Reorder changed downstream source");
-    endpoint.portReorder.begin(ordered.length - 1);
-    endpoint.portReorder.drag.target = 0;
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    if (entries(endpoint).at(-1).id !== a.id || endpoint.portReorder.drag)
-      throw Error("Escape did not cancel drag");
+    if (endpoint.portReorder) throw Error("Removed drag controller remains installed");
     const oldPrompt = app.canvas.prompt;
     let renamed = false;
     app.canvas.prompt = (title, value, change) => {
@@ -366,7 +342,8 @@ try {
     try {
       const row = entries(endpoint).findIndex((p) => p.id === a.id);
       const y = endpoint.getConnectionPos(false, row)[1] - endpoint.pos[1];
-      endpoint.onDblClick({}, [endpoint.size[0] / 2, y], app.canvas);
+      if (LiteGraph.vueNodesMode) endpoint.endpointMenu.rename(a.id);
+      else endpoint.onDblClick({}, [endpoint.size[0] / 2, y], app.canvas);
     } finally {
       app.canvas.prompt = oldPrompt;
     }
@@ -398,10 +375,9 @@ try {
     )
       throw Error("Label synchronization changed links on reload");
     return {
-      dragReorder: true,
+      flatPortMenu: true,
       pairedPorts: true,
       materialTypeGuard: true,
-      cancelDrag: true,
       doubleClickRename: true,
       endpointLabels: true,
       restoredLabels: true,

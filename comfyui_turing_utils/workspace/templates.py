@@ -110,6 +110,9 @@ def material_template(kinds=("image", "video", "audio", "text")):
                     # Execution uses port_N, display uses label; stable IDs survive
                     # rename/reorder. Mirror web/lib/canvas_ports.js here: new
                     # templates must render correctly before any frontend repair.
+                    # These are data slots, never widget-bound slots. On restore,
+                    # canvas_ports.restoreEndpointSlots rebuilds native slots and
+                    # discards stale widget bindings that would hide their labels.
                     dict(
                         name=f"port_{i}",
                         label=p["name"],
