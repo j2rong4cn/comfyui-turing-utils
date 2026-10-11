@@ -223,7 +223,10 @@ async function saveCard(editing = editor(), task) {
       ),
   );
   if (editing.new) {
-    const name = await prompt("卡片文件名", "我的卡片.json");
+    const name = await prompt(
+      "卡片文件名",
+      editing.source?.replace(/\.json$/, " 副本.json") || "我的卡片.json",
+    );
     if (!name) return false;
     editing.name = name;
   }
@@ -237,6 +240,7 @@ async function saveCard(editing = editor(), task) {
   if (editing.id) editing.parameters = parameters;
   if (result.name) editing.name = result.name;
   delete editing.new;
+  delete editing.source;
   if (editing.id) {
     // Editing a workflow advances the project revision too. Refresh its idle
     // tab's descriptors so returning to the canvas uses the new interface and
@@ -278,13 +282,20 @@ async function editTemplate() {
   if (!name) return;
   await openTab(await loadDocument({ name }), name);
 }
+async function copyTemplate() {
+  const name = await directoryPicker(false, { mode: "cards" });
+  if (!name) return;
+  const reference = { new: crypto.randomUUID(), source: name };
+  await openTab(await loadDocument(reference), name.replace(/\.json$/, " 副本.json"));
+  app.extensionManager.workflow.activeWorkflow.isModified = true;
+}
 async function loadDocument(reference) {
   if (reference.directory && !reference.id)
     return prepare(await request("project/open", { directory: reference.directory }));
   if (reference.new) {
-    const workflow = await (
-      await api.fetchApi("/turing/workspace/new-template")
-    ).json();
+    const workflow = reference.source
+      ? (await request("template/open", { name: reference.source })).workflow
+      : await (await api.fetchApi("/turing/workspace/new-template")).json();
     workflow.extra ||= {};
     workflow.extra.turing_editor = reference;
     return workflow;
@@ -519,6 +530,14 @@ app.registerExtension({
       }),
     },
     {
+      id: "Turing.MaterialWorkspace.SaveProject",
+      label: "保存画布",
+      function: action(async () => {
+        if (!project()) throw Error("请先打开画布");
+        await app.extensionManager.command.execute("Comfy.SaveWorkflow");
+      }),
+    },
+    {
       id: "Turing.MaterialWorkspace.New",
       label: "新建卡片",
       function: action(async () => {
@@ -536,17 +555,28 @@ app.registerExtension({
       function: action(editTemplate),
     },
     {
+      id: "Turing.MaterialWorkspace.Copy",
+      label: "复制卡片…",
+      function: action(copyTemplate),
+    },
+    {
       id: "Turing.MaterialWorkspace.SaveTemplate",
-      label: "保存为卡片",
+      label: "保存卡片",
       function: action(saveTemplate),
     },
   ],
   menuCommands: [
     {
       path: ["Turing Utils"],
-      commands: ["Create", "Open", "New", "Edit", "SaveTemplate"].map(
-        (n) => "Turing.MaterialWorkspace." + n,
-      ),
+      commands: [
+        "Create",
+        "Open",
+        "SaveProject",
+        "New",
+        "Edit",
+        "Copy",
+        "SaveTemplate",
+      ].map((n) => "Turing.MaterialWorkspace." + n),
     },
   ],
   setup() {

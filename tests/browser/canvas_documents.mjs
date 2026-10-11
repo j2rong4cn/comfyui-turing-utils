@@ -100,12 +100,18 @@ try {
     const id = card.properties.instance;
     const material = card.properties.materials.find((m) => m.kind === "text");
     card.pos = [640, 80];
-    await command("Comfy.SaveWorkflow");
+    check(
+      app.extensionManager.command.commands.find(
+        (c) => c.id === "Turing.MaterialWorkspace.SaveProject",
+      )?.label === "保存画布",
+      "Canvas save menu command missing",
+    );
+    await command("Turing.MaterialWorkspace.SaveProject");
     check(
       (await workspace.request("project/open", { directory })).workflow.nodes.find(
         (n) => n.properties.instance === id,
       ).pos[0] === 640,
-      "Ctrl+S did not save canvas.json",
+      "Canvas save menu did not save canvas.json",
     );
     await card.widgets.find((w) => w.name === "编辑工作流").callback();
     check(
@@ -303,6 +309,53 @@ try {
       app.extensionManager.workflow.openWorkflows.every(Boolean),
       "Native file-list sync lost managed tabs",
     );
+    const { DirectoryPicker } = await import(
+      "/extensions/comfyui-turing-utils/lib/directory_picker.js"
+    );
+    const choose = DirectoryPicker.prototype.choose;
+    const tabCount = app.extensionManager.workflow.openWorkflows.length;
+    try {
+      DirectoryPicker.prototype.choose = async () => null;
+      await command("Turing.MaterialWorkspace.Copy");
+      check(
+        app.extensionManager.workflow.openWorkflows.length === tabCount,
+        "Cancelling copy opened an empty draft",
+      );
+      DirectoryPicker.prototype.choose = async () => name;
+      await command("Turing.MaterialWorkspace.Copy");
+    } finally {
+      DirectoryPicker.prototype.choose = choose;
+    }
+    check(
+      app.graph.extra.turing_editor.new &&
+        !app.graph.extra.turing_editor.name &&
+        !app.graph.extra.turing_editor.revision &&
+        app.extensionManager.workflow.activeWorkflow !== libraryTab,
+      "Copy retained the original file identity",
+    );
+    const copiedText = app.graph._nodes.find((n) => n.type === "TuringMaterialText");
+    copiedText.title = "Independent copy";
+    app.graph.change();
+    const copyName = `${directory}-copy.json`;
+    app.extensionManager.dialog.prompt = async () => copyName;
+    try {
+      await command("Comfy.SaveWorkflow");
+    } finally {
+      app.extensionManager.dialog.prompt = dialog;
+    }
+    check(
+      app.graph.extra.turing_editor.name === copyName &&
+        !app.graph.extra.turing_editor.source,
+      "Copy did not bind a new template file",
+    );
+    const copiedFile = await workspace.request("template/open", { name: copyName });
+    const originalFile = await workspace.request("template/open", { name });
+    check(
+      copiedFile.workflow.nodes.some((n) => n.title === "Independent copy") &&
+        !originalFile.workflow.nodes.some((n) => n.title === "Independent copy") &&
+        originalFile.revision === stored.revision,
+      "Saving the copy changed the original template",
+    );
     return {
       nativeSave: true,
       testBranchIsolation: true,
@@ -314,6 +367,7 @@ try {
       immediateSelection: true,
       localExecution: true,
       templateIsolation: true,
+      independentCopy: true,
     };
   });
   assert.deepEqual(errors, []);
