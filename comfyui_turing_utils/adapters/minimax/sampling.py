@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -23,6 +24,7 @@ from comfy.ldm.minimax.model import FRAME_PER_TOKEN, FRAME_RESCALE
 from comfy.nested_tensor import NestedTensor
 
 from ...media.latent_masks import binary_video_latent_mask, _validate_mask_values
+from ...runtime.sampling import NativeStepSampler, SamplingProgress
 from .latent_upscaler import (
     _av_streams,
     _resize_video_mask,
@@ -35,6 +37,7 @@ SECOND_PASS_PRESETS = (
     ("3 steps · 0.9035 → 0", "0.9035, 0.6316, 0.3158, 0"),
     ("4 steps · 0.9035 → 0", "0.9035, 0.8, 0.6316, 0.3158, 0"),
     ("5 steps · 0.9231 → 0", "0.9231, 0.8780, 0.8, 0.6316, 0.3158, 0"),
+    ("2 steps · 0.6316 → 0", "0.6316, 0.3158, 0"),
 )
 
 
@@ -244,38 +247,119 @@ def _validate_conditioning(conditioning, video, audio, label):
         # Ref2VA references intentionally have their own resolution and timeline.
 
 
-def _sample_stage(
-    model,
-    latent,
-    positive,
-    negative,
-    sigmas,
-    seed,
-    cfg,
-    sampler_name,
-):
-    if sigmas.numel() < 2:
-        return latent
-    samples = latent["samples"]
-    callback = latent_preview.prepare_callback(model, len(sigmas) - 1)
-    noise = comfy.sample.prepare_noise(samples, seed, latent.get("batch_index"))
-    result = comfy.sample.sample_custom(
-        model,
-        noise,
-        cfg,
-        comfy.samplers.sampler_object(sampler_name),
-        sigmas,
-        positive,
-        negative,
-        samples,
-        noise_mask=latent.get("noise_mask"),
-        callback=callback,
-        disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
-        seed=seed,
-    )
-    output = latent.copy()
-    output["samples"] = result
-    return output
+@dataclass
+class _SecondPass:
+    positive: list
+    negative: list
+    sigmas: torch.Tensor
+    height: int
+    width: int
+    mask: torch.Tensor | None
+    baseline: torch.Tensor | None
+
+
+class H3SamplingTask:
+    """Own the clean handoff, task progress and stage-local native solver runs."""
+
+    def __init__(self, model, seed, cfg, sampler_name, first_curve, second_curve):
+        self.model = model
+        self.seed = seed
+        self.cfg = cfg
+        self.sampler_name = sampler_name
+        self.first_curve = first_curve
+        self.progress = SamplingProgress(
+            max(0, len(first_curve) - 1)
+            + (0 if second_curve is None else len(second_curve) - 1)
+        )
+        self.completed_steps = 0
+        self.preview = None
+        self.console = None
+
+    def sample_stage(self, latent, positive, negative, sigmas):
+        if sigmas.numel() < 2:
+            return latent
+        if self.preview is None:
+            self.preview = latent_preview.prepare_callback(
+                self.model, self.progress.total_steps
+            )
+        offset = self.completed_steps
+
+        def callback(step, x0, x, _stage_steps):
+            # Adaptive solvers may report more accepted trials than intervals;
+            # their attention/preview progress follows the requested sigma grid.
+            global_step = (
+                self.progress.step
+                if self.sampler_name in {"dpm_fast", "dpm_adaptive"}
+                else offset + step
+            )
+            if self.preview is not None:
+                self.preview(global_step, x0, x, self.progress.total_steps)
+            if self.console is not None:
+                self.console.update(max(0, global_step + 1 - self.console.n))
+
+        samples = latent["samples"]
+        noise = comfy.sample.prepare_noise(
+            samples, self.seed, latent.get("batch_index")
+        )
+        result = comfy.sample.sample_custom(
+            self.model,
+            noise,
+            self.cfg,
+            NativeStepSampler(self.sampler_name, self.progress, offset),
+            sigmas,
+            positive,
+            negative,
+            samples,
+            noise_mask=latent.get("noise_mask"),
+            callback=callback,
+            disable_pbar=True,
+            seed=self.seed,
+        )
+        self.completed_steps += len(sigmas) - 1
+        if self.console is not None:
+            self.console.update(max(0, self.completed_steps - self.console.n))
+        output = latent.copy()
+        output["samples"] = result
+        return output
+
+    def run(self, first, positive, negative, second, upscale_model):
+        video, audio = _latent_streams(first)
+        mask, audio_mask = _masks(first, video, audio)
+        self.console = comfy.utils.model_trange(
+            self.progress.total_steps, disable=not comfy.utils.PROGRESS_BAR_ENABLED
+        )
+        try:
+            clean = self.sample_stage(first, positive, negative, self.first_curve)
+            clean = _restore_protected(clean, video, mask, audio, audio_mask)
+            if second is None:
+                return clean
+            clean_video, clean_audio = _latent_streams(clean)
+            if mask is not None and not bool(mask.any()):
+                upscaled = second.baseline.to(clean_video).expand(
+                    video.shape[0], -1, -1, -1, -1
+                )
+            else:
+                upscaled = upscale_h3_video_to_size(
+                    upscale_model, clean_video, second.height, second.width
+                )
+            if second.baseline is not None:
+                upscaled = torch.where(
+                    second.mask.to(upscaled.device),
+                    upscaled,
+                    second.baseline.to(upscaled),
+                )
+            high = _with_streams(first, upscaled, clean_audio, second.mask, audio_mask)
+            del clean, clean_video, clean_audio
+            # New native solver state and stage sigmas are essential after a
+            # resolution/condition/noise restart; only task progress continues.
+            result = self.sample_stage(
+                high, second.positive, second.negative, second.sigmas
+            )
+            baseline = upscaled if second.baseline is None else second.baseline
+            return _restore_protected(result, baseline, second.mask, audio, audio_mask)
+        finally:
+            self.console.close()
+            self.console = self.preview = None
 
 
 def _restore_protected(result, baseline, video_mask, original_audio, audio_mask):
@@ -343,7 +427,8 @@ def sample_h3(
     _validate_conditioning(conditioning, video, audio, "conditioning")
     _validate_conditioning(negative, video, audio, "negative")
 
-    target = second_mask = second_baseline = None
+    second = None
+    second_mask = second_baseline = None
     if latent_second is not None:
         target = _template_video(latent_second)
         height, width = target.shape[-2:]
@@ -381,42 +466,21 @@ def sample_h3(
             raise ValueError(
                 "Select upscale.model_name for the resolution-changing second pass."
             )
+        second = _SecondPass(
+            positive_second,
+            neg_second,
+            second_curve,
+            height,
+            width,
+            second_mask,
+            second_baseline,
+        )
 
     logging.info(
         "H3 KSampler: %d first-pass + %d second-pass steps",
         max(0, len(first_curve) - 1),
         0 if second_curve is None else len(second_curve) - 1,
     )
-    clean = _sample_stage(
-        model, first, conditioning, negative, first_curve, seed, cfg, sampler_name
-    )
-    clean = _restore_protected(clean, video, mask, audio, audio_mask)
-    if latent_second is None:
-        return _output_structure(clean, video_only)
-    clean_video, clean_audio = _latent_streams(clean)
-    if mask is not None and not bool(mask.any()):
-        upscaled = second_baseline.to(clean_video).expand(
-            video.shape[0], -1, -1, -1, -1
-        )
-    else:
-        upscaled = upscale_h3_video_to_size(upscale_model, clean_video, height, width)
-    if second_baseline is not None:
-        upscaled = torch.where(
-            second_mask.to(upscaled.device), upscaled, second_baseline.to(upscaled)
-        )
-    second = _with_streams(first, upscaled, clean_audio, second_mask, audio_mask)
-    # Release low-resolution predictions before the large high-resolution sampler.
-    del clean, clean_video, clean_audio
-    result = _sample_stage(
-        model,
-        second,
-        positive_second,
-        neg_second,
-        second_curve,
-        seed,
-        cfg,
-        sampler_name,
-    )
-    baseline = upscaled if second_baseline is None else second_baseline
-    restored = _restore_protected(result, baseline, second_mask, audio, audio_mask)
-    return _output_structure(restored, video_only)
+    task = H3SamplingTask(model, seed, cfg, sampler_name, first_curve, second_curve)
+    result = task.run(first, conditioning, negative, second, upscale_model)
+    return _output_structure(result, video_only)

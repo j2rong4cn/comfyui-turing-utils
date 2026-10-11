@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 import torch
 
+from .protocol import SAMPLING_PROGRESS_KEY
 from .layout import (
     ATTENTION_LAYOUT_KEY,
     ATTENTION_LAYOUT_REQUIREMENT_KEY,
@@ -203,9 +204,9 @@ def _sparse_dense_schedule(
     *,
     track_step: bool = False,
 ) -> bool:
-    """Select dense steps from the sampler's actual sigma schedule.
+    """Select dense steps from explicit task progress or native sigma fallback.
 
-    Prefix and suffix counts are local to every sampler invocation. Runtime
+    Without explicit task progress counts are local to each sampler. Runtime
     state lives in ``transformer_options`` by default, so a shared model can
     serve multiple samplers without mutable state leaking between ModelPatcher
     branches.
@@ -221,6 +222,31 @@ def _sparse_dense_schedule(
         if not isinstance(state, dict):
             state = {}
             transformer_options["_turing_utils_sparse_schedule_state"] = state
+    progress = transformer_options.get(SAMPLING_PROGRESS_KEY)
+    if progress is not None:
+        step, sampling_steps = progress.step, progress.total_steps
+        policy = (prefix_steps, suffix_steps)
+        if (
+            state.get("progress") is progress
+            and state.get("position") == (step, sampling_steps)
+            and state.get("policy") == policy
+        ):
+            return bool(state["dense"])
+        prefix = min(max(0, prefix_steps), sampling_steps)
+        suffix = min(max(0, suffix_steps), sampling_steps)
+        dense = step < prefix or (suffix > 0 and step >= sampling_steps - suffix)
+        state.clear()
+        state.update(
+            progress=progress,
+            position=(step, sampling_steps),
+            policy=policy,
+            step=step,
+            sampling_steps=sampling_steps,
+            dense=dense,
+            prefix_steps=prefix,
+            suffix_steps=suffix,
+        )
+        return dense
     sample_sigmas = transformer_options.get("sample_sigmas")
     current_sigmas = transformer_options.get("sigmas")
     if not torch.is_tensor(sample_sigmas) or not torch.is_tensor(current_sigmas):

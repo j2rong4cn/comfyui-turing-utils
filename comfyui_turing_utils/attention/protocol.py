@@ -17,6 +17,7 @@ import torch
 
 ATTENTION_PROTOCOL_VERSION = 2
 ATTENTION_EXECUTOR_KEY = "turing_utils_attention_executor_v1"
+SAMPLING_PROGRESS_KEY = "turing_utils_sampling_progress"
 MAPPED_KV_EXECUTOR_ATTR = "turing_utils_mapped_kv_executor"
 MAPPED_RESIDUAL_EXECUTOR_ATTR = "turing_utils_mapped_residual_executor"
 MAPPED_RESIDUAL_CAPABILITY_ATTR = "turing_utils_mapped_residual_capability"

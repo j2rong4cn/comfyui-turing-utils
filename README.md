@@ -431,10 +431,13 @@ original loading functions; callers bypassing the prompt server must invoke
     are not sorted, deduplicated, refined, or processed by scheduler/denoise or
     the automatic sampler-specific penultimate-discard rule. Logs report intervals
     (`len(sigmas)-1`); a solver can perform multiple model evaluations per interval.
-  - Second-pass presets are explicit curves: 3 steps `0.9035, 0.6316, 0.3158, 0`;
+  - Second-pass presets are explicit curves: 2 steps `0.6316, 0.3158, 0`;
+    3 steps (unchanged default) `0.9035, 0.6316, 0.3158, 0`;
     4 steps `0.9035, 0.8, 0.6316, 0.3158, 0`; 5 steps
     `0.9231, 0.8780, 0.8, 0.6316, 0.3158, 0`. These are editable alternatives
     derived from the upscaler author's example workflow, not quality guarantees.
+    The 2-step alternative is our shorter, lower-starting-noise crop of the
+    3-step curve, not an author-provided preset.
     Switch to manual to change the curve. Use `Sigmas To String` with core
     `Preview Any` to copy a native scheduler curve into either text field; core
     `ManualSigmas` converts the exported plain-decimal string back to SIGMAS.
@@ -452,6 +455,18 @@ original loading functions; callers bypassing the prompt server must invoke
     denoise=0 skips only the first sampler; an enabled second pass still samples.
     Without a second latent, its curve and connected second conditions are ignored.
     A resolution-changing restart is not equivalent to uninterrupted sampling.
+  - Attention and preview progress belong to **one task** across both stages.
+    Sol/SLA/Veda dense prefix/suffix step protection applies to the total number
+    of intervals: a 4+2 run with prefix=1/suffix=1 protects only step 1 and step 6,
+    not the end of the first stage or the start of the second. Layer protection
+    is unchanged. CFG batches and predictor/corrector evaluations share their
+    interval index. Each stage keeps its own native sigma curve, solver history,
+    H3 PDD/audio scaling, conditioning layout and model/offload lifecycle.
+    State is execution-local; MODEL options are not modified or retained.
+    `dpm_fast`/`dpm_adaptive` retain their native non-schedule integration grid;
+    their protection follows requested sigma intervals rather than counting
+    evaluations/rejected trials. Their reported steps are a schedule budget,
+    not an accepted-integration-step count.
   - Choose `upscale.model_name` from models/latent_upscale_models only when H/W
     change. Its loader is lazy and shared with other samplers/upscale applications
     through ComfyUI's node/model cache, not a separate persistent weight cache.
@@ -546,8 +561,8 @@ original loading functions; callers bypassing the prompt server must invoke
   dense first/last-layer protection, and an internal automatic short-sequence
   crossover. It inherits `w8a8`, `sage`, or `sdpa` from `Load ConvRot DiT`:
   W8A8 selects integer sparse PV, while Sage/SDPA select the floating FP16
-  sparse core. Dense prefix/suffix counts are local to every sampler invocation,
-  so one configured model can feed both stages without pass-specific controls.
+  sparse core. Dense prefix/suffix counts span both stages of H3 KSampler as
+  one task. Ordinary independent sampler nodes still count locally per invocation.
 - The SLA strategy implements the MiniMax H3 Turbo-SLA runtime as
   fixed-budget 128-query by 64-key Top-K routing. It shares Sol's semantic
   reference protection, dense step/layer scheduling, fused Q/K preprocessing,
@@ -801,8 +816,8 @@ contract, and calls Sage directly. Dense Sol/SLA protection therefore does not
 fall back through the original model attention or repeat QKV projection. The
 same bridge covers explicit SDPA and third-party-loader fallback paths.
 
-Sol keeps the first step of every sampler invocation and the first two
-transformer layers dense by default. If
+Sol keeps the first task step (both H3 KSampler stages combined, otherwise per
+sampler invocation) and the first two transformer layers dense by default. If
 `dense_prefix_layers + dense_suffix_layers` reaches or exceeds
 the runtime layer count, every layer dispatches directly to the selected dense
 W8A8, Sage, or SDPA backend and skips all Sol preprocessing.

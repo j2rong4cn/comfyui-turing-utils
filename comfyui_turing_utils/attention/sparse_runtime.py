@@ -9,7 +9,7 @@ from .sparse import _sparse_dense_layer, _sparse_dense_schedule
 
 
 class SparseSchedule:
-    """Own sampler-local dense-step state for one installed strategy."""
+    """Read task progress, or native sampler-local progress, for one strategy."""
 
     __slots__ = (
         "_key",

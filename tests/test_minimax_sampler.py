@@ -23,6 +23,8 @@ import comfy.supported_models_base
 from comfyui_turing_utils.adapters.minimax.latent_upscaler import H3LatentResizer3D
 from comfy.nested_tensor import NestedTensor
 from comfyui_turing_utils.adapters.minimax import sampling
+from comfyui_turing_utils.attention.protocol import SAMPLING_PROGRESS_KEY
+from comfyui_turing_utils.attention.sparse_runtime import SparseSchedule
 from comfyui_turing_utils.nodes.minimax_sampler import (
     MiniMaxH3KSampler,
     _H3KSamplerApply,
@@ -77,7 +79,10 @@ class H3SamplerTest(unittest.TestCase):
         self.calls = []
         self.upscaled = []
         self.sampler_patch = mock.patch.object(
-            sampling, "_sample_stage", side_effect=self.stage
+            sampling.H3SamplingTask,
+            "sample_stage",
+            autospec=True,
+            side_effect=self.stage,
         )
         self.upscale_patch = mock.patch.object(
             sampling, "upscale_h3_video_to_size", side_effect=self.upscale
@@ -89,14 +94,11 @@ class H3SamplerTest(unittest.TestCase):
 
     def stage(
         self,
-        model,
+        task,
         source,
         positive,
         negative,
         sigmas,
-        seed,
-        cfg,
-        sampler_name,
     ):
         self.calls.append((source, positive, negative, sigmas.clone()))
         samples = source["samples"]
@@ -194,7 +196,8 @@ class H3SamplerTest(unittest.TestCase):
         torch.testing.assert_close(self.calls[1][3], torch.tensor([0.6, 0.3, 0.05, 0]))
 
     def test_all_presets_match_advertised_intervals_and_do_not_change_first(self):
-        for count, (preset, text) in enumerate(sampling.SECOND_PASS_PRESETS, 3):
+        for preset, text in sampling.SECOND_PASS_PRESETS:
+            count = len(sampling.parse_sigmas(text, "preset")) - 1
             with self.subTest(preset=preset):
                 self.calls.clear()
                 with self.assertLogs(level="INFO") as logs:
@@ -422,20 +425,19 @@ class H3StageTest(unittest.TestCase):
             ) as native,
             mock.patch.object(patcher.model, "process_latent_out") as process,
         ):
-            result = sampling._sample_stage(
-                patcher,
+            curve = torch.tensor([0.6, 0.3, 0])
+            task = sampling.H3SamplingTask(patcher, 17, 1, "euler", curve, None)
+            result = task.sample_stage(
                 source,
                 conditioning(),
                 conditioning(),
-                torch.tensor([0.6, 0.3, 0]),
-                17,
-                1,
-                "euler",
+                curve,
             )
         self.assertIs(result["samples"], final)
         process.assert_not_called()
         preview.assert_called_once_with(patcher, 2)
-        self.assertIs(native.call_args.kwargs["callback"], callback)
+        native.call_args.kwargs["callback"](0, video, video, 2)
+        callback.assert_called_once_with(0, video, video, 2)
         torch.testing.assert_close(result["samples"].unbind()[0], video + 2)
         torch.testing.assert_close(result["samples"].unbind()[1], audio + 3)
         expected_noise = comfy.sample.prepare_noise(
@@ -456,15 +458,13 @@ class H3StageTest(unittest.TestCase):
                 comfy.sample, "sample_custom", return_value=source["samples"]
             ),
         ):
-            result = sampling._sample_stage(
-                model(),
+            curve = torch.tensor([0.6, 0.3, 0])
+            task = sampling.H3SamplingTask(model(), 0, 1, "euler", curve, None)
+            result = task.sample_stage(
                 source,
                 conditioning(),
                 conditioning(),
-                torch.tensor([0.6, 0.3, 0]),
-                0,
-                1,
-                "euler",
+                curve,
             )
         self.assertIs(result["samples"], source["samples"])
 
@@ -525,6 +525,76 @@ class _TinyH3(comfy.model_base.MiniMaxH3):
 
 
 class H3NativeSamplerTest(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    @mock.patch("latent_preview.get_previewer", return_value=None)
+    @mock.patch("comfy.model_management.load_models_gpu")
+    def test_cuda_clean_handoff_and_progress_match_native(self, _load, _preview):
+        device = torch.device("cuda:0")
+        patcher = comfy.model_patcher.ModelPatcher(_TinyH3(device), device, device)
+        source = latent(audio=True)
+        positive = conditioning()
+        first_curve = torch.tensor([0.9, 0.6, 0.3, 0])
+        second_curve = torch.tensor([0.6, 0.3, 0])
+
+        def native(samples, curve):
+            return comfy.sample.sample_custom(
+                patcher,
+                comfy.sample.prepare_noise(samples, 17),
+                1,
+                comfy.samplers.sampler_object("heun"),
+                curve,
+                positive,
+                positive,
+                samples,
+                disable_pbar=True,
+                seed=17,
+            )
+
+        clean = native(source["samples"], first_curve)
+        video, audio = clean.unbind()
+        high = NestedTensor(
+            (F.interpolate(video, size=(2, 7, 11), mode="nearest"), audio)
+        )
+        expected = native(high, second_curve)
+        records = []
+        forward = patcher.model.diffusion_model.forward
+
+        def observe(samples, timestep, **kwargs):
+            progress = kwargs["transformer_options"][SAMPLING_PROGRESS_KEY]
+            records.append(
+                (progress.step, progress.total_steps, samples[0].device.type)
+            )
+            return forward(samples, timestep, **kwargs)
+
+        with (
+            mock.patch.object(
+                patcher.model.diffusion_model, "forward", side_effect=observe
+            ),
+            mock.patch.object(
+                sampling,
+                "upscale_h3_video_to_size",
+                side_effect=lambda _model, v, h, w: F.interpolate(
+                    v, size=(v.shape[2], h, w), mode="nearest"
+                ),
+            ),
+        ):
+            actual = sampling.sample_h3(
+                patcher,
+                positive,
+                source,
+                seed=17,
+                sampler_name="heun",
+                first_sigmas={"first_sigmas": "manual", "sigmas": ".9,.6,.3,0"},
+                second_sigmas={"second_sigmas": "manual", "sigmas": ".6,.3,0"},
+                latent_second=latent(7, 11),
+                upscale_model=object(),
+            )["samples"]
+        for a, e in zip(actual.unbind(), expected.unbind()):
+            torch.testing.assert_close(a, e, rtol=0, atol=0)
+            self.assertTrue(torch.isfinite(a).all())
+        self.assertEqual([r[0] for r in records], [0, 0, 1, 1, 2, 3, 3, 4])
+        self.assertTrue(all(r[1:] == (5, "cuda") for r in records))
+
     @mock.patch("latent_preview.get_previewer", return_value=None)
     @mock.patch("comfy.model_management.load_models_gpu")
     def test_full_first_handoff_and_manual_second_match_two_native_samplers(
@@ -727,6 +797,225 @@ class H3NativeSamplerTest(unittest.TestCase):
         self.assertEqual(forward.call_args.args[-1], (2, 7, 11))
 
 
+class H3TaskProgressTest(unittest.TestCase):
+    def setUp(self):
+        device = torch.device("cpu")
+        self.patcher = comfy.model_patcher.ModelPatcher(_TinyH3(device), device, device)
+        self.schedule = SparseSchedule(
+            dense_prefix_steps=1,
+            dense_suffix_steps=1,
+            dense_prefix_layers=0,
+            dense_suffix_layers=0,
+        )
+        self.records = []
+        forward = self.patcher.model.diffusion_model.forward
+
+        def observe(samples, timestep, **kwargs):
+            options = kwargs["transformer_options"]
+            progress = options.get(SAMPLING_PROGRESS_KEY)
+            if progress is not None:
+                self.records.append(
+                    (
+                        progress.step,
+                        progress.total_steps,
+                        self.schedule.dense_step(options),
+                        samples[0].shape[-2:],
+                        options["sample_sigmas"].detach().cpu().tolist(),
+                        progress,
+                    )
+                )
+            return forward(samples, timestep, **kwargs)
+
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(
+            self.patcher.model.diffusion_model, "forward", side_effect=observe
+        ).start()
+        mock.patch("comfy.model_management.load_models_gpu").start()
+        mock.patch("latent_preview.get_previewer", return_value=None).start()
+        self.preview = mock.Mock()
+        self.prepare = mock.patch(
+            "latent_preview.prepare_callback", return_value=self.preview
+        ).start()
+        self.upscale = mock.patch.object(
+            sampling,
+            "upscale_h3_video_to_size",
+            side_effect=lambda _model, video, h, w: F.interpolate(
+                video, size=(video.shape[2], h, w), mode="nearest"
+            ),
+        ).start()
+
+    def run_task(self, **kwargs):
+        return sampling.sample_h3(
+            self.patcher,
+            conditioning(),
+            latent(audio=True),
+            first_sigmas={"steps": 4},
+            latent_second=latent(7, 11),
+            second_sigmas={"second_sigmas": "manual", "sigmas": ".6, .3, 0"},
+            upscale_model=object(),
+            **kwargs,
+        )
+
+    def test_two_stages_have_one_attention_and_preview_timeline(self):
+        self.run_task()
+        self.assertEqual(
+            [r[:3] for r in self.records],
+            [
+                (0, 6, True),
+                (1, 6, False),
+                (2, 6, False),
+                (3, 6, False),
+                (4, 6, False),
+                (5, 6, True),
+            ],
+        )
+        self.assertEqual([r[3] for r in self.records], [(4, 6)] * 4 + [(7, 11)] * 2)
+        self.assertEqual([len(r[4]) for r in self.records], [5] * 4 + [3] * 2)
+        self.prepare.assert_called_once_with(self.patcher, 6)
+        self.assertEqual(
+            [c.args[0] for c in self.preview.call_args_list], list(range(6))
+        )
+        self.assertTrue(all(c.args[3] == 6 for c in self.preview.call_args_list))
+        self.assertNotIn(
+            SAMPLING_PROGRESS_KEY,
+            self.patcher.model_options.get("transformer_options", {}),
+        )
+
+    def test_heun_correctors_do_not_consume_an_extra_step(self):
+        self.run_task(sampler_name="heun", cfg=2, negative=conditioning())
+        # Native CFG runs positive/negative as separate batches on this fixture.
+        self.assertEqual(
+            [r[0] for r in self.records],
+            [step for step in [0, 0, 1, 1, 2, 2, 3, 4, 4, 5] for _ in range(2)],
+        )
+        self.assertEqual(
+            [r[2] for r in self.records], [True] * 4 + [False] * 14 + [True] * 2
+        )
+
+    def test_duplicate_sigmas_are_distinct_intervals(self):
+        sampling.sample_h3(
+            self.patcher,
+            conditioning(),
+            latent(audio=True),
+            first_sigmas={"first_sigmas": "manual", "sigmas": ".8,.8,.4,0"},
+        )
+        self.assertEqual(
+            [r[:3] for r in self.records],
+            [
+                (0, 3, True),
+                (1, 3, False),
+                (2, 3, True),
+            ],
+        )
+
+    def test_protection_budget_can_span_the_resolution_boundary(self):
+        for prefix, suffix, expected in (
+            (5, 0, [True] * 5 + [False]),
+            (0, 3, [False] * 3 + [True] * 3),
+            (20, 20, [True] * 6),
+        ):
+            with self.subTest(prefix=prefix, suffix=suffix):
+                self.schedule.dense_prefix_steps = prefix
+                self.schedule.dense_suffix_steps = suffix
+                self.records.clear()
+                self.run_task()
+                self.assertEqual([r[2] for r in self.records], expected)
+
+    def test_native_sampler_wrappers_keep_stage_specific_memory_scopes(self):
+        calls = []
+
+        def wrapper(executor, *args, **kwargs):
+            calls.append((len(args[1]) - 1, args[0].model_patcher))
+            return executor(*args, **kwargs)
+
+        self.patcher.add_wrapper_with_key(
+            comfy.patcher_extension.WrappersMP.SAMPLER_SAMPLE, "test", wrapper
+        )
+        self.run_task()
+        self.assertEqual([count for count, _ in calls], [4, 2])
+        self.assertTrue(all(patcher is self.patcher for _, patcher in calls))
+        self.assertIs(self.records[0][-1], self.records[-1][-1])
+
+    def test_skipped_first_pass_starts_prefix_at_second_pass(self):
+        sampling.sample_h3(
+            self.patcher,
+            conditioning(),
+            latent(audio=True),
+            first_sigmas={"denoise": 0},
+            latent_second=latent(7, 11),
+            second_sigmas={"second_sigmas": "manual", "sigmas": ".6,.3,0"},
+            upscale_model=object(),
+        )
+        self.assertEqual([r[:3] for r in self.records], [(0, 2, True), (1, 2, True)])
+
+    def test_failed_task_does_not_modify_shared_model_or_next_task(self):
+        original_options = self.patcher.model_options
+        with mock.patch.object(
+            self.patcher.model.diffusion_model,
+            "forward",
+            side_effect=RuntimeError("injected"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                self.run_task()
+        self.assertIs(self.patcher.model_options, original_options)
+        self.assertNotIn(
+            SAMPLING_PROGRESS_KEY, original_options.get("transformer_options", {})
+        )
+        self.run_task()
+        first_progress = self.records[0][-1]
+        self.run_task()
+        self.assertIsNot(first_progress, self.records[6][-1])
+        self.assertEqual(self.records[6][0], 0)
+
+    def test_all_native_solver_families_keep_numerics_and_report_steps(self):
+        from comfy.k_diffusion import sampling as kd
+        from comfy.extra_samplers import uni_pc
+
+        original_trange = kd.trange, uni_pc.trange
+        source = latent(audio=True)
+        positive, negative = conditioning(), conditioning()
+        curve = torch.tensor([0.9, 0.6, 0.3, 0.1, 0])
+        for name in comfy.samplers.KSampler.SAMPLERS:
+            with self.subTest(sampler=name):
+                self.records.clear()
+                noise = comfy.sample.prepare_noise(
+                    source["samples"], 13, source["batch_index"]
+                )
+                expected = comfy.sample.sample_custom(
+                    self.patcher,
+                    noise,
+                    2,
+                    comfy.samplers.sampler_object(name),
+                    curve,
+                    positive,
+                    negative,
+                    source["samples"],
+                    disable_pbar=True,
+                    seed=13,
+                )
+                actual = sampling.sample_h3(
+                    self.patcher,
+                    positive,
+                    source,
+                    seed=13,
+                    cfg=2,
+                    negative=negative,
+                    sampler_name=name,
+                    first_sigmas={"first_sigmas": "manual", "sigmas": ".9,.6,.3,.1,0"},
+                )["samples"]
+                for a, e in zip(actual.unbind(), expected.unbind()):
+                    torch.testing.assert_close(a, e, rtol=0, atol=0, equal_nan=True)
+                steps = [r[0] for r in self.records]
+                self.assertTrue(steps, "Native solver did not publish task progress")
+                self.assertEqual(steps[0], 0)
+                if name in {"dpm_fast", "dpm_adaptive"}:
+                    self.assertTrue(all(0 <= step < 4 for step in steps))
+                else:
+                    self.assertEqual(sorted(set(steps)), list(range(4)))
+        self.assertIs(kd.trange, original_trange[0])
+        self.assertIs(uni_pc.trange, original_trange[1])
+
+
 class H3SamplerLoaderTest(unittest.TestCase):
     def test_dynamic_schemas_and_native_executor_execute_all_four_mode_pairs(self):
         import execution
@@ -780,9 +1069,10 @@ class H3SamplerLoaderTest(unittest.TestCase):
                     with (
                         mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, NODE_CLASS_MAPPINGS),
                         mock.patch.object(
-                            sampling,
-                            "_sample_stage",
-                            side_effect=lambda _model, latent, *args: latent,
+                            sampling.H3SamplingTask,
+                            "sample_stage",
+                            autospec=True,
+                            side_effect=lambda _task, latent, *args: latent,
                         ) as stage,
                     ):
                         executor = execution.PromptExecutor(

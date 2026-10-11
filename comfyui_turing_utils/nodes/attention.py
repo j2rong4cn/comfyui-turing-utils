@@ -76,7 +76,7 @@ def sol_inputs():
                     "min": 0,
                     "max": 1000,
                     "step": 1,
-                    "tooltip": "Leading steps of every sampler invocation that use the loader-selected dense backend across every transformer layer.",
+                    "tooltip": "Leading steps using dense attention across all layers. H3 KSampler counts both stages as one task; ordinary samplers count separately.",
                 },
             ),
             "dense_suffix_steps": (
@@ -86,7 +86,7 @@ def sol_inputs():
                     "min": 0,
                     "max": 1000,
                     "step": 1,
-                    "tooltip": "Trailing steps of every sampler invocation that use the loader-selected dense backend across every transformer layer.",
+                    "tooltip": "Trailing steps using dense attention across all layers. H3 KSampler counts both stages as one task; ordinary samplers count separately.",
                 },
             ),
             "dense_prefix_layers": (
@@ -182,7 +182,7 @@ def sla_inputs():
                     "min": 0,
                     "max": 1000,
                     "step": 1,
-                    "tooltip": "Leading steps of every sampler invocation that use the loader-selected dense backend across every transformer layer.",
+                    "tooltip": "Leading steps using dense attention across all layers. H3 KSampler counts both stages as one task; ordinary samplers count separately.",
                 },
             ),
             "dense_suffix_steps": (
@@ -192,7 +192,7 @@ def sla_inputs():
                     "min": 0,
                     "max": 1000,
                     "step": 1,
-                    "tooltip": "Trailing steps of every sampler invocation that use the loader-selected dense backend across every transformer layer.",
+                    "tooltip": "Trailing steps using dense attention across all layers. H3 KSampler counts both stages as one task; ordinary samplers count separately.",
                 },
             ),
             "dense_prefix_layers": (

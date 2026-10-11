@@ -28,6 +28,7 @@ class _H3KSamplerApply(io.ComfyNode):
                 "Finish an automatic or manual first curve to zero. A second latent enables a separate preset or manual curve; "
                 "only its H/W are used unless a first-pass video mask protects part of the base. "
                 "Steps/denoise/scheduler apply only to automatic first sampling. Manual curves are used exactly as entered."
+                " Attention step protection and preview progress span both stages without a second prefix restart."
             ),
             inputs=[
                 io.Model.Input("model"),

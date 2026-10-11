@@ -94,6 +94,8 @@ effects.
 | `runtime/capabilities.py` | immutable device facts plus independently versioned kernel feature probes |
 | `runtime/stage_barrier.py` | prompt-local dependency rounds, phase-label rendezvous and incremental lazy/dynamic barrier planning |
 | `runtime/stage_barrier_prompt.py` | pre-validation expansion of visual multi-port barriers into independent unary cache/execution paths |
+| `runtime/sampling.py` | execution-local task step progress and native solver-loop bridge; no MODEL/global mutation or duplicated solver math |
+| `adapters/minimax/sampling.py` | H3 task preflight, complete first sampling, clean upscale/inpaint handoff and second restart; one attention/preview timeline |
 | `adapters/memory.py` | common quantized workspace scan and BaseModel memory-hook installation |
 | `adapters/minimax/policy_config.py` | environment/config parsing only; no live CUDA state |
 | `adapters/minimax/memory_state.py` | live allocator/DynamicVRAM observation and bounded reclaim requests |
@@ -119,6 +121,15 @@ effects.
 facts with operator-level ABI probes without launching CUDA. `kernel_api.py` is the only module
 allowed to import the independently installed kernel package. `registration.py`
 is the only node mapping table.
+
+H3 sampling separates task progress from numerical solver state. One
+`H3SamplingTask` owns both stages and their clean upscale/mask handoff;
+`NativeStepSampler` delegates model loading, hooks, inpainting and solver math
+to ComfyUI. A task-local solver namespace observes the native iteration loop
+because native preview callbacks have different timing across solver families.
+It never changes ComfyUI module globals. Sparse strategies read Python step
+metadata, while H3 retains each stage's real `sample_sigmas`. All native sampler
+families are regression-tested; changed loop contracts fail explicitly.
 
 Inside the kernel package, `turing_sage/records.py` owns immutable prepared
 tensor contracts, `sparse_policy.py` owns cached route construction, and

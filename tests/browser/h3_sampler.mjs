@@ -62,6 +62,17 @@ try {
       node.widgets.find((w) => w.name === "second_sigmas").value === "preset",
       "Second curve must default to preset",
     );
+    const presetWidget = node.widgets.find((w) => w.name === "second_sigmas.preset");
+    check(presetWidget.value === "3 steps · 0.9035 → 0", "Existing default changed");
+    const presets = typeof presetWidget.options.values === "function"
+      ? presetWidget.options.values()
+      : presetWidget.options.values;
+    check(presets.includes("2 steps · 0.6316 → 0"), "Two-step preset is missing");
+    presetWidget.value = "2 steps · 0.6316 → 0";
+    presetWidget.callback?.(presetWidget.value);
+    const twoStepPrompt = (await app.graphToPrompt()).output[String(node.id)].inputs;
+    check(twoStepPrompt["second_sigmas.preset"] === presetWidget.value,
+      "Two-step preset did not serialize by name");
     const fixed = inputOrder.slice(0, 7);
     const setMode = async (name, value) => {
       for (const n of [node, reference]) {
