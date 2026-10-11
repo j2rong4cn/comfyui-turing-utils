@@ -3,6 +3,7 @@ import { api } from "../../../scripts/api.js";
 import { bindMaterialCombo } from "../lib/material_combo.js";
 import { parameterWidget } from "../lib/parameter_widget.js";
 import { action, report, request } from "./api.js";
+import { chooseUpload } from "./material_selection.js";
 
 let playing = null;
 export const stopActivePreview = () => playing?.releasePlayer();
@@ -26,6 +27,28 @@ export function url(directory, asset, thumbnail = false) {
       }),
   );
 }
+function installDownloadMenu(element, node, material) {
+  element.oncontextmenu = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    LiteGraph.closeAllContextMenus();
+    new LiteGraph.ContextMenu(
+      [
+        {
+          content: "下载生成结果",
+          disabled: !material.selection.asset,
+          callback: () => {
+            const link = document.createElement("a");
+            link.href = url(node.properties.directory, material.selection.asset);
+            link.download = material.selection.asset.split("/").at(-1);
+            link.click();
+          },
+        },
+      ],
+      { event },
+    );
+  };
+}
 export function controls(node, m, { select, importMedia, run }) {
   if (m.kind === "text")
     field(
@@ -41,6 +64,7 @@ export function controls(node, m, { select, importMedia, run }) {
       const img = new Image();
       img.loading = "lazy";
       img.style.cssText = "width:100%;height:100%;max-height:180px;object-fit:contain";
+      installDownloadMenu(img, node, m);
       if (m.selection.asset)
         img.src = url(node.properties.directory, m.selection.asset, true);
       node.posters ||= new Map();
@@ -74,21 +98,18 @@ export function controls(node, m, { select, importMedia, run }) {
       select: action((asset) => select(node, m, { asset })),
     }).catch(report);
     if (m.allowUpload !== false)
-      button(node, "choose file to upload", () => {
-        const input = document.createElement("input");
-        input.type = "file";
-        input.accept = m.kind + "/*";
-        input.onchange = action(async () => {
-          if (!input.files[0]) return;
-          await importMedia(node, m, input.files[0]);
-        });
-        input.click();
-      });
+      button(node, "choose file to upload", () =>
+        chooseUpload(
+          m.kind,
+          action((file) => importMedia(node, m, file)),
+        ),
+      );
     button(node, `${m.kind} · 预览`, () => {
       if (!m.selection.asset) return;
       playing?.releasePlayer();
       node.releasePlayer();
       const media = document.createElement(m.kind === "image" ? "img" : m.kind);
+      installDownloadMenu(media, node, m);
       media.style.cssText =
         "width:100%;height:100%;max-height:240px;object-fit:contain";
       if (m.kind !== "image") {

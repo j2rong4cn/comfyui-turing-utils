@@ -1,5 +1,13 @@
 /** File-backed native tabs. Only managed tabs replace their storage operations. */
 import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import { report } from "./api.js";
+import {
+  assertWorkflowLinks,
+  normalizeAutogrowLayouts,
+} from "../lib/workflow_metadata.js";
+import { settleMaterials } from "./material_selection.js";
+import { settleProjectWrites } from "./project_state.js";
 
 const documents = new WeakMap();
 
@@ -8,16 +16,19 @@ export function fileReference(state) {
 }
 export function documentPath(reference) {
   if (reference.id)
-    return `canvas/projects/${reference.directory}/cards/${reference.id}/workflow.json`;
-  if (reference.directory) return `canvas/projects/${reference.directory}/canvas.json`;
+    return `workflows/canvas/projects/${reference.directory}/cards/${reference.id}/workflow.json`;
+  if (reference.directory) {
+    const title = reference.directory.replaceAll("/", " › ");
+    return `workflows/canvas/projects/${reference.directory}/Canvas - ${title}.json`;
+  }
   return reference.name
-    ? `canvas/library/${reference.name}`
-    : `canvas/new/${reference.new}.json`;
+    ? `workflows/canvas/library/${reference.name}`
+    : `workflows/canvas/new/${reference.new}.json`;
 }
 
 export function fileTab(reference) {
   return app.extensionManager.workflow.openWorkflows.find((tab) => {
-    const other = fileReference(tab.activeState);
+    const other = fileReference(tab.activeState) || documents.get(tab);
     return (
       other &&
       reference.directory === other.directory &&
@@ -28,20 +39,48 @@ export function fileTab(reference) {
   });
 }
 
+export async function snapshotCard(graph = app.rootGraph) {
+  // The API's workflow copy compresses widget sockets and renumbers link slots.
+  // Cards are editable files, not execution metadata: persist the native editor
+  // snapshot including empty Autogrow slots and nested graphs. Keep API inputs
+  // separate so they still receive the normal endpoint/DynamicCombo expansion.
+  const workflow = structuredClone(
+    graph.serialize({
+      sortNodes: app.extensionManager.setting.get("Comfy.Workflow.SortNodeIdOnSave"),
+    }),
+  );
+  assertWorkflowLinks(workflow);
+  normalizeAutogrowLayouts(workflow);
+  const task = await app.graphToPrompt(graph);
+  return { ...task, workflow };
+}
+
 async function promptForTab(tab) {
-  if (tab === app.extensionManager.workflow.activeWorkflow)
-    return app.graphToPrompt(app.rootGraph);
-  const graph = new LiteGraph.LGraph();
+  const store = app.extensionManager.workflow;
+  if (tab === store.activeWorkflow) return snapshotCard(app.rootGraph);
+  // Native subgraph constructors are bound to app.rootGraph. A parallel LGraph
+  // silently reuses stale definitions, so compile an inactive file by loading
+  // its native tab and then restoring the previous tab (including its draft).
+  const previous = store.activeWorkflow;
+  previous.changeTracker.captureCanvasState();
+  const workflow = JSON.parse(JSON.stringify(tab.activeState));
   try {
-    graph.configure(structuredClone(tab.activeState));
-    return await app.graphToPrompt(graph);
+    await app.loadGraphData(workflow, true, true, tab);
+    return await snapshotCard();
   } finally {
-    graph.clear();
+    // Do not override a tab the user selected while prompt generation awaited.
+    if (store.activeWorkflow === tab)
+      await app.loadGraphData(
+        JSON.parse(JSON.stringify(previous.activeState)),
+        true,
+        true,
+        previous,
+      );
   }
 }
 
 function sourceSignature(workflow) {
-  const source = structuredClone(workflow);
+  const source = JSON.parse(JSON.stringify(workflow));
   // These are file identity/derived snapshots, not edits to the workflow.
   delete source.extra?.turing_editor;
   delete source.extra?.turing_card;
@@ -52,15 +91,39 @@ function sourceSignature(workflow) {
 export function installDocumentStorage({ save, load, saveAs }) {
   const manager = app.extensionManager;
   const store = manager.workflow;
-  const bind = () => {
-    const tab = store.activeWorkflow;
-    const reference = fileReference(app.rootGraph);
-    if (!tab || !reference) return;
+  const sessionKey = () => `turing.documents:${api.apiURL("/")}:${api.user}`;
+  let restoring = true;
+  let restored = false;
+  let lastReferences;
+  const persistReferences = () => {
+    if (restoring || !manager.setting.get("Comfy.Workflow.Persist")) return;
+    // Only file identities belong here. Native persistence owns tab order,
+    // active selection and unsaved graph drafts under the workflows/ namespace.
+    const references = store.openWorkflows
+      .map((tab) => documents.get(tab))
+      .filter(Boolean)
+      .map(({ directory, id, name, new: fresh, source }) => ({
+        directory,
+        id,
+        name,
+        new: fresh,
+        source,
+      }));
+    const value = JSON.stringify(references);
+    if (value === lastReferences) return;
+    try {
+      sessionStorage.setItem(sessionKey(), value);
+      lastReferences = value;
+    } catch (error) {
+      report(error);
+    }
+  };
+  const bindTab = (tab, reference) => {
     if (documents.has(tab)) {
       documents.set(tab, reference);
       return;
     }
-    const Tracker = tab.changeTracker.constructor;
+    const nativeLoad = tab.load;
     documents.set(tab, reference);
     // Native close/save must not route an existing project file through its
     // temporary-workflow Save As dialog. Paths are tab keys, never userdata writes.
@@ -71,6 +134,10 @@ export function installDocumentStorage({ save, load, saveAs }) {
           this === store.activeWorkflow ? app.rootGraph : this.activeState,
         ) || documents.get(this);
       documents.set(this, reference);
+      if (reference.directory) {
+        await settleMaterials(reference.directory);
+        await settleProjectWrites(reference.directory);
+      }
       const task =
         reference.directory && !reference.id ? null : await promptForTab(this);
       // graphToPrompt compresses widget input slots and removes localized
@@ -97,6 +164,11 @@ export function installDocumentStorage({ save, load, saveAs }) {
       this.size = this.content.length;
       this.lastModified = Date.now();
       this.isModified = false;
+      persistReferences();
+      // The native draft watcher removes the now-clean saved graph. Otherwise
+      // an older draft could reappear on the next page refresh.
+      if (this === store.activeWorkflow)
+        api.dispatchCustomEvent("graphChanged", this.activeState);
       return this;
     };
     tab.load = async function ({ force = false } = {}) {
@@ -104,9 +176,17 @@ export function installDocumentStorage({ save, load, saveAs }) {
       const reference = documents.get(this);
       const workflow = await load(reference);
       this.content = this.originalContent = JSON.stringify(workflow);
-      this.changeTracker = new Tracker(this, workflow);
       this.isModified = false;
-      return this;
+      // Initialize the native tracker/draft overlay from in-memory content,
+      // without reading a nonexistent userdata file. Restore tabs lazily, just
+      // like ordinary workflows, rather than loading every project at startup.
+      this.size = -1;
+      this.lastModified = 0;
+      try {
+        return await nativeLoad.call(this, { force });
+      } finally {
+        this.size = this.content.length;
+      }
     };
     tab.rename = async function (path) {
       if (path !== documentPath(documents.get(this)))
@@ -119,6 +199,31 @@ export function installDocumentStorage({ save, load, saveAs }) {
         throw Error("这个文件由画布管理；卡片副本请使用另存为");
       };
   };
+  const bind = () => {
+    const tab = store.activeWorkflow;
+    const reference = fileReference(app.rootGraph);
+    if (!tab || !reference) return;
+    bindTab(tab, reference);
+    persistReferences();
+  };
+  const restoreReferences = () => {
+    try {
+      const references = manager.setting.get("Comfy.Workflow.Persist")
+        ? JSON.parse(sessionStorage.getItem(sessionKey()) || "[]")
+        : [];
+      for (const reference of references) {
+        const path = documentPath(reference);
+        if (store.getWorkflowByPath(path)) continue;
+        store.createNewTemporary(path.slice("workflows/".length));
+        bindTab(store.getWorkflowByPath(path), reference);
+      }
+    } catch (error) {
+      report(error);
+    } finally {
+      restoring = false;
+    }
+  };
+  store.$onAction(({ after }) => after(persistReferences));
   const commands = manager.command.commands;
   for (const id of ["Comfy.SaveWorkflow", "Comfy.SaveWorkflowAs"]) {
     const command = commands.find((c) => c.id === id);
@@ -140,17 +245,23 @@ export function installDocumentStorage({ save, load, saveAs }) {
     if (documents.has(tab)) throw Error("卡片副本请使用另存为；画布需要复制整个项目");
     return duplicate.call(this, tab, ...args);
   };
-  // The native list reconciler removes every non-temporary descriptor absent
-  // from userdata/workflows (including files in other namespaces). Reattach
-  // our file descriptors through the public store API; never fake userdata files.
-  const sync = store.syncWorkflows;
-  store.syncWorkflows = async function (...args) {
-    const managed = store.workflows.filter((tab) => documents.has(tab));
-    try {
-      return await sync.apply(this, args);
-    } finally {
-      for (const tab of managed) store.attachWorkflow(tab);
-    }
-  };
+  // Startup loadWorkflows calls its lexical syncWorkflows, not the exported
+  // method. Adapt both public entry points so native restoration can resolve
+  // managed descriptors, and list refresh cannot remove them.
+  for (const name of ["syncWorkflows", "loadWorkflows"]) {
+    const original = store[name];
+    store[name] = async function (...args) {
+      const managed = store.workflows.filter((tab) => documents.has(tab));
+      try {
+        return await original.apply(this, args);
+      } finally {
+        for (const tab of managed) store.attachWorkflow(tab);
+        if (name === "loadWorkflows" && !restored) {
+          restored = true;
+          restoreReferences();
+        }
+      }
+    };
+  }
   return bind;
 }

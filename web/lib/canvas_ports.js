@@ -1,5 +1,6 @@
 import { parameterWidget, labelParameter } from "./parameter_widget.js";
 import { hideMetadataSocket } from "./workflow_metadata.js";
+import { reorderInputs } from "./input_slots.js";
 import {
   DYNAMIC_COMBO,
   dynamicDefinition,
@@ -185,7 +186,7 @@ export function syncPorts(node, ports, { syncTargets = true } = {}) {
     // Modern LiteGraph derives connectivity from slot indices. Snapshot links
     // before moving descriptors; reading slot.links afterwards reads another port.
     const inputLinks = new Map(
-      node.inputs.map((s) => [s._portId, node.graph?.links[s.link]]),
+      node.inputs.map((s, i) => [s._portId, node.graph ? node.getInputLink(i) : null]),
     );
     const outputLinks = new Map(
       node.outputs.map((s) => [
@@ -193,12 +194,7 @@ export function syncPorts(node, ports, { syncTargets = true } = {}) {
         (s.links || []).map((id) => node.graph?.links[id]).filter(Boolean),
       ]),
     );
-    // Vacate target slots before assigning their new indices (input slots are unique).
-    for (const [id, link] of inputLinks)
-      if (link) link.target_slot = node.inputs.length + order.get(id);
-    node.inputs.sort(
-      (a, b) => (order.get(a._portId) ?? -1) - (order.get(b._portId) ?? -1),
-    );
+    reorderInputs(node, order, inputLinks, (slot) => slot._portId);
     node.outputs.sort((a, b) => order.get(a._portId) - order.get(b._portId));
     ports.forEach((p, i) => (p.slot = i));
     for (let i = 0; i < node.inputs.length; i++) {
@@ -212,8 +208,6 @@ export function syncPorts(node, ports, { syncTargets = true } = {}) {
       s.label = p.name;
       s.localized_name = p.name;
       s.type = p.type;
-      const link = inputLinks.get(s._portId);
-      if (link) link.target_slot = i;
     }
     for (let i = 0; i < node.outputs.length; i++) {
       const s = node.outputs[i],

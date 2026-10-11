@@ -1,6 +1,8 @@
 /** Per-project save ordering and lightweight native graph snapshots. */
 import { app } from "../../../scripts/app.js";
+import { SerialWrites } from "../lib/serial_writes.js";
 import { request } from "./api.js";
+import { settleMaterials } from "./material_selection.js";
 
 export const ROOT = "TuringCanvasProject",
   CARD = "TuringCanvasCard",
@@ -23,7 +25,7 @@ function snapshot(directory) {
     ? { ...tab.activeState, nodes: [...tab.activeState.nodes] }
     : null;
 }
-export function enqueueSave(state, operation) {
+export function enqueueSave(state, operation, edit) {
   // Callers may capture a state before awaiting another save (card insertion
   // does this). The live tab owns the latest revision, not an idle queue cache.
   const revision = Math.max(
@@ -32,32 +34,57 @@ export function enqueueSave(state, operation) {
   );
   let queue = saves.get(state.directory);
   if (!queue)
-    saves.set(
-      state.directory,
-      (queue = { revision, tail: Promise.resolve(), pending: 0 }),
-    );
+    saves.set(state.directory, (queue = { revision, writes: new SerialWrites() }));
   queue.revision = Math.max(queue.revision, revision);
-  queue.pending++;
-  const task = queue.tail.then(async () => {
-    const result = await operation(queue.revision);
-    queue.revision = result.revision;
-    state.revision = result.revision;
-    if (project()?.directory === state.directory) project().revision = result.revision;
-    for (const tab of app.extensionManager.workflow.openWorkflows) {
-      const p = tab.activeState?.extra?.turing_project;
-      if (p?.directory === state.directory) p.revision = result.revision;
+  return queue.writes
+    .run(async () => {
+      const result = await operation(queue.revision);
+      queue.revision = result.revision;
+      state.revision = result.revision;
+      if (project()?.directory === state.directory)
+        project().revision = result.revision;
+      for (const tab of app.extensionManager.workflow.openWorkflows) {
+        const p = tab.activeState?.extra?.turing_project;
+        if (p?.directory === state.directory) p.revision = result.revision;
+      }
+      return result;
+    }, edit)
+    .finally(() => {
+      if (queue.writes.idle && saves.get(state.directory) === queue)
+        saves.delete(state.directory);
+    });
+}
+export function assertProjectSaved(directory) {
+  try {
+    saves.get(directory)?.writes.assertSaved();
+  } catch (error) {
+    throw Error(`参数修改保存失败，请重新修改对应参数后再执行：${error.message}`);
+  }
+}
+export async function settleProjectWrites(directory) {
+  for (;;) {
+    const queue = saves.get(directory);
+    if (!queue) return;
+    try {
+      await queue.writes.settle();
+    } catch {
+      assertProjectSaved(directory);
     }
-    return result;
-  });
-  queue.tail = task.catch(() => {});
-  return task.finally(() => {
-    queue.pending--;
-    if (queue.pending === 0 && saves.get(state.directory) === queue)
-      saves.delete(state.directory);
-  });
+    if (saves.has(directory) && saves.get(directory) !== queue) continue;
+    return;
+  }
 }
 export async function saveProject(directory = project()?.directory) {
   if (typeof directory !== "string") directory = project()?.directory;
+  await settleMaterials(directory);
+  await settleProjectWrites(directory);
+  const result = await saveProjectLayout(directory);
+  assertProjectSaved(directory);
+  return result;
+}
+// Selection commits already run inside their own write queue. This lower-level
+// layout save must not wait on that same material queue.
+export async function saveProjectLayout(directory) {
   if (!directory) throw Error("当前不是画布");
   const state = projectState(directory);
   if (!state) return; // A closed project already saved before task submission.

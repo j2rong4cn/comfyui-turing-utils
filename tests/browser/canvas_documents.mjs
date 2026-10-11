@@ -78,7 +78,8 @@ try {
       "First save did not bind the template file",
     );
     check(
-      app.extensionManager.workflow.activeWorkflow.path === `canvas/library/${name}`,
+      app.extensionManager.workflow.activeWorkflow.path ===
+        `workflows/canvas/library/${name}`,
       "Wrong managed tab file identity",
     );
     const libraryTab = app.extensionManager.workflow.activeWorkflow;

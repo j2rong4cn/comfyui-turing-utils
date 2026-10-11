@@ -8,6 +8,7 @@ import {
   importAsset,
   materialChanged,
   materialChanges,
+  mutateMaterial,
 } from "./material_selection.js";
 
 export function installProjectMaterials(graph, editing, run) {
@@ -23,7 +24,6 @@ export function installProjectMaterials(graph, editing, run) {
     );
     const state = {
       selection: editing.selections[target] || {},
-      tail: Promise.resolve(),
     };
     node.projectMaterial = state;
     const canonical = () =>
@@ -63,26 +63,24 @@ export function installProjectMaterials(graph, editing, run) {
       }
       node.graph?.setDirtyCanvas(true, true);
     };
-    const select = (content) => {
-      const task = state.tail.then(async () => {
-        if (
-          (kind === "text" && content.text === (state.selection.text || "")) ||
-          (kind !== "text" && content.asset === state.selection.asset)
-        )
-          return;
-        const selection = await request("editor/select", {
-          directory: editing.directory,
-          id: editing.id,
-          stub,
-          selection: content,
-          revision: state.selection.revision || 0,
-        });
-        materialChanged(editing.directory, target, selection);
-        await widget.refreshMaterialList?.();
+    const persistSelection = async (content) => {
+      if (
+        (kind === "text" && content.text === (state.selection.text || "")) ||
+        (kind !== "text" && content.asset === state.selection.asset)
+      )
+        return;
+      const selection = await request("editor/select", {
+        directory: editing.directory,
+        id: editing.id,
+        stub,
+        selection: content,
+        revision: state.selection.revision || 0,
       });
-      state.tail = task.catch(() => {});
-      return task;
+      materialChanged(editing.directory, target, selection);
+      await widget.refreshMaterialList?.();
     };
+    const select = (content) =>
+      mutateMaterial(editing.directory, target, () => persistSelection(content));
     const listener = ({ detail }) => {
       if (detail.directory === editing.directory && detail.target === target)
         update(detail.selection);
@@ -112,8 +110,11 @@ export function installProjectMaterials(graph, editing, run) {
         selected: () => state.selection.asset,
         select: action((asset) => select({ asset })),
       }).catch(report);
-      const upload = action(async (file) =>
-        select({ asset: await importAsset(editing.directory, kind, file) }),
+      const upload = action((file) =>
+        mutateMaterial(editing.directory, target, async () => {
+          const asset = await importAsset(editing.directory, kind, file);
+          await persistSelection({ asset });
+        }),
       );
       const uploadWidget = node.widgets.find((w) => w.name === "upload");
       if (uploadWidget) uploadWidget.callback = () => chooseUpload(kind, upload);

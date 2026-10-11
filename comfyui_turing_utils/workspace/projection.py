@@ -134,7 +134,7 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                                     "class_type": "TuringMaterial" + kind.title(),
                                     "inputs": {},
                                 }
-        materials, fields = [], []
+        materials, material_names, fields = [], {}, []
         configuration_id = f"{instance['id']}:parameters"
         parameters = {}
         layout = []
@@ -144,6 +144,7 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                     interface["stubs"][interface["positions"][port["id"]]]
                 ]
                 materials.append(material)
+                material_names[material] = port["name"]
                 layout.append({"material": material})
             elif is_parameter(port):
                 value = overrides.get(port["id"], parameter_default(port))
@@ -175,6 +176,7 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
             {
                 **instance,
                 "materials": materials,
+                "material_names": material_names,
                 "material_options": material_options(workflow, interface, identities),
                 "fields": fields,
                 "layout": layout,

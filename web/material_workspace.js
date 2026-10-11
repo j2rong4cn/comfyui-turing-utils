@@ -4,50 +4,51 @@ import { INPUTS, entries, syncPorts } from "./lib/canvas_ports.js";
 import { DirectoryPicker } from "./lib/directory_picker.js";
 import { setWidgetValue } from "./lib/parameter_widget.js";
 import {
+  assertWorkflowLinks,
+  normalizeAutogrowLayouts,
+} from "./lib/workflow_metadata.js";
+import {
   documentPath,
   fileReference,
   fileTab,
   installDocumentStorage,
+  snapshotCard,
 } from "./workspace/documents.js";
 import { installProjectMaterials } from "./workspace/editor_materials.js";
+import { registerCanvasNodes } from "./workspace/card_nodes.js";
 import {
   importAsset,
   materialChanged,
   materialChanges,
+  mutateMaterial,
 } from "./workspace/material_selection.js";
 import { request, report, action, prompt } from "./workspace/api.js";
-import {
-  button,
-  field,
-  url,
-  controls,
-  releasePlayer,
-  clearPosters,
-  stopActivePreview,
-} from "./workspace/material_controls.js";
+import { url, stopActivePreview } from "./workspace/material_controls.js";
 import {
   ROOT,
   CARD,
-  jobs,
   project,
   editor,
   projectState,
   enqueueSave,
   saveProject,
+  saveProjectLayout,
   setProjectStatus,
 } from "./workspace/project_state.js";
+import { installLocalExecution, runMaterial } from "./workspace/execution.js";
 
 let templates = [];
 let bindDocument;
 export { request } from "./workspace/api.js";
+export { saveProject } from "./workspace/project_state.js";
 export async function openTab(workflow, name) {
   const reference = fileReference(workflow);
   let tab = reference && fileTab(reference);
   if (reference && !tab) {
     const store = app.extensionManager.workflow;
     tab = store.createNewTemporary(name, workflow);
-    // Keep managed files outside the ordinary userdata/workflows namespace.
-    // Native tab/list refresh must not delete a project-owned file descriptor.
+    // This logical path enables native tab recovery. The document adapter
+    // routes all file operations to the project/library, never userdata.
     await store.renameWorkflow(tab, documentPath(reference));
   }
   await app.loadGraphData(workflow, true, true, tab || name);
@@ -66,7 +67,7 @@ function configureCard(node, card, document, directory) {
   const names = new Map(card.outputs.map((p) => [p.source, p.name]));
   node.properties.materials = card.materials.map((id) => ({
     id,
-    name: names.get(id) || "素材",
+    name: names.get(id) || card.material_names[id],
     kind: document.prompt[id].class_type.replace("TuringMaterial", "").toLowerCase(),
     allowUpload: card.material_options?.[id]?.allow_upload !== false,
     selection: document.selections[id] || {},
@@ -137,7 +138,6 @@ export async function openProject(directory, create = false) {
     `Canvas - ${directory}.json`,
   );
 }
-export { saveProject } from "./workspace/project_state.js";
 export async function addCard(spec, position) {
   const state = { ...project() },
     directory = state.directory;
@@ -199,8 +199,8 @@ function restoreEditor(graph, editing) {
 }
 function installEditorMaterials(graph, editing) {
   installProjectMaterials(graph, editing, async (node, target, onSuccess) => {
-    // The same compiler as outer cards: upstream material boundaries are reads,
-    // only this stub is written. The editor never submits a full workflow run.
+    // Use the same local task flow as outer cards, including missing upstream
+    // materials. The editor never submits a full workflow run.
     await fileTab(editing).save();
     const state =
       projectState(editing.directory) ||
@@ -211,7 +211,7 @@ function installEditorMaterials(graph, editing) {
 }
 async function saveCard(editing = editor(), task) {
   if (!editing) throw Error("请先打开卡片工作流");
-  const { workflow, output } = task || (await app.graphToPrompt(app.rootGraph));
+  const { workflow, output } = task || (await snapshotCard());
   delete workflow.extra.turing_editor;
   const parameters = Object.fromEntries(
     Object.values(output)
@@ -265,7 +265,7 @@ async function saveTemplate() {
   if (project()) throw Error("请在卡片工作流中保存模板");
   const name = await prompt("卡片文件名", editor()?.name || "我的卡片.json");
   if (!name) return;
-  const { workflow, output } = await app.graphToPrompt(app.rootGraph);
+  const { workflow, output } = await snapshotCard();
   delete workflow.extra?.turing_editor;
   const reference = await request("template/save", {
     name,
@@ -326,31 +326,35 @@ async function refreshMaterial(node, m, directory) {
   const poster = node.posters?.get(m.id);
   if (poster && m.selection.asset) poster.src = url(directory, m.selection.asset, true);
 }
-async function select(node, m, content) {
-  const previous = m.pending || Promise.resolve();
-  const task = previous.then(async () => {
-    if (
-      (m.kind === "text" && content.text === (m.selection.text || "")) ||
-      (m.kind !== "text" && content.asset === m.selection.asset)
-    )
-      return;
-    const directory = node.properties.directory;
-    await request("select", {
-      directory,
-      node: m.id,
-      selection: content,
-      revision: m.selection.revision || 0,
-    });
-    await refreshMaterial(node, m, directory);
-    await saveProject(directory);
+function select(node, m, content) {
+  return mutateMaterial(node.properties.directory, m.id, () =>
+    persistSelection(node, m, content),
+  );
+}
+async function persistSelection(node, m, content) {
+  if (
+    (m.kind === "text" && content.text === (m.selection.text || "")) ||
+    (m.kind !== "text" && content.asset === m.selection.asset)
+  )
+    return;
+  const directory = node.properties.directory;
+  await request("select", {
+    directory,
+    node: m.id,
+    selection: content,
+    revision: m.selection.revision || 0,
   });
-  m.pending = task.catch(() => {});
-  return task;
+  await refreshMaterial(node, m, directory);
+  // Already inside the material mutation queue: waiting on that same queue
+  // here would deadlock. Only the public Save/Run boundaries flush it.
+  await saveProjectLayout(directory);
 }
 async function importMedia(node, m, file) {
   if (m.allowUpload === false) throw Error("这个素材桩已关闭卡片上传");
-  const asset = await importAsset(node.properties.directory, m.kind, file);
-  await select(node, m, { asset });
+  return mutateMaterial(node.properties.directory, m.id, async () => {
+    const asset = await importAsset(node.properties.directory, m.kind, file);
+    await persistSelection(node, m, { asset });
+  });
 }
 async function run(node, m) {
   const state = { ...project() },
@@ -360,157 +364,10 @@ async function run(node, m) {
     refreshMaterial(node, m, state.directory),
   );
 }
-async function runMaterial(state, target, trims, onSuccess) {
-  // Keep execution preparation in the same project queue as autosaves: a
-  // completed background job must not advance the revision during compilation.
-  const compiled = await enqueueSave(state, async (revision) => ({
-    ...(await request("compile", { ...state, revision, target, trims })),
-    revision,
-  }));
-  jobs.set(compiled.run_id, { onSuccess, directory: state.directory });
-  setProjectStatus(state.directory, "执行中");
-  const r = await api.fetchApi("/prompt", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: compiled.prompt,
-      prompt_id: compiled.run_id,
-      client_id: api.clientId,
-      partial_execution_targets: [target],
-    }),
-  });
-  if (!r.ok) {
-    jobs.delete(compiled.run_id);
-    setProjectStatus(state.directory, "执行失败");
-    throw Error(JSON.stringify(await r.json()));
-  }
-}
-class ProjectNode extends LiteGraph.LGraphNode {
-  constructor() {
-    super("Canvas Project");
-    this.flags = { pinned: true };
-    button(this, "保存项目", saveProject);
-  }
-  onConfigure() {
-    this.flags.pinned = true;
-    let w = this.widgets.find((w) => w.name === "项目目录");
-    if (!w)
-      w = this.addWidget("text", "项目目录", "", () => {}, {
-        serialize: false,
-      });
-    w.value = this.properties.directory;
-    w.disabled = true;
-    for (const [name, type, key] of [
-      ["项目名称", "STRING", "name"],
-      ["素材像素上限（MP）", "FLOAT", "max_megapixels"],
-    ]) {
-      const settings = this.properties.settings;
-      const widget =
-        this.widgets.find((w) => w.name === name) ||
-        field(
-          this,
-          name,
-          type,
-          settings[key],
-          async (value) => {
-            const state = this.graph.extra.turing_project;
-            await saveProject(this.properties.directory);
-            await enqueueSave(state, async (revision) => {
-              const next = { ...this.properties.settings, [key]: value };
-              const result = await request("project/settings", {
-                directory: state.directory,
-                revision,
-                settings: next,
-              });
-              this.properties.settings = next;
-              return result;
-            });
-          },
-          { min: 0.01, step: 10, precision: 2, multiline: false },
-        );
-      widget.value = settings[key];
-    }
-    for (const name of ["画布统计", "保存状态"]) {
-      if (!this.widgets.some((w) => w.name === name)) {
-        const widget = this.addWidget("text", name, "", () => {}, {
-          serialize: false,
-        });
-        widget.disabled = true;
-      }
-    }
-    setProjectStatus(
-      this.properties.directory,
-      "已保存",
-      this.properties.statistics,
-      this,
-    );
-    this.setSize(this.computeSize());
-  }
-}
-class CardNode extends LiteGraph.LGraphNode {
-  constructor() {
-    super("Canvas Card");
-  }
-  onDragOver() {
-    return true;
-  }
-  onDragDrop(event) {
-    const file = event.dataTransfer?.files?.[0];
-    if (!file) return false;
-    const material = this.properties.materials.find(
-      (m) => m.allowUpload !== false && file.type.startsWith(m.kind + "/"),
-    );
-    if (!material) {
-      report(Error("没有允许上传此类型文件的素材桩"));
-      return true;
-    }
-    action(() => importMedia(this, material, file))();
-    return true;
-  }
-  onConfigure() {
-    this.releasePlayer();
-    clearPosters(this);
-    for (const w of [...(this.widgets || [])]) this.removeWidget(w);
-    const card = this.properties.card;
-    if (!card) return;
-    for (const f of card.fields)
-      field(
-        this,
-        f.input,
-        f.type,
-        this.properties.values[f.input],
-        async (value) => {
-          const state = this.graph.extra.turing_project;
-          await enqueueSave(state, (revision) =>
-            request("patch", {
-              ...state,
-              revision,
-              changes: [{ type: "input", id: f.node, name: f.input, value }],
-            }),
-          );
-          this.properties.values[f.input] = value;
-        },
-        { ...f.options, label: f.label },
-      );
-    for (const m of this.properties.materials)
-      controls(this, m, { select, importMedia, run });
-    button(this, "编辑工作流", () => editCard(this));
-    this.setSize(this.computeSize());
-  }
-  releasePlayer() {
-    releasePlayer(this);
-  }
-  onRemoved() {
-    this.releasePlayer();
-    for (const w of this.widgets || []) w.onRemove?.();
-    clearPosters(this);
-  }
-}
 app.registerExtension({
   name: "TuringUtils.MaterialWorkspace",
   registerCustomNodes() {
-    LiteGraph.registerNodeType(ROOT, ProjectNode);
-    LiteGraph.registerNodeType(CARD, CardNode);
+    registerCanvasNodes({ editCard, select, importMedia, run });
   },
   commands: [
     {
@@ -627,14 +484,7 @@ app.registerExtension({
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) stopActivePreview();
     });
-    const queue = app.queuePrompt;
-    app.queuePrompt = function (...args) {
-      if (project() || editor()?.id) {
-        report(Error("画布及项目内卡片不执行整图；请使用素材桩的执行按钮"));
-        return Promise.resolve();
-      }
-      return queue.apply(this, args);
-    };
+    installLocalExecution();
     const menu = app.canvas.getCanvasMenuOptions;
     app.canvas.getCanvasMenuOptions = function (...args) {
       if (!project()) return menu.apply(this, args);
@@ -666,29 +516,20 @@ app.registerExtension({
         ...defaults.slice(1),
       ];
     };
-    for (const event of [
-      "execution_success",
-      "execution_error",
-      "execution_interrupted",
-    ])
-      api.addEventListener(
-        event,
-        action(async (e) => {
-          const job = jobs.get(e.detail.prompt_id);
-          if (!job) return;
-          jobs.delete(e.detail.prompt_id);
-          if (event !== "execution_success") {
-            setProjectStatus(job.directory, "执行未完成");
-            report(Error("执行未完成，已有素材保持不变"));
-            return;
-          }
-          await job.onSuccess();
-          await saveProject(job.directory);
-        }),
-      );
   },
-  beforeConfigureGraph() {
+  beforeConfigureGraph(workflow) {
     for (const node of app.rootGraph?._nodes || []) node.releasePlayer?.();
+    if (workflow.extra?.turing_editor || workflow.extra?.turing_card) {
+      // Native extension hooks swallow thrown errors. Show the invalid file
+      // explicitly and leave it open for repair; snapshotCard blocks its Save.
+      try {
+        assertWorkflowLinks(workflow);
+      } catch (error) {
+        report(error);
+        return;
+      }
+      normalizeAutogrowLayouts(workflow);
+    }
   },
   afterLoadGraph() {
     bindDocument?.();

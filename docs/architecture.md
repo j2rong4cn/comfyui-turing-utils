@@ -199,8 +199,20 @@ from the node module that happens to consume them.
 | `previews.py` | lazy still posters with bounded concurrent decoding and request deduplication |
 | `directories.py`, `routes.py` | instance-owned filesystem operations and HTTP adapters respectively |
 | `web/workspace/project_state.js` | per-project save queue and request-local native graph snapshots |
+| `web/workspace/card_nodes.js` | native card/project presentation, with service-owned action callbacks |
+| `web/workspace/execution.js` | recursive material tasks, native submission and execution events |
 | `web/workspace/material_controls.js` | native controls, posters and one active on-demand player |
 | `web/workspace/api.js` | API transport and native feedback |
+| `web/lib/native_graph.js` | isolated frontend-version workarounds for dynamic restoration and nested conversion |
+| `web/lib/input_slots.js`, `serial_writes.js` | shared link migration and ordered-write failure contracts; no project/UI ownership |
+
+Material and project writes share one small queue primitive, not one combined
+queue: selection commits can autosave layout without waiting on themselves.
+Failed parameter or setting writes remain execution blockers until that same
+field succeeds; unrelated saves cannot silently clear them. The native graph
+adapter uses indexed link lookup for normal restoration and scans only when a
+clone has extra, not-yet-rehydrated input slots. It is a removable frontend
+1.53.6 workaround, not a second graph editor or a general monkey-patch framework.
 
 Task compilation completes before a prepared run is recorded. Publication
 records a SQLite intent before updating `canvas.json`; retry or reopening can

@@ -3,7 +3,7 @@
 import math
 import uuid
 
-from .compiler import compile_segment
+from .compiler import MissingMaterial, compile_segment
 from .execution import fresh_type
 from .store import Conflict
 
@@ -26,14 +26,19 @@ def compile_task(project, target, revision, trims=None):
             document["selections"][node].update(start=start, end=end)
     selection_revision = document["selections"].get(target, {}).get("revision", 0)
     run_id = str(uuid.uuid4())
-    prompt = compile_segment(
-        document["prompt"],
-        target,
-        document["selections"],
-        project.directory,
-        run_id,
-        selection_revision,
-        fresh_type,
-    )
+    try:
+        prompt = compile_segment(
+            document["prompt"],
+            target,
+            document["selections"],
+            project.directory,
+            run_id,
+            selection_revision,
+            fresh_type,
+        )
+    except MissingMaterial as missing:
+        # The UI runs this boundary through the same task API, then recompiles
+        # from current selections. No partial graph or prepared run is retained.
+        return {"dependency": missing.target}
     project.begin_run(target, selection_revision, run_id)
     return {"prompt": prompt, "run_id": run_id, "target": target}

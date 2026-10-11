@@ -46,7 +46,7 @@ def describe(prompt):
                 other != name and other.startswith(name + ".") for other in bindings
             ):
                 raise ValueError("Dynamic parameter groups cannot overlap")
-    stubs, positioned, exported = {}, {}, set()
+    stubs, positioned = {}, {}
     for key, node in prompt.items():
         if node["class_type"] not in MATERIALS:
             continue
@@ -80,9 +80,6 @@ def describe(prompt):
             raise ValueError("Invalid material output slot")
         if port["type"] != types[source[1]]:
             raise ValueError("Exported port type does not match its material output")
-        exported.add(source[0])
-    if exported != set(stubs.values()):
-        raise ValueError("Every material must be connected to Canvas Outputs")
     return {
         "input_node": input_id,
         "output_node": output_id,
@@ -94,7 +91,7 @@ def describe(prompt):
 
 
 def project_content(workflow, prompt, interface):
-    """Keep the exported computation; tests outside the endpoints stay in templates."""
+    """Keep positioned materials and their computation, not external test branches."""
     kept = set()
 
     def visit(key):
@@ -108,6 +105,10 @@ def project_content(workflow, prompt, interface):
                 visit(value[0])
 
     visit(interface["output_node"])
+    # Position-bound materials also own previews and local execution. Exporting
+    # them to another card is optional, so retain their computation separately.
+    for key in interface["stubs"].values():
+        visit(key)
     kept.add(interface["input_node"])
     result = {key: copy.deepcopy(prompt[key]) for key in kept}
     inputs = result[interface["input_node"]]["inputs"]

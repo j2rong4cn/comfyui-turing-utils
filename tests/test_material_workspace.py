@@ -18,6 +18,7 @@ from comfy_execution.caching import CacheKeySetInputSignature
 from comfy_execution.graph import DynamicPrompt
 from execution import IsChangedCache, validate_prompt, _async_map_node_over_list
 from comfyui_turing_utils.workspace.compiler import compile_segment
+from comfyui_turing_utils.workspace.tasks import compile_task
 from comfyui_turing_utils.workspace.nodes import PUBLIC_NODES, INTERNAL_NODES
 from comfyui_turing_utils.workspace.execution import fresh_type
 from comfyui_turing_utils.workspace.materials import material_path, read_selected
@@ -68,6 +69,66 @@ class AddTextV3(io.ComfyNode):
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_position_only_material_keeps_computation_and_preview(self):
+        workflow, graph = material_template(("text",))
+        graph["2"]["inputs"] = {"ports": "[]"}
+        graph["3"]["inputs"]["text"] = ["4", 0]
+        graph["4"] = {"class_type": "WorkspaceTest", "inputs": {"text": "seed"}}
+        output = next(n for n in workflow["nodes"] if n["id"] == 2)
+        output.update(
+            inputs=[],
+            outputs=[],
+            widgets_values=["[]"],
+            widgets_values_named={"ports": "[]"},
+        )
+        workflow["nodes"].append({"id": 4, "type": "WorkspaceTest"})
+        workflow["links"] = workflow["links"][:1]
+        stub = graph["3"]["inputs"]["stub_id"]
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "internal"
+        )
+        saved, interface = workflow_files.unpack(
+            workflow_files.load_json(workflow_files.card_path(self.project.root, identity))
+        )
+        self.assertEqual(interface["outputs"], [])
+        self.assertIn("4", saved["prompt"])
+        document = self.project.document()
+        card = document["cards"][0]
+        target = identity + ":" + stub
+        self.assertEqual(card["materials"], [target])
+        self.assertEqual(card["material_names"][target], "Text")
+        result = compile_task(self.project, target, document["revision"])
+        self.assertEqual(result["target"], target)
+        graph["3"]["inputs"].pop("position")
+        with self.assertRaisesRegex(ValueError, "position binding"):
+            describe(graph)
+
+    def test_task_reports_missing_and_empty_dependencies_without_prepared_run(self):
+        workflow, graph = material_template(("text", "text"))
+        graph["3"]["inputs"]["text"] = ["5", 0]
+        graph["4"]["inputs"]["text"] = ["3", 0]
+        graph["5"] = {"class_type": "WorkspaceTest", "inputs": {"text": "seed"}}
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "chain"
+        )
+        upstream = identity + ":" + graph["3"]["inputs"]["stub_id"]
+        target = identity + ":" + graph["4"]["inputs"]["stub_id"]
+        revision = self.project.document()["revision"]
+        for content in (None, ""):
+            if content is not None:
+                self.project.select(upstream, {"text": content})
+            self.assertEqual(
+                compile_task(self.project, target, revision), {"dependency": upstream}
+            )
+        with self.project.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM runs").fetchone()[0], 0)
+        self.project.select(upstream, {"text": "ready"})
+        result = compile_task(self.project, target, revision)
+        self.assertEqual(
+            result["prompt"][upstream]["class_type"], "_TuringMaterialReadText"
+        )
+        self.assertNotIn(identity + ":node:5", result["prompt"])
+
     def test_project_copy_removes_external_test_branches_only(self):
         workflow, graph = material_template(("text",))
         ports = json.loads(graph["1"]["inputs"]["ports"])

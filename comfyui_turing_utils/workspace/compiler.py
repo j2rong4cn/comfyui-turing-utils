@@ -35,6 +35,12 @@ def is_link(value):
     )
 
 
+class MissingMaterial(ValueError):
+    def __init__(self, target, kind):
+        super().__init__(f"{kind.title()} material {target} has no saved content")
+        self.target = target
+
+
 def compile_segment(
     prompt, target, selections, directory, run_id, revision, fresh_type
 ):
@@ -73,15 +79,15 @@ def compile_segment(
         if kind and not destination:
             selected = selections.get(key, {})
             if kind == "text":
-                if "text" not in selected:
-                    raise ValueError(f"Text material {key} has no saved content")
+                if not selected.get("text"):
+                    raise MissingMaterial(key, kind)
                 compiled[output_key] = {
                     "class_type": "_TuringMaterialReadText",
                     "inputs": {"text": selected["text"], "run_id": run_id},
                 }
                 return output_key
             if not selected.get("asset"):
-                raise ValueError(f"Material {key} has no selected result")
+                raise MissingMaterial(key, kind)
             compiled[output_key] = {
                 "class_type": "_TuringMaterialRead" + kind.title(),
                 "inputs": {

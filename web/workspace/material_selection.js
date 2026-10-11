@@ -1,8 +1,38 @@
 /** Project imports and selection notifications shared by cards and their editors. */
 import { api } from "../../../scripts/api.js";
+import { SerialWrites } from "../lib/serial_writes.js";
 import { prompt, request } from "./api.js";
 
 export const materialChanges = new EventTarget();
+const mutations = new Map();
+
+// Cards and editor tabs write the same selections. Include the whole import
+// in this queue, not just its final select request, so Run cannot read old data.
+export function mutateMaterial(directory, target, operation) {
+  let queue = mutations.get(directory);
+  if (!queue) {
+    queue = new SerialWrites();
+    mutations.set(directory, queue);
+  }
+  return queue.run(operation, target).finally(() => {
+    if (queue.idle && mutations.get(directory) === queue) mutations.delete(directory);
+  });
+}
+
+export async function settleMaterials(directory) {
+  for (;;) {
+    const queue = mutations.get(directory);
+    if (!queue) return;
+    try {
+      await queue.settle();
+    } catch (error) {
+      throw Error(`素材修改保存失败，请重新选择后再执行：${error.message}`);
+    }
+    if (mutations.has(directory) && mutations.get(directory) !== queue) continue;
+    return;
+  }
+}
+
 export function materialChanged(directory, target, selection) {
   materialChanges.dispatchEvent(
     new CustomEvent("select", {
