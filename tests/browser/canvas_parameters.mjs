@@ -24,7 +24,7 @@ try {
     const workspace = await import(
       "/extensions/comfyui-turing-utils/material_workspace.js"
     );
-    const { entries, syncPorts } = await import(
+    const { entries, addPort, syncPorts } = await import(
       "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
     );
     const check = (condition, message) => {
@@ -65,6 +65,10 @@ try {
       ids[type] = port.id;
       const widget = endpoint.widgets.find((w) => w._portId === port.id);
       check(widget && widget.options.serialize === false, `Missing ${type} form`);
+      check(
+        !endpoint.inputs.some((s) => s._portId === port.id),
+        `${type} form also has an input socket`,
+      );
       if (type === "FLOAT")
         check(widget.options.step2 === 0.1, "Numeric step not inherited");
       if (type === "COMBO")
@@ -76,6 +80,15 @@ try {
       text.inputs.findIndex((s) => s.name === "text"),
     );
     const count = entries(endpoint).length;
+    check(
+      !boolean.connect(
+        0,
+        endpoint,
+        endpoint.inputs.findIndex((s) => s._append),
+      ),
+      "Left append accepted a form parameter",
+    );
+    check(entries(endpoint).length === count, "Rejected parameter changed ports");
     check(
       !endpoint.connect(
         endpoint.outputs.findIndex((s) => s._append),
@@ -94,8 +107,72 @@ try {
       ) === false,
       "Outputs accepted parameters",
     );
+    const source = LiteGraph.createNode("EmptyImage");
+    app.graph.add(source);
+    const material = addPort(endpoint, "Incoming image", "IMAGE");
+    check(
+      source.connect(
+        0,
+        endpoint,
+        endpoint.inputs.findIndex((s) => s._portId === material.id),
+      ),
+      "Material input was removed",
+    );
     const ordered = entries(endpoint).reverse();
+    ordered.splice(3, 0, ordered.shift());
     syncPorts(endpoint, ordered);
+    const materialInput = endpoint.inputs.find((s) => s._portId === material.id);
+    const materialSlot = entries(endpoint).find((p) => p.id === material.id).slot;
+    check(materialInput?.link != null, "Reorder lost the material input link");
+    check(
+      materialInput.pos[1] ===
+        endpoint.getConnectionPos(false, materialSlot)[1] - endpoint.pos[1],
+      "Material input is not aligned with its output row",
+    );
+    if (LiteGraph.vueNodesMode) {
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+      const element = document.querySelector(`[data-node-id="${endpoint.id}"]`);
+      const row = (side, slot) =>
+        element
+          ?.querySelector(`[data-slot-key$="-${side}-${slot}"]`)
+          ?.closest(".lg-slot");
+      const inputRow = row("in", endpoint.inputs.indexOf(materialInput));
+      const outputRow = row("out", materialSlot);
+      check(inputRow && outputRow, "Material sockets missing from Nodes 2.0");
+      const a = inputRow.getBoundingClientRect(),
+        b = outputRow.getBoundingClientRect();
+      check(
+        Math.abs(a.y + a.height / 2 - b.y - b.height / 2) < 1,
+        "Nodes 2.0 material sockets are drawn on different rows",
+      );
+      check(
+        Math.abs(
+          endpoint.getInputPos(endpoint.inputs.indexOf(materialInput))[1] -
+            endpoint.getOutputPos(materialSlot)[1],
+        ) < 1,
+        "Nodes 2.0 wire geometry does not match its material sockets",
+      );
+      // Moving only a material preserves widget order and node size. Geometry
+      // still has to refresh even when native resize tracking has no size change.
+      const moved = entries(endpoint);
+      moved.unshift(moved.splice(materialSlot, 1)[0]);
+      syncPorts(endpoint, moved);
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+      const inputSlot = endpoint.inputs.findIndex((s) => s._portId === material.id);
+      check(
+        Math.abs(endpoint.getInputPos(inputSlot)[1] - endpoint.getOutputPos(0)[1]) < 1,
+        "Nodes 2.0 kept old wire geometry after an unchanged-size reorder",
+      );
+    }
+    syncPorts(
+      endpoint,
+      entries(endpoint).filter((p) => p.id !== material.id),
+    );
+    app.graph.remove(source);
     const edited = endpoint.widgets.find((w) => w._portId === ids.INT);
     edited.value = 11;
     edited.callback(11);
@@ -109,8 +186,23 @@ try {
       Object.keys(snapshot.output[String(endpoint.id)].inputs).length === 1,
       "Display widgets leaked into execution inputs",
     );
-    await workspace.openTab(snapshot.workflow, `reloaded-${stamp}.json`);
+    // Previous files serialized left parameter sockets too. Restoring them
+    // must remove those sockets without losing values or right-side bindings.
+    const legacy = structuredClone(snapshot.workflow);
+    const legacyEndpoint = legacy.nodes.find((n) => n.type === "TuringCanvasInputs");
+    for (const port of entries(endpoint).filter((p) => p.kind === "parameter"))
+      legacyEndpoint.inputs.unshift({
+        name: "port_" + port.slot,
+        type: port.type,
+        _portId: port.id,
+        link: null,
+      });
+    await workspace.openTab(legacy, `reloaded-${stamp}.json`);
     const restored = app.graph.getNodeById(endpoint.id);
+    check(
+      restored.inputs.every((s) => s._append),
+      "Reload restored redundant parameter sockets",
+    );
     check(
       restored.widgets.find((w) => w._portId === ids.INT).value === 11,
       "Endpoint default did not survive reload",
@@ -192,6 +284,8 @@ try {
     return {
       parameterTypes: 5,
       inheritedControls: true,
+      formOnlyInputs: true,
+      materialInputsRetained: true,
       reorder: true,
       workflowReload: true,
       projectReload: true,
@@ -199,6 +293,12 @@ try {
       editRoundTrip: true,
     };
   });
+  if (process.env.NODES_MODE === "vue")
+    await page.waitForFunction(() => {
+      const endpoint = app.graph._nodes.find((n) => n.type === "TuringCanvasInputs");
+      const element = document.querySelector(`[data-node-id="${endpoint.id}"]`);
+      return element?.querySelectorAll(".lg-slot--input").length === 1;
+    });
   assert.deepEqual(errors, []);
   console.log(JSON.stringify(result));
 } finally {

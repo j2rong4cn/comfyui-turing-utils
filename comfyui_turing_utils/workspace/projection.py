@@ -15,6 +15,29 @@ from .protocol import MATERIAL_TYPES
 from .workflow_files import card_path, load_json, unpack
 
 
+def material_options(workflow, interface, identities):
+    """Read card-only presentation flags; never insert them in the API prompt.
+
+    Stub IDs are serialized widget values, including in nested subgraph
+    definitions. Named values win; native positional workflows put stub_id first.
+    """
+    nodes = list(workflow.get("nodes", []))
+    for graph in workflow.get("definitions", {}).get("subgraphs", []):
+        nodes.extend(graph.get("nodes", []))
+    options = {}
+    for node in nodes:
+        if not node.get("type", "").startswith("TuringMaterial"):
+            continue
+        values = node.get("widgets_values", [])
+        stub = node.get("widgets_values_named", {}).get("stub_id")
+        if stub is None and isinstance(values, list) and values:
+            stub = values[0]
+        source = interface["stubs"].get(stub) if isinstance(stub, str) else None
+        if source and node.get("properties", {}).get("canvas_allow_upload") is False:
+            options[identities[source]] = {"allow_upload": False}
+    return options
+
+
 def document(root, canvas=None, card_ids=None, *, execution=False):
     if canvas is None:
         canvas = load_json(Path(root) / "canvas.json")
@@ -152,6 +175,7 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
             {
                 **instance,
                 "materials": materials,
+                "material_options": material_options(workflow, interface, identities),
                 "fields": fields,
                 "layout": layout,
                 "instance": True,

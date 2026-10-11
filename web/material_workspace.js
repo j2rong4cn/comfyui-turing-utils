@@ -77,6 +77,7 @@ function configureCard(node, card, document, directory) {
     id,
     name: names.get(id) || "素材",
     kind: document.prompt[id].class_type.replace("TuringMaterial", "").toLowerCase(),
+    allowUpload: card.material_options?.[id]?.allow_upload !== false,
     selection: document.selections[id] || {},
     executable: ["value", "images", "text"].some((name) =>
       Array.isArray(document.prompt[id].inputs[name]),
@@ -237,6 +238,28 @@ async function saveCard() {
     parameters,
   });
   editing.revision = result.revision;
+  if (editing.id) {
+    // Editing a workflow advances the project revision too. Refresh its idle
+    // tab's descriptors so returning to the canvas uses the new interface and
+    // does not immediately conflict with the next autosave.
+    const data = await request("project/open", { directory: editing.directory });
+    const tab = app.extensionManager.workflow.openWorkflows.find(
+      (w) => w.activeState?.extra?.turing_project?.directory === editing.directory,
+    );
+    if (tab) Object.assign(tab.activeState, prepare(data));
+  }
+  app.extensionManager.toast.add({
+    severity: "success",
+    summary: "已保存回卡片",
+    life: 3000,
+  });
+}
+function installEditorSaveButton() {
+  if (!editor()) return;
+  const node = app.graph._nodes.find((n) => n.type === INPUTS);
+  if (!node || node.widgets.some((w) => w.name === "保存回卡片")) return;
+  button(node, "保存回卡片", saveCard);
+  node.setSize(node.computeSize());
 }
 async function saveTemplate() {
   if (project()) throw Error("请在卡片工作流中保存模板");
@@ -251,6 +274,7 @@ async function saveTemplate() {
     revision: editor()?.name === name ? editor().revision : undefined,
   });
   templates = (await request("templates")).items;
+  installEditorSaveButton();
 }
 async function editTemplate() {
   const { items } = await request("templates");
@@ -290,6 +314,7 @@ async function select(node, m, content) {
   return task;
 }
 async function importMedia(node, m, file) {
+  if (m.allowUpload === false) throw Error("这个素材桩已关闭卡片上传");
   const directory = node.properties.directory,
     body = new FormData();
   body.append("file", file);
@@ -410,11 +435,11 @@ class CardNode extends LiteGraph.LGraphNode {
   onDragDrop(event) {
     const file = event.dataTransfer?.files?.[0];
     if (!file) return false;
-    const material = this.properties.materials.find((m) =>
-      file.type.startsWith(m.kind + "/"),
+    const material = this.properties.materials.find(
+      (m) => m.allowUpload !== false && file.type.startsWith(m.kind + "/"),
     );
     if (!material) {
-      report(Error("请将素材拖到对应类型的素材节点"));
+      report(Error("没有允许上传此类型文件的素材桩"));
       return true;
     }
     action(() => importMedia(this, material, file))();
@@ -443,8 +468,8 @@ class CardNode extends LiteGraph.LGraphNode {
           );
           this.properties.values[f.input] = value;
         },
-        f.options,
-      ).label = f.label;
+        { ...f.options, label: f.label },
+      );
     for (const m of this.properties.materials)
       controls(this, m, { select, importMedia, run });
     button(this, "编辑工作流", () => editCard(this));
@@ -591,5 +616,8 @@ app.registerExtension({
   },
   beforeConfigureGraph() {
     for (const node of app.rootGraph?._nodes || []) node.releasePlayer?.();
+  },
+  afterConfigureGraph() {
+    installEditorSaveButton();
   },
 });

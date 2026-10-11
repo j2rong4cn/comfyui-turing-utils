@@ -11,6 +11,20 @@ import { DYNAMIC_COMBO, dynamicSpec } from "./dynamic_parameter.js";
 
 // All mutation is local to endpoint nodes; the native graph still owns links and undo.
 export function installEndpoint(node) {
+  const inputPosition = node.getInputPos;
+  node.getInputPos = function (slot) {
+    const pos = inputPosition.call(this, slot);
+    if (!LiteGraph.vueNodesMode || this.type !== INPUTS || this.flags.collapsed)
+      return pos;
+    const input = this.inputs[slot];
+    const output = this.outputs.findIndex((s) =>
+      input?._append ? s._append : input?._portId && s._portId === input._portId,
+    );
+    // Native Vue layout caches can stay stale on an unchanged-size reorder.
+    // This endpoint's material rows follow outputs; use that same native output
+    // position for its wire, without touching ordinary nodes or global stores.
+    return output < 0 ? pos : [pos[0], this.getOutputPos(output)[1]];
+  };
   const commit = (fn) => {
     node.graph?.beforeChange();
     fn();
@@ -42,11 +56,11 @@ export function installEndpoint(node) {
   };
   node.onConnectInput = function (slot, type, output, source) {
     if (this.inputs[slot]?._append) {
-      return grow(
-        type,
-        output.label || output.name,
-        source.widgets?.find((w) => w.name === output.name),
-      );
+      const widget = source.widgets?.find((w) => w.name === output.name);
+      // The left '+' accepts materials only. Expose editable parameters by
+      // connecting the right '+' to a workflow parameter instead.
+      if (this.type === INPUTS && (widget || !MATERIAL_TYPES.has(type))) return false;
+      return grow(type, output.label || output.name, widget);
     }
     return true;
   };
@@ -124,7 +138,10 @@ export function installEndpoint(node) {
         content: "删除",
         callback: () =>
           commit(() =>
-            syncPorts(node, entries(node).filter((p) => p.id !== id)),
+            syncPorts(
+              node,
+              entries(node).filter((p) => p.id !== id),
+            ),
           ),
       },
     ];
@@ -135,8 +152,9 @@ export function installEndpoint(node) {
     rename,
     portAt(pos) {
       if (pos[0] <= 24 || pos[0] >= node.size[0] - 24) return;
-      return entries(node).find((_, i) =>
-        Math.abs(pos[1] - (node.getConnectionPos(false, i)[1] - node.pos[1])) <
+      return entries(node).find(
+        (_, i) =>
+          Math.abs(pos[1] - (node.getConnectionPos(false, i)[1] - node.pos[1])) <
           LiteGraph.NODE_SLOT_HEIGHT / 2,
       )?.id;
     },

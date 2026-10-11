@@ -8,7 +8,10 @@ let playing = null;
 export const stopActivePreview = () => playing?.releasePlayer();
 
 export function button(node, name, fn) {
-  return node.addWidget("button", name, null, action(fn), { serialize: false });
+  const widget = node.addWidget("button", name, null, action(fn), { serialize: false });
+  // Native widget names are unique (#1, #2...); labels need not expose those IDs.
+  widget.label = name;
+  return widget;
 }
 export function field(node, name, type, value, fn, options = {}) {
   return parameterWidget(node, name, type, value, action(fn), options);
@@ -25,9 +28,14 @@ export function url(directory, asset, thumbnail = false) {
 }
 export function controls(node, m, { select, importMedia, run }) {
   if (m.kind === "text")
-    field(node, m.id, "STRING", m.selection.text || "", (value) =>
-      select(node, m, { text: value }),
-    ).label = m.name;
+    field(
+      node,
+      m.id,
+      "STRING",
+      m.selection.text || "",
+      (value) => select(node, m, { text: value }),
+      { label: m.name },
+    );
   else {
     if (["image", "video"].includes(m.kind)) {
       const img = new Image();
@@ -65,16 +73,17 @@ export function controls(node, m, { select, importMedia, run }) {
       selected: () => m.selection.asset,
       select: action((asset) => select(node, m, { asset })),
     }).catch(report);
-    button(node, "choose file to upload", () => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = m.kind + "/*";
-      input.onchange = action(async () => {
-        if (!input.files[0]) return;
-        await importMedia(node, m, input.files[0]);
+    if (m.allowUpload !== false)
+      button(node, "choose file to upload", () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = m.kind + "/*";
+        input.onchange = action(async () => {
+          if (!input.files[0]) return;
+          await importMedia(node, m, input.files[0]);
+        });
+        input.click();
       });
-      input.click();
-    });
     button(node, `${m.kind} · 预览`, () => {
       if (!m.selection.asset) return;
       playing?.releasePlayer();

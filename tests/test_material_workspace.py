@@ -67,6 +67,60 @@ class AddTextV3(io.ComfyNode):
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_upload_policy_is_card_presentation_only(self):
+        workflow, graph = material_template(("image", "audio", "video"))
+        image = next(n for n in workflow["nodes"] if n["type"] == "TuringMaterialImage")
+        image["properties"]["canvas_allow_upload"] = False
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "media"
+        )
+        source = identity + ":" + graph["3"]["inputs"]["stub_id"]
+        for execution in (False, True):
+            with self.subTest(execution=execution):
+                document = projection.document(self.project.root, execution=execution)
+                self.assertEqual(
+                    document["cards"][0]["material_options"],
+                    {source: {"allow_upload": False}},
+                )
+                for node in document["prompt"].values():
+                    self.assertNotIn("canvas_allow_upload", node["inputs"])
+                    self.assertNotIn("allow_upload", node["inputs"])
+
+    def test_upload_policy_reads_nested_native_and_named_widgets(self):
+        workflow = {
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "nodes": [
+                            {
+                                "type": "TuringMaterialImage",
+                                "widgets_values": ["positional"],
+                                "properties": {"canvas_allow_upload": False},
+                            },
+                            {
+                                "type": "TuringMaterialVideo",
+                                "widgets_values": ["wrong"],
+                                "widgets_values_named": {"stub_id": "named"},
+                                "properties": {"canvas_allow_upload": False},
+                            },
+                            {
+                                "type": "TuringMaterialAudio",
+                                "widgets_values": ["default"],
+                            },
+                        ]
+                    }
+                ]
+            }
+        }
+        self.assertEqual(
+            projection.material_options(
+                workflow,
+                {"stubs": {"positional": "1", "named": "2", "default": "3"}},
+                {"1": "image", "2": "video", "3": "audio"},
+            ),
+            {"image": {"allow_upload": False}, "video": {"allow_upload": False}},
+        )
+
     def test_display_does_not_flatten_computation_graphs(self):
         workflow, graph = material_template(("text",))
         identity = workflow_files.add_instance(

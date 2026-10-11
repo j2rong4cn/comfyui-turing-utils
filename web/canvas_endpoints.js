@@ -49,6 +49,22 @@ app.registerExtension({
       if (kind === "text" && !node.inputs.some((s) => s.name === "text"))
         node.addInput("text", "STRING");
       if (kind !== "text") {
+        // A card presentation option, not an execution input: keep the ordinary
+        // workflow's native upload widget unchanged and persist it in properties.
+        const menu = node.getExtraMenuOptions;
+        node.getExtraMenuOptions = function (canvas, options) {
+          const result = menu?.call(this, canvas, options);
+          options.push({
+            content: "允许在卡片上传素材",
+            checked: this.properties.canvas_allow_upload !== false,
+            callback: () => {
+              this.properties.canvas_allow_upload =
+                this.properties.canvas_allow_upload === false;
+              this.graph?.change();
+            },
+          });
+          return result;
+        };
         const file = node.widgets.find(
           (w) => w.name === (kind === "audio" ? "audio" : "file"),
         );

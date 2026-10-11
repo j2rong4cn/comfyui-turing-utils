@@ -12,12 +12,18 @@
 - 素材文本内联保存；视频使用 VIDEO。中间结果不能直接成为跨卡片输出。
 - 输入输出端点数据口仅支持 IMAGE/VIDEO/AUDIO/STRING，位置标记不传递素材。
 - Inputs 的 parameter 端口支持 INT/FLOAT/BOOLEAN/STRING/COMBO；在卡片上显示原生表单，
-  不创建素材连线口。默认值和控件设置属于工作流，实例参数值属于 canvas.json，按稳定 ID 保存。
+  在工作流也只有右侧输出口，左侧保持空白，不创建多余连线口。
+  默认值和控件设置属于工作流，实例参数值属于 canvas.json，按稳定 ID 保存。
   Outputs 不接受 parameter 端口；模型、latent 等运行时对象不能作为参数持久化。
 - DynamicCombo 复用原生分支控件，只导出可填写参数组，支持嵌套分支。
   各分支值属于 canvas.json，切换不丢值、不自动执行；编译时仅展开选中分支。
   整组与组内字段不能分别接线，避免覆盖。工作流执行和卡片执行使用相同的分支语义。
 - 文本桩只有 text 入口，连接后仍显示文本框。媒体选择复用标准 combo/上传控件。
+- 稳定 ID 只用于控件和持久化键；用户可见标签及文本占位提示使用条目名称。
+- 媒体桩可用原生右键菜单关闭卡片上传；同时限制上传按钮与拖入，不限制历史选择。
+  开关属于工作流 properties，不增加无作用的后端执行参数。
+- 编辑卡片工作流的 Inputs 提供“保存回卡片”；写回后刷新项目标签页的接口及版本。
+  普通 ComfyUI 保存命令继续用于普通工作流，不偷偷改变其保存目标。
 - canvas.json 是项目事实来源。前端原生图是编辑表示，保存时验证节点、插槽和连线。
 - 保存使用 revision，冲突报错；不覆盖其它标签页的新结果。删除节点不隐式删除素材文件。
 - 素材提交后自动保存布局和连线；保存队列绑定项目目录，不能读取当前标签页代替目标项目。
@@ -44,7 +50,7 @@
 - web/lib/canvas_ports.js、endpoint_interaction.js：普通工作流端点的动态插槽。
 - web/lib/parameter_widget.js：端点与卡片共享的原生表单控件。
 - web/lib/dynamic_parameter.js、workspace/parameters.py：原生分支表单、标量校验与执行输入展开。
-- web/lib/endpoint_dom.js：仅将两种渲染器的端点名称事件转发到共用操作，不改其他节点。
+- web/lib/endpoint_dom.js：两种渲染器的端点名称事件、Nodes 2.0 输入空行对齐；不改其他节点。
 - web/lib/material_combo.js、directory_picker.js：原生文件下拉适配和受限目录弹窗。
 - workspace/native.py：项目图表示及保存校验。
 - workspace/store.py、workflow_files.py、runs.py：素材与实例持久化、可恢复发布。

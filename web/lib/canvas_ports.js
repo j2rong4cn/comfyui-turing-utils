@@ -1,4 +1,4 @@
-import { parameterWidget } from "./parameter_widget.js";
+import { parameterWidget, labelParameter } from "./parameter_widget.js";
 import { hideMetadataSocket } from "./workflow_metadata.js";
 import {
   DYNAMIC_COMBO,
@@ -82,7 +82,7 @@ function syncParameterWidgets(node, ports) {
       );
       widget._portId = port.id;
     }
-    widget.label = port.name;
+    labelParameter(widget, port.name);
     if (widget.setParameterValue) widget.setParameterValue(port.default);
     else widget.value = port.default;
     for (const w of node.widgets)
@@ -159,24 +159,20 @@ export function syncPorts(node, ports, { syncTargets = true } = {}) {
         input._portId ??= ids.get(Number(input.name.slice(5)));
     (node.outputs || []).forEach((output, i) => (output._portId ??= ids.get(i)));
     const wanted = new Set(ports.map((p) => p.id));
+    // Editable parameters come from their forms, not runtime input links. Only
+    // material values have a left socket; right sockets still feed the workflow.
+    const wantedInputs = new Set(
+      ports.filter((p) => p.kind === "value").map((p) => p.id),
+    );
     for (let i = (node.inputs?.length || 0) - 1; i >= 0; i--) {
       const s = node.inputs[i];
-      if (
-        s.name.startsWith("port_") &&
-        (!wanted.has(s._portId) ||
-          ports.find((p) => p.id === s._portId)?.kind === "position" ||
-          ports.find((p) => p.id === s._portId)?.type === DYNAMIC_COMBO)
-      )
+      if (s.name.startsWith("port_") && !wantedInputs.has(s._portId))
         node.removeInput(i);
     }
     for (let i = (node.outputs?.length || 0) - 1; i >= 0; i--)
       if (!wanted.has(node.outputs[i]._portId)) node.removeOutput(i);
     for (const p of ports) {
-      if (
-        p.kind !== "position" &&
-        p.type !== DYNAMIC_COMBO &&
-        !node.inputs.some((s) => s._portId === p.id)
-      ) {
+      if (wantedInputs.has(p.id) && !node.inputs.some((s) => s._portId === p.id)) {
         node.addInput("port_" + p.slot, p.type);
         node.inputs.at(-1)._portId = p.id;
       }
