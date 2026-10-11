@@ -21,6 +21,7 @@ from .store import Conflict, Project, inside
 from . import workflow_files
 from .templates import material_template, new_card_template
 from .native import project_workflow, save_layout
+from .editor import select_material
 
 
 def install_routes():
@@ -155,6 +156,28 @@ def install_routes():
             }
         )
 
+    @endpoint("post", "/template/browse")
+    async def browse_templates(request):
+        data = await request.json()
+        if data.get("path"):
+            raise ValueError("Card library files are in its root directory")
+
+        def listing():
+            root = library(request)
+            items = [
+                {
+                    "name": p.name,
+                    "path": p.name,
+                    "directory": False,
+                    "bytes": p.stat().st_size,
+                }
+                for p in sorted(root.glob("*.json"))
+                if p.is_file() and not p.is_symlink()
+            ]
+            return {"items": items, "path": "", "empty": not items, "project": False}
+
+        return web.json_response(await asyncio.to_thread(listing))
+
     @endpoint("post", "/template/save")
     async def save_template(request):
         data = await request.json()
@@ -275,6 +298,22 @@ def install_routes():
             )
         )
         return web.json_response({"revision": revision})
+
+    @endpoint("post", "/editor/select")
+    async def editor_select(request):
+        data = await request.json()
+
+        def select():
+            with workflow_files.LOCK:
+                return select_material(
+                    Project(data["directory"]),
+                    data["id"],
+                    data["stub"],
+                    data["selection"],
+                    data["revision"],
+                )
+
+        return web.json_response(await asyncio.to_thread(select))
 
     @endpoint("post", "/history")
     async def history(request):

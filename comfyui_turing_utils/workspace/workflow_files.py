@@ -9,7 +9,7 @@ import re
 import threading
 import uuid
 
-from .cards import describe
+from .cards import describe, project_content
 from .parameters import is_parameter, parameter_default, validate_parameter
 
 LOCK = threading.RLock()
@@ -58,10 +58,18 @@ def unpack(workflow):
         )
     if data["source_hash"] != digest(workflow):
         raise ValueError(
-            "Workflow was edited externally; open it and Save Back to Card to refresh the execution graph"
+            "Workflow was edited externally; open it and Save (Ctrl+S) to refresh the execution graph"
         )
     interface = describe(data["prompt"])
     return data, interface
+
+
+def project_copy(workflow):
+    data, interface = unpack(workflow)
+    source, prompt = project_content(workflow, data["prompt"], interface)
+    result = pack(source, prompt)
+    result["extra"][KEY]["overrides"] = copy.deepcopy(data.get("overrides", {}))
+    return result
 
 
 def card_path(root, identity):
@@ -79,6 +87,7 @@ def load_json(path):
 
 
 def add_instance(root, workflow, title):
+    workflow = project_copy(workflow)
     data, interface = unpack(workflow)
     with LOCK:
         path = Path(root) / "canvas.json"
@@ -113,9 +122,12 @@ def read_instance(root, identity):
         **workflow.get("extra", {}).get(KEY, {}).get("overrides", {}),
         **instance.get("parameters", {}),
     }
-    # Opening an externally edited file is allowed; only execution rejects stale snapshots.
+    # An externally edited source must remain repairable in the editor. Its
+    # stale API graph cannot safely decide which new source nodes to remove.
+    snapshot = workflow.get("extra", {}).get(KEY, {})
+    clean = snapshot.get("source_hash") == digest(workflow)
     return {
-        "workflow": workflow,
+        "workflow": project_copy(workflow) if clean else workflow,
         "revision": hashlib.sha256(
             path.read_bytes() + json.dumps(parameters, sort_keys=True).encode()
         ).hexdigest(),
@@ -128,7 +140,7 @@ def save_instance(root, identity, workflow, prompt, revision, parameters=None):
         current = read_instance(root, identity)
         if current["revision"] != revision:
             raise ValueError("Card file or parameters changed; reopen it before saving")
-        result = pack(workflow, prompt)
+        result = project_copy(pack(workflow, prompt))
         canvas = load_json(Path(root) / "canvas.json")
         _, interface = unpack(result)
         previous = current["workflow"]["extra"][KEY]

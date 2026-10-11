@@ -39,16 +39,15 @@ try {
     window.wireStarter();
     const image = app.graph._nodes.find((n) => n.type === "TuringMaterialImage");
     const toggleUpload = (node) => {
-      const options = [];
-      node.getExtraMenuOptions(app.canvas, options);
-      const item = options.find((o) => o.content === "允许在卡片上传素材");
-      check(item, "Upload policy menu missing");
-      item.callback();
+      const item = node.widgets.find((w) => w.name === "canvas_allow_upload");
+      check(item?.label === "在卡片显示上传入口", "Upload policy field missing");
+      item.value = !item.value;
+      item.callback(item.value);
     };
     toggleUpload(image);
     check(
       image.properties.canvas_allow_upload === false,
-      "Menu did not disable upload",
+      "Field did not disable upload",
     );
     check(
       image.widgets.some((w) => w.label === "choose file to upload"),
@@ -109,9 +108,11 @@ try {
     const editingImage = app.graph._nodes.find((n) => n.type === "TuringMaterialImage");
     toggleUpload(editingImage);
     const inputs = app.graph._nodes.find((n) => n.type === "TuringCanvasInputs");
-    const save = inputs.widgets.find((w) => w.name === "保存回卡片");
-    check(save && save.options.serialize === false, "Visible save-back button missing");
-    await save.callback();
+    check(
+      !inputs.widgets.some((w) => w.name === "保存回卡片"),
+      "Duplicate save-back button remains",
+    );
+    await app.extensionManager.command.execute("Comfy.SaveWorkflow");
     const saved = await workspace.request("card/open", { directory, id: added.id });
     check(
       saved.workflow.nodes.find((n) => n.type === "TuringMaterialImage").properties
@@ -137,7 +138,7 @@ try {
     return {
       textNames: true,
       uploadButtonAndDrop: true,
-      saveBackButton: true,
+      nativeFileSave: true,
       editorRoundTrip: true,
       ordinaryUploadUnchanged: true,
     };

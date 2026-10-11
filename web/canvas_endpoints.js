@@ -11,6 +11,7 @@ import { installEndpoint } from "./lib/endpoint_interaction.js";
 import { expandDynamicParameters } from "./lib/dynamic_parameter.js";
 import { hideMetadataSocket, restoreMaterialWidgets } from "./lib/workflow_metadata.js";
 import { installEndpointDomEvents } from "./lib/endpoint_dom.js";
+import { setWidgetValue } from "./lib/parameter_widget.js";
 
 app.registerExtension({
   name: "TuringUtils.CanvasEndpoints",
@@ -40,6 +41,12 @@ app.registerExtension({
       node.onConfigure = function (data) {
         configure?.call(this, data);
         restoreMaterialWidgets(this, data);
+        const refresh = this.widgets.find(
+          (w) => w.name === "Auto-refresh after generation",
+        );
+        if (refresh) refresh.value = false;
+        const upload = this.widgets.find((w) => w.name === "canvas_allow_upload");
+        if (upload) upload.value = this.properties.canvas_allow_upload !== false;
       };
       const kind = type.slice("TuringMaterial".length).toLowerCase();
       const id = node.widgets?.find((w) => w.name === "stub_id");
@@ -51,20 +58,27 @@ app.registerExtension({
       if (kind !== "text") {
         // A card presentation option, not an execution input: keep the ordinary
         // workflow's native upload widget unchanged and persist it in properties.
-        const menu = node.getExtraMenuOptions;
-        node.getExtraMenuOptions = function (canvas, options) {
-          const result = menu?.call(this, canvas, options);
-          options.push({
-            content: "允许在卡片上传素材",
-            checked: this.properties.canvas_allow_upload !== false,
-            callback: () => {
-              this.properties.canvas_allow_upload =
-                this.properties.canvas_allow_upload === false;
-              this.graph?.change();
-            },
-          });
-          return result;
-        };
+        const policy = node.addWidget(
+          "toggle",
+          "canvas_allow_upload",
+          node.properties.canvas_allow_upload !== false,
+          function (value) {
+            node.properties.canvas_allow_upload = value;
+            node.graph?.change();
+          },
+          { serialize: false },
+        );
+        policy.label = "在卡片显示上传入口";
+        // Preserve this native auxiliary widget's old positional slot, but
+        // disable its unrelated global execution-success refresh subscription.
+        const refresh = node.widgets.find(
+          (w) => w.name === "Auto-refresh after generation",
+        );
+        if (refresh) {
+          refresh.value = false;
+          refresh.hidden = true;
+          refresh.options.hidden = true;
+        }
         const file = node.widgets.find(
           (w) => w.name === (kind === "audio" ? "audio" : "file"),
         );
@@ -82,7 +96,7 @@ app.registerExtension({
         const value = data.material_text?.[0] ?? data.material_file?.[0];
         const widget = this.widgets.find((w) => w.name === name);
         if (value !== undefined && widget) {
-          widget.value = value;
+          setWidgetValue(widget, value);
           if (
             kind !== "text" &&
             Array.isArray(widget.options.values) &&

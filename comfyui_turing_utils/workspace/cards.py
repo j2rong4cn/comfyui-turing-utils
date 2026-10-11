@@ -93,6 +93,90 @@ def describe(prompt):
     }
 
 
+def project_content(workflow, prompt, interface):
+    """Keep the exported computation; tests outside the endpoints stay in templates."""
+    kept = set()
+
+    def visit(key):
+        if key in kept:
+            return
+        kept.add(key)
+        if key == interface["input_node"]:
+            return
+        for value in prompt[key]["inputs"].values():
+            if is_link(value):
+                visit(value[0])
+
+    visit(interface["output_node"])
+    kept.add(interface["input_node"])
+    result = {key: copy.deepcopy(prompt[key]) for key in kept}
+    inputs = result[interface["input_node"]]["inputs"]
+    for name in list(inputs):
+        if name.startswith("port_"):
+            del inputs[name]
+
+    workflow = copy.deepcopy(workflow)
+    definitions = {
+        graph["id"]: graph
+        for graph in workflow.get("definitions", {}).get("subgraphs", [])
+    }
+    allowed = {}
+    for key in kept:
+        parts = key.split(":")
+        for i in range(1, len(parts) + 1):
+            allowed.setdefault(":".join(parts[: i - 1]), set()).add(parts[i - 1])
+    scopes = {}
+
+    def collect(graph, prefix=""):
+        ids = allowed.get(prefix, set())
+        scopes.setdefault(id(graph), set()).update(ids)
+        for node in graph.get("nodes", []):
+            if str(node["id"]) in ids and node["type"] in definitions:
+                collect(
+                    definitions[node["type"]],
+                    ":".join(filter(None, [prefix, str(node["id"])])),
+                )
+
+    collect(workflow)
+    for graph in [workflow, *definitions.values()]:
+        ids = scopes.get(id(graph), set())
+        graph["nodes"] = [n for n in graph.get("nodes", []) if str(n["id"]) in ids]
+        by_id = {str(n["id"]): n for n in graph["nodes"]}
+        valid = ids | ({"-10", "-20"} if graph is not workflow else set())
+        links = []
+        for link in graph.get("links", []):
+            source = link["origin_id"] if isinstance(link, dict) else link[1]
+            target = link["target_id"] if isinstance(link, dict) else link[3]
+            target_node = by_id.get(str(target))
+            target_slot = link["target_slot"] if isinstance(link, dict) else link[4]
+            test_input = (
+                target_node
+                and target_node["type"] == INPUTS
+                and target_slot < len(target_node.get("inputs", []))
+                and target_node["inputs"][target_slot]["name"].startswith("port_")
+            )
+            if str(source) in valid and str(target) in valid and not test_input:
+                links.append(link)
+        graph["links"] = links
+        link_ids = {link["id"] if isinstance(link, dict) else link[0] for link in links}
+        for node in graph["nodes"]:
+            for slot in node.get("inputs", []):
+                if slot.get("link") not in link_ids:
+                    slot["link"] = None
+            for slot in node.get("outputs", []):
+                if slot.get("links") is not None:
+                    slot["links"] = [key for key in slot["links"] if key in link_ids]
+        # Native nested graphs also store boundary links separately from nodes.
+        for port in graph.get("inputs", []) + graph.get("outputs", []):
+            if "linkIds" in port:
+                port["linkIds"] = [key for key in port["linkIds"] if key in link_ids]
+    if definitions:
+        workflow["definitions"]["subgraphs"] = [
+            graph for graph in definitions.values() if id(graph) in scopes
+        ]
+    return workflow, result
+
+
 def flatten(prompt, interface, overrides=None):
     result = copy.deepcopy(prompt)
     inputs = result[interface["input_node"]]["inputs"]

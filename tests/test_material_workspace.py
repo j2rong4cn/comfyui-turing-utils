@@ -33,6 +33,7 @@ from comfyui_turing_utils.workspace.endpoints import (
     parse_ports,
 )
 from comfyui_turing_utils.workspace.cards import describe, flatten
+from comfyui_turing_utils.workspace.editor import select_material
 from comfyui_turing_utils.workspace import workflow_files, projection
 from comfyui_turing_utils.workspace.templates import material_template, new_card_template
 from comfyui_turing_utils.workspace.native import project_workflow, save_layout
@@ -67,6 +68,120 @@ class AddTextV3(io.ComfyNode):
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_project_copy_removes_external_test_branches_only(self):
+        workflow, graph = material_template(("text",))
+        ports = json.loads(graph["1"]["inputs"]["ports"])
+        ports.append(
+            dict(id="source", slot=1, name="Source", kind="value", type="STRING")
+        )
+        graph["1"]["inputs"].update(ports=json.dumps(ports), port_1=["10", 0])
+        graph["4"] = dict(class_type="WorkspaceTest", inputs={"text": ["1", 1]})
+        graph["3"]["inputs"]["text"] = ["4", 0]
+        graph["10"] = dict(class_type="PrimitiveString", inputs={"value": "test"})
+        graph["11"] = dict(class_type="PreviewAny", inputs={"source": ["2", 0]})
+        endpoint = next(n for n in workflow["nodes"] if n["id"] == 1)
+        endpoint["inputs"] = [dict(name="port_1", type="STRING", link=3)]
+        workflow["nodes"].extend(
+            [
+                dict(
+                    id=4,
+                    type="WorkspaceTest",
+                    inputs=[dict(name="text", link=4)],
+                    outputs=[dict(name="STRING", links=[5])],
+                ),
+                dict(id=10, type="PrimitiveString"),
+                dict(id=11, type="PreviewAny"),
+            ]
+        )
+        workflow["links"].extend(
+            [
+                [3, 10, 0, 1, 0, "STRING"],
+                [4, 1, 1, 4, 0, "STRING"],
+                [5, 4, 0, 3, 1, "STRING"],
+                [6, 2, 0, 11, 0, "STRING"],
+            ]
+        )
+        template = workflow_files.pack(workflow, graph)
+        original = copy.deepcopy(template)
+        cleaned = workflow_files.project_copy(template)
+        self.assertEqual(template, original)
+        data, _ = workflow_files.unpack(cleaned)
+        self.assertEqual(set(data["prompt"]), {"1", "2", "3", "4"})
+        self.assertNotIn("port_1", data["prompt"]["1"]["inputs"])
+        self.assertEqual({n["id"] for n in cleaned["nodes"]}, {1, 2, 3, 4})
+        self.assertEqual({link[0] for link in cleaned["links"]}, {1, 2, 4, 5})
+        self.assertIsNone(
+            next(n for n in cleaned["nodes"] if n["id"] == 1)["inputs"][0]["link"]
+        )
+        self.assertEqual(workflow_files.project_copy(cleaned), cleaned)
+
+    def test_project_copy_preserves_nested_computation_and_boundary_links(self):
+        workflow, graph = material_template(("text",))
+        nested = next(n for n in workflow["nodes"] if n["id"] == 3)
+        workflow["nodes"] = [n for n in workflow["nodes"] if n["id"] != 3]
+        workflow["nodes"].append(dict(id=9, type="nested"))
+        workflow["links"] = [
+            [1, 1, 0, 9, 0, "TURING_CANVAS_POSITION"],
+            [2, 9, 0, 2, 0, "STRING"],
+        ]
+        workflow["definitions"] = {
+            "subgraphs": [
+                dict(
+                    id="nested",
+                    nodes=[nested, dict(id=10, type="PreviewAny")],
+                    links=[
+                        dict(
+                            id=1,
+                            origin_id=-10,
+                            origin_slot=0,
+                            target_id=3,
+                            target_slot=0,
+                        ),
+                        dict(
+                            id=2,
+                            origin_id=3,
+                            origin_slot=0,
+                            target_id=-20,
+                            target_slot=0,
+                        ),
+                        dict(
+                            id=3,
+                            origin_id=3,
+                            origin_slot=0,
+                            target_id=10,
+                            target_slot=0,
+                        ),
+                    ],
+                    inputs=[dict(linkIds=[1])],
+                    outputs=[dict(linkIds=[2, 3])],
+                ),
+                dict(id="unused", nodes=[], links=[]),
+            ]
+        }
+        graph["9:3"] = graph.pop("3")
+        graph["2"]["inputs"]["port_0"] = ["9:3", 0]
+        cleaned = workflow_files.project_copy(workflow_files.pack(workflow, graph))
+        definitions = cleaned["definitions"]["subgraphs"]
+        self.assertEqual([g["id"] for g in definitions], ["nested"])
+        self.assertEqual([n["id"] for n in definitions[0]["nodes"]], [3])
+        self.assertEqual([l["id"] for l in definitions[0]["links"]], [1, 2])
+        self.assertEqual(definitions[0]["outputs"][0]["linkIds"], [2])
+
+    def test_editor_selection_uses_saved_project_material_and_revision(self):
+        workflow, graph = material_template(("text",))
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "text"
+        )
+        stub = graph["3"]["inputs"]["stub_id"]
+        selected = select_material(self.project, identity, stub, {"text": "edited"}, 0)
+        self.assertEqual(selected, {"text": "edited", "revision": 1})
+        with self.assertRaises(Conflict):
+            select_material(self.project, identity, stub, {"text": "stale"}, 0)
+        with self.assertRaisesRegex(ValueError, "Save the workflow"):
+            select_material(self.project, identity, "unsaved", {"text": "new"}, 0)
+        with self.assertRaisesRegex(ValueError, "string"):
+            select_material(self.project, identity, stub, {"asset": "fake"}, 1)
+
     def test_upload_policy_is_card_presentation_only(self):
         workflow, graph = material_template(("image", "audio", "video"))
         image = next(n for n in workflow["nodes"] if n["type"] == "TuringMaterialImage")

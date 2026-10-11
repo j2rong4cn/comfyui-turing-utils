@@ -8,7 +8,7 @@ export const ROOT = "TuringCanvasProject",
 const saves = new Map();
 export const project = () => app.graph.extra?.turing_project;
 export const editor = () => app.graph.extra?.turing_editor;
-function projectState(directory) {
+export function projectState(directory) {
   if (project()?.directory === directory) return project();
   return app.extensionManager.workflow.openWorkflows.find(
     (workflow) => workflow.activeState?.extra?.turing_project?.directory === directory,

@@ -1,11 +1,13 @@
-// One server-directory dialog shared by create/open project commands.
+// One server-file dialog for project folders, canvas files and card workflows.
 export class DirectoryPicker {
   constructor(request, prompt, confirm) {
     this.request = request;
     this.prompt = prompt;
     this.confirm = confirm;
   }
-  async choose(create) {
+  async choose(create, options = {}) {
+    const cards = options.mode === "cards";
+    const listing = cards ? "template/browse" : "projects";
     const dialog = document.createElement("dialog");
     dialog.className =
       "comfy-dialog comfyui-dialog comfy-modal turing-directory-picker";
@@ -14,17 +16,19 @@ export class DirectoryPicker {
     dialog.style.cssText =
       "width:min(900px,92vw);max-height:80vh;padding:16px;background:var(--comfy-menu-bg,#222);color:var(--input-text,#eee);border:1px solid var(--border-color,#555);border-radius:8px";
     const heading = document.createElement("h3");
-    heading.textContent = create
-      ? "新建画布 · 选择空文件夹"
-      : "打开画布 · 选择项目文件夹";
+    heading.textContent = cards
+      ? "编辑卡片 · 选择工作流文件"
+      : create
+        ? "新建画布 · 选择空文件夹"
+        : "打开画布 · 选择 canvas.json";
     const path = document.createElement("input");
     path.type = "text";
-    path.placeholder = "output 内的相对目录";
+    path.placeholder = cards ? "卡片文件名" : "output 内的相对路径";
     path.style.cssText = "width:100%;box-sizing:border-box;margin:12px 0";
     const columns = document.createElement("div");
     columns.style.cssText =
       "display:grid;grid-template-columns:1fr 1.3fr 1fr;height:min(360px,45vh);gap:8px";
-    const panels = ["上一级", "当前目录", "目录信息"].map((title) => {
+    const panels = ["上一级", "当前目录", "文件信息"].map((title) => {
       const panel = document.createElement("section");
       panel.style.cssText =
         "overflow:auto;border:1px solid var(--border-color,#555);padding:8px;min-width:0";
@@ -99,47 +103,57 @@ export class DirectoryPicker {
     };
     const preview = async (directory) => {
       const token = ++serial;
-      const result = await this.request("projects", { path: directory });
+      const result = await this.request(listing, { path: directory });
       if (token !== serial || !dialog.open) return;
       selected = directory;
       info = result;
       panels[2].textContent = `${directory || "output"}\n${result.empty ? "空目录" : `${result.items.length} 个可见条目`}\n${result.project ? "Canvas 项目" : "普通目录"}`;
       panels[2].style.whiteSpace = "pre-wrap";
-      ok.disabled = !directory || (create ? !result.empty : !result.project);
+      ok.disabled = cards || !directory || (create ? !result.empty : !result.project);
+      if (!create && !cards && result.project)
+        selected = [directory, "canvas.json"].filter(Boolean).join("/");
       remove.disabled =
         !directory || result.project || result.items.some((i) => !i.directory);
-      status.textContent =
-        create && !result.empty
+      status.textContent = cards
+        ? "请选择卡片工作流文件"
+        : create && !result.empty
           ? "新建项目需要空文件夹"
           : !create && !result.project
-            ? "请选择包含 canvas.json 的项目文件夹"
+            ? "请选择 canvas.json"
             : "";
     };
     const navigate = async (directory) => {
       current = directory;
       path.value = current;
-      const result = await this.request("projects", { path: current });
+      const result = await this.request(listing, { path: current });
       if (current !== directory || !dialog.open) return;
       renderList(panels[1], result.items, async (item) => {
         if (item.directory) return preview(item.path);
         ++serial;
-        selected = "";
+        const allowed =
+          !create &&
+          (cards ? item.name.endsWith(".json") : item.name === "canvas.json");
+        selected = allowed ? item.path : "";
         info = null;
-        ok.disabled = true;
+        ok.disabled = !allowed;
         remove.disabled = true;
         panels[2].textContent = `${item.name}\n${item.bytes.toLocaleString()} bytes\n${item.path}`;
         panels[2].style.whiteSpace = "pre-wrap";
-        status.textContent = "请选择项目文件夹";
+        status.textContent = allowed
+          ? ""
+          : cards
+            ? "请选择卡片工作流文件"
+            : "请选择 canvas.json";
       });
       const parent = current.split("/").slice(0, -1).join("/");
       if (current) {
-        const listing = await this.request("projects", { path: parent });
+        const parentItems = await this.request(listing, { path: parent });
         if (current !== directory || !dialog.open) return;
         renderList(
           panels[0],
           [
             { name: "..", path: parent, directory: true },
-            ...listing.items.filter((i) => i.directory),
+            ...parentItems.items.filter((i) => i.directory),
           ],
           (item) => navigate(item.path),
         );
@@ -147,7 +161,7 @@ export class DirectoryPicker {
       await preview(current);
     };
     addButton("上一级", () => navigate(current.split("/").slice(0, -1).join("/")));
-    addButton("新建文件夹", async () => {
+    const makeDirectory = addButton("新建文件夹", async () => {
       const name = await ask(() => this.prompt("新文件夹名称"));
       if (!name) return;
       if (/[\\/]/.test(name) || [".", ".."].includes(name))
@@ -166,11 +180,16 @@ export class DirectoryPicker {
         ))
       )
         return;
-      await this.request("directory/delete-empty", { directory: selected });
-      await navigate(selected.split("/").slice(0, -1).join("/"));
+      const directory = selected.endsWith("/canvas.json")
+        ? selected.slice(0, -12)
+        : selected;
+      await this.request("directory/delete-empty", { directory });
+      await navigate(directory.split("/").slice(0, -1).join("/"));
     });
     addButton("取消", () => dialog.close());
-    const ok = addButton(create ? "创建项目" : "打开项目", () =>
+    makeDirectory.hidden = cards;
+    remove.hidden = cards;
+    const ok = addButton(create ? "创建画布" : "打开文件", () =>
       dialog.close(selected),
     );
     ok.disabled = true;
@@ -185,10 +204,20 @@ export class DirectoryPicker {
       });
     });
     path.onkeydown = (event) => {
-      if (event.key === "Enter")
-        navigate(path.value.trim()).catch((e) => {
+      if (event.key === "Enter") {
+        const value = path.value.trim();
+        if (
+          !create &&
+          (cards ? value.endsWith(".json") : value.endsWith("/canvas.json"))
+        ) {
+          selected = value;
+          dialog.close(selected);
+          return;
+        }
+        navigate(value).catch((e) => {
           status.textContent = e.message;
         });
+      }
     };
     dialog.showModal();
     // comfy-modal is display:none until Comfy's own dialog service toggles it;

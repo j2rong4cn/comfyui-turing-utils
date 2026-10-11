@@ -2,6 +2,19 @@ import { app } from "../../../scripts/app.js";
 import { ComfyWidgets } from "../../../scripts/widgets.js";
 import { DYNAMIC_COMBO, dynamicParameterWidget } from "./dynamic_parameter.js";
 
+// Native DOM widget setters call callback even for restoration/preview updates.
+// Updating a view must not become a second user edit or write back stale values.
+export function setWidgetValue(widget, value) {
+  if (!widget || widget.value === value) return;
+  const callback = widget.callback;
+  widget.callback = undefined;
+  try {
+    widget.value = value;
+  } finally {
+    widget.callback = callback;
+  }
+}
+
 // Keep names stable for persistence, but never show those internal IDs as text
 // placeholders. Native multiline STRING widgets don't derive them from label.
 export function labelParameter(widget, label) {

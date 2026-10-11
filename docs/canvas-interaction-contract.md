@@ -20,10 +20,19 @@
   整组与组内字段不能分别接线，避免覆盖。工作流执行和卡片执行使用相同的分支语义。
 - 文本桩只有 text 入口，连接后仍显示文本框。媒体选择复用标准 combo/上传控件。
 - 稳定 ID 只用于控件和持久化键；用户可见标签及文本占位提示使用条目名称。
-- 媒体桩可用原生右键菜单关闭卡片上传；同时限制上传按钮与拖入，不限制历史选择。
+- 媒体桩用普通开关控制卡片上传；同时限制上传按钮与拖入，不限制历史选择。
   开关属于工作流 properties，不增加无作用的后端执行参数。
-- 编辑卡片工作流的 Inputs 提供“保存回卡片”；写回后刷新项目标签页的接口及版本。
-  普通 ComfyUI 保存命令继续用于普通工作流，不偷偷改变其保存目标。
+- 原生 Save / Ctrl+S / 关闭时保存都按当前标签页所属文件执行：模板库 JSON、
+  项目 cards/<id>/workflow.json 或 canvas.json。普通工作流不改变目标。
+  只适配托管标签页的文件操作，不修改核心、类原型或普通工作流保存方式。
+  失败/取消不清除 dirty 状态；卡片保存期间的新编辑保留并阻止关闭丢失。
+  卡片另存为独立模板；画布不允许只复制展示图的另存为。
+- 项目实例删除输入端点外的测试来源、输出端点外的测试消费者；全局模板不删除。
+  原生嵌套子图保留必要计算及边界连线。项目卡片编辑页禁止整图 Run，仅允许执行到素材桩。
+- 项目编辑页与外层卡片共用项目历史和导入接口，选择立即持久化并同步两种视图。
+  新桩先保存再选择；结构/参数仍显式保存。全局模板使用实例普通素材目录。
+- 不启用媒体 combo 对所有 execution_success 的全局刷新；相关导入/生成后才刷新列表。
+  保留旧远程 combo 辅助控件的序列化位置，隐藏且固定关闭，避免旧工作流字段移位。
 - canvas.json 是项目事实来源。前端原生图是编辑表示，保存时验证节点、插槽和连线。
 - 保存使用 revision，冲突报错；不覆盖其它标签页的新结果。删除节点不隐式删除素材文件。
 - 素材提交后自动保存布局和连线；保存队列绑定项目目录，不能读取当前标签页代替目标项目。
@@ -47,6 +56,8 @@
 
 - web/material_workspace.js：原生节点、命令、标签页、局部执行交互的入口。
 - web/workspace/api.js、project_state.js、material_controls.js：请求反馈、保存队列和预览生命周期。
+- web/workspace/documents.js：托管文件的原生标签页保存/加载边界。
+- web/workspace/editor_materials.js、material_selection.js：项目编辑页的原生素材控件、导入和选择通知。
 - web/lib/canvas_ports.js、endpoint_interaction.js：普通工作流端点的动态插槽。
 - web/lib/parameter_widget.js：端点与卡片共享的原生表单控件。
 - web/lib/dynamic_parameter.js、workspace/parameters.py：原生分支表单、标量校验与执行输入展开。
@@ -55,6 +66,7 @@
 - workspace/native.py：项目图表示及保存校验。
 - workspace/store.py、workflow_files.py、runs.py：素材与实例持久化、可恢复发布。
 - workspace/projection.py、tasks.py、compiler.py：展示描述与局部计算编译。
+- workspace/cards.py、editor.py：项目副本的计算范围及编辑素材选择校验。
 - workspace/execution.py、cache.py：普通节点新鲜执行及中间结果清理。
 - workspace/materials.py、previews.py、directories.py：媒体读写、受限缩略图和目录操作。
 - workspace/routes.py：受限项目、模板和素材 API。
@@ -67,6 +79,7 @@ tests/test_canvas_dynamic_parameters.py 和 tests/browser/canvas_dynamic_paramet
 浏览器测试通过 NODES_MODE=classic / vue 分别运行经典界面与 Nodes 2.0；
 renderer.mjs 只隔离官方 UI 偏好写入，不拦截项目设置或素材 API。
 tests/browser/material_native.mjs 检查原生控件、新标签页、项目布局与局部执行。
+canvas_documents.mjs 检查原生保存、模板/项目测试支路隔离、编辑页整图禁用和局部执行。
 canvas_endpoint_interaction.mjs 覆盖名称菜单、排序连线、空名称、旧槽位恢复和子图，
 通过显式 DOM MouseEvent 检查事件链路，不替代真实鼠标验收。
 canvas_endpoint_labels.mjs 额外检查经典绘制、克隆、旧模板与嵌套子图。

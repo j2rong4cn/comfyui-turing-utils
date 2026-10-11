@@ -38,6 +38,8 @@ def material_template(kinds=("image", "video", "audio", "text")):
         # Python API inputs and frontend widget order are different contracts.
         # Remote combos add a native presentation-only toggle after file/audio;
         # it belongs to workflow positional values, never the execution prompt.
+        # CanvasEndpoints hides/disables this toggle, but its slot must remain
+        # here so existing video widgets do not shift on Classic/Nodes 2.0 restore.
         # Named values are authoritative on restoration (web/lib/workflow_metadata.js).
         widget_values = {}
         for name, value in values.items():
