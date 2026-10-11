@@ -34,7 +34,7 @@ from comfyui_turing_utils.workspace.endpoints import (
 )
 from comfyui_turing_utils.workspace.cards import describe, flatten
 from comfyui_turing_utils.workspace import workflow_files, projection
-from comfyui_turing_utils.workspace.templates import material_template
+from comfyui_turing_utils.workspace.templates import material_template, new_card_template
 from comfyui_turing_utils.workspace.native import project_workflow, save_layout
 from comfyui_turing_utils.workspace.materials import material_files
 import torch
@@ -304,6 +304,40 @@ class WorkspaceTest(unittest.TestCase):
                 "asset",
             ):
                 self.assertNotIn(removed, schema["required"])
+
+    def test_new_card_template_has_only_unconnected_nodes(self):
+        workflow = new_card_template()
+        self.assertCountEqual(
+            [node["type"] for node in workflow["nodes"]],
+            ["TuringCanvasInputs", "TuringCanvasOutputs"]
+            + [
+                "TuringMaterial" + kind.title()
+                for kind in ("image", "video", "audio", "text")
+            ],
+        )
+        self.assertEqual(workflow["links"], [])
+        self.assertEqual(workflow["last_link_id"], 0)
+        for node in workflow["nodes"]:
+            with self.subTest(node=node["type"]):
+                if node["type"] in ("TuringCanvasInputs", "TuringCanvasOutputs"):
+                    self.assertEqual(node["widgets_values"], ["[]"])
+                    self.assertEqual(node["widgets_values_named"], {"ports": "[]"})
+                    self.assertEqual(node["inputs"], [])
+                    self.assertEqual(node["outputs"], [])
+                else:
+                    self.assertEqual(node["inputs"][0]["name"], "position")
+                    self.assertTrue(
+                        all(socket["link"] is None for socket in node["inputs"])
+                    )
+                    self.assertTrue(
+                        all(socket["links"] == [] for socket in node["outputs"])
+                    )
+
+    def test_material_position_is_first_optional_input(self):
+        for kind in ("image", "video", "audio", "text"):
+            with self.subTest(kind=kind):
+                schema = PUBLIC_NODES["TuringMaterial" + kind.title()].INPUT_TYPES()
+                self.assertEqual(next(iter(schema["optional"])), "position")
 
     def test_template_endpoint_descriptors_have_explicit_display_names(self):
         # The generated JSON must be correct without frontend repair. Browser

@@ -57,8 +57,8 @@
     "function": "read",
     "input_order": {
       "optional": [
-        "value",
-        "position"
+        "position",
+        "value"
       ],
       "required": [
         "stub_id",
@@ -111,8 +111,8 @@
     "function": "read",
     "input_order": {
       "optional": [
-        "value",
-        "position"
+        "position",
+        "value"
       ],
       "required": [
         "stub_id",

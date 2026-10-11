@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
 import { selectRenderer } from "./renderer.mjs";
+import { installStarterFixture } from "./starter.mjs";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH,
@@ -31,6 +32,7 @@ try {
       window.app?.graph && window.LiteGraph?.registered_node_types.TuringCanvasProject,
   );
   await selectRenderer(page);
+  await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const m = await import("/extensions/comfyui-turing-utils/material_workspace.js");
@@ -74,8 +76,9 @@ try {
     await m.saveProject();
     const raw = await m.request("project/open", { directory });
     if (raw.workflow.nodes[1].pos[0] !== 530) throw Error("Layout not saved");
-    const starter = await (await fetch("/turing/workspace/new-template")).json();
+    let starter = await (await fetch("/turing/workspace/new-template")).json();
     await m.openTab(starter, `new-card-${Date.now()}.json`);
+    starter = window.wireStarter();
     if (app.graph._nodes.length !== 6) throw Error("Starter missing");
     for (const type of [
       "TuringMaterialImage",
@@ -268,6 +271,7 @@ try {
     );
     const starter = await (await fetch("/turing/workspace/new-template")).json();
     await m.openTab(starter, `port-test-${Date.now()}.json`);
+    window.wireStarter();
     const checkLabels = (node) => {
       for (const port of entries(node)) {
         const output = node.outputs[port.slot];

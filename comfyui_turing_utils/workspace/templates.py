@@ -44,6 +44,8 @@ def material_template(kinds=("image", "video", "audio", "text")):
             widget_values[name] = value
             if kind != "text" and name in {"file", "audio"}:
                 widget_values["Auto-refresh after generation"] = False
+        # Mirror Material.INPUT_TYPES: position is the first material socket,
+        # irrespective of the widget controls supplied by the native frontend.
         sockets = (
             [
                 dict(name="position", type=POSITION, link=i * 2 + 1),
@@ -52,8 +54,8 @@ def material_template(kinds=("image", "video", "audio", "text")):
             ]
             if kind == "video"
             else [
-                dict(name="text" if kind == "text" else "value", type=type_, link=None),
                 dict(name="position", type=POSITION, link=i * 2 + 1),
+                dict(name="text" if kind == "text" else "value", type=type_, link=None),
             ]
         )
         position_slot = next(
@@ -151,3 +153,24 @@ def material_template(kinds=("image", "video", "audio", "text")):
         config={},
         extra={},
     ), prompt
+
+
+def new_card_template():
+    """An unconnected editing scaffold; built-in material cards stay connected."""
+    workflow, _ = material_template()
+    workflow["links"] = []
+    workflow["last_link_id"] = 0
+    for node in workflow["nodes"]:
+        if node["type"] in (INPUTS, OUTPUTS):
+            # No serialized dynamic slots: the user creates them by connecting
+            # the native '+' sockets, just as when adding a fresh endpoint node.
+            node["widgets_values"] = ["[]"]
+            node["widgets_values_named"] = {"ports": "[]"}
+            node["inputs"] = []
+            node["outputs"] = []
+        else:
+            for socket in node["inputs"]:
+                socket["link"] = None
+            for socket in node["outputs"]:
+                socket["links"] = []
+    return workflow

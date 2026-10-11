@@ -19,7 +19,7 @@ from .previews import PreviewStore
 from ..media.files import probe
 from .store import Conflict, Project, inside
 from . import workflow_files
-from .templates import material_template
+from .templates import material_template, new_card_template
 from .native import project_workflow, save_layout
 
 
@@ -55,7 +55,7 @@ def install_routes():
 
     @endpoint("get", "/new-template")
     async def new_template(request):
-        return web.json_response(material_template()[0])
+        return web.json_response(new_card_template())
 
     @endpoint("post", "/project/create")
     async def create_project(request):

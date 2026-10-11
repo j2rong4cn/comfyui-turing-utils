@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
+import { installStarterFixture } from "./starter.mjs";
 
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
@@ -22,6 +23,7 @@ try {
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18188");
   await page.waitForFunction(() => window.LiteGraph?.registered_node_types.TuringCanvasInputs);
   await selectRenderer(page);
+  await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
@@ -52,6 +54,7 @@ try {
       await (await fetch("/turing/workspace/new-template")).json(),
       name,
     );
+    window.wireStarter();
     const endpoint = app.graph._nodes.find((n) => n.type === "TuringCanvasInputs");
     const image = app.graph._nodes.find((n) => n.type === "TuringMaterialImage");
     for (const node of [...app.graph._nodes])

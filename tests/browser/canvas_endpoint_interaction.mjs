@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
+import { installStarterFixture } from "./starter.mjs";
 
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
@@ -14,12 +15,30 @@ try {
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18188");
   await page.waitForFunction(() => window.LiteGraph?.registered_node_types.TuringCanvasInputs);
   await selectRenderer(page);
+  await installStarterFixture(page);
   const vue = process.env.NODES_MODE === "vue";
   await page.evaluate(async () => {
     const workspace = await import("/extensions/comfyui-turing-utils/material_workspace.js");
     const template = await (await fetch("/turing/workspace/new-template")).json();
     // Test the actual New Card path, not freshly recreated endpoint nodes.
     await workspace.openTab(template, `endpoint-menu-${Date.now()}.json`);
+    if (template.links.length || app.graph.serialize().links.length)
+      throw Error("New Card has preset links");
+    for (const node of app.graph._nodes) {
+      if (node.type.startsWith("TuringCanvas") &&
+        node.widgets.find((w) => w.name === "ports").value !== "[]")
+        throw Error("New Card has preset endpoint entries");
+      if (node.type.startsWith("TuringMaterial")) {
+        const sockets = node.inputs.filter((s) => !s.widget);
+        if (sockets[0]?.name !== "position") throw Error("Position must be the first material socket");
+      }
+    }
+    for (const kind of ["Image", "Video", "Audio", "Text"]) {
+      const node = LiteGraph.createNode("TuringMaterial" + kind);
+      if (node.inputs.filter((s) => !s.widget)[0]?.name !== "position")
+        throw Error("Position must also be first on freshly created " + kind);
+    }
+    window.wireStarter();
     for (const node of app.graph._nodes)
       if (node.type.startsWith("TuringMaterial")) node.pos = [2000, node.pos[1]];
     app.graph.getNodeById(2).pos = [100, 200];

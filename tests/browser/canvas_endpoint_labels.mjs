@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
+import { installStarterFixture } from "./starter.mjs";
 
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
@@ -24,6 +25,7 @@ try {
       !window.app.extensionManager.workflow.isBusy,
   );
   await selectRenderer(page);
+  await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const workspace = await import(
@@ -35,8 +37,9 @@ try {
     const check = (condition, message) => {
       if (!condition) throw Error(message);
     };
-    const template = await (await fetch("/turing/workspace/new-template")).json();
+    let template = await (await fetch("/turing/workspace/new-template")).json();
     await workspace.openTab(template, `endpoint-labels-${Date.now()}.json`);
+    template = window.wireStarter();
     check(!LiteGraph.vueNodesMode, "Classic canvas required");
     const endpoints = () =>
       app.graph._nodes.filter((n) =>
@@ -177,6 +180,18 @@ try {
     const legacy = structuredClone(template);
     for (const node of legacy.nodes) {
       delete node.widgets_values_named;
+      if (["TuringMaterialImage", "TuringMaterialAudio"].includes(node.type)) {
+        // Existing files used value/position. Changing the creation order must
+        // not reinterpret their serialized links as a different input.
+        const position = node.inputs.findIndex((s) => s.name === "position");
+        const value = node.inputs.findIndex((s) => s.name === "value");
+        [node.inputs[position], node.inputs[value]] =
+          [node.inputs[value], node.inputs[position]];
+        for (const link of legacy.links.filter((l) => l[3] === node.id)) {
+          if (link[4] === position) link[4] = value;
+          else if (link[4] === value) link[4] = position;
+        }
+      }
       if (node.type === "TuringMaterialVideo")
         node.widgets_values = [node.widgets_values[0], "", 30, "auto", "sRGB", "none"];
       if (node.type.startsWith("TuringCanvas")) {

@@ -26,9 +26,11 @@ class Material:
     @classmethod
     def INPUT_TYPES(cls):
         inputs = {}
+        # Keep the position socket first for every material kind. Factory
+        # workflows in workspace/templates.py must use the same socket order.
         optional = {
-            "value": (cls.RETURN_TYPES[0], {"lazy": True}),
             "position": (POSITION, {"lazy": True}),
+            "value": (cls.RETURN_TYPES[0], {"lazy": True}),
         }
         inputs["stub_id"] = (
             "STRING",
