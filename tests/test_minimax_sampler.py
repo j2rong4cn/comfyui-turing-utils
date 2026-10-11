@@ -97,10 +97,9 @@ class H3SamplerTest(unittest.TestCase):
         task,
         source,
         positive,
-        negative,
         sigmas,
     ):
-        self.calls.append((source, positive, negative, sigmas.clone()))
+        self.calls.append((source, positive, sigmas.clone()))
         samples = source["samples"]
         output = source.copy()
         output["samples"] = samples + 10
@@ -122,7 +121,10 @@ class H3SamplerTest(unittest.TestCase):
         )
 
     def test_single_pass_matches_native_schedule_and_ignores_second_controls(self):
-        self.run_sampler(second_sigmas={"second_sigmas": "manual", "sigmas": "bad"})
+        self.run_sampler(
+            sigmas={"sigmas": "scheduler"},
+            second_sigmas={"second_sigmas": "manual", "sigmas": "bad"},
+        )
         expected = comfy.samplers.KSampler(
             self.model,
             8,
@@ -131,7 +133,7 @@ class H3SamplerTest(unittest.TestCase):
             scheduler="simple",
             denoise=1,
         ).sigmas
-        torch.testing.assert_close(self.calls[0][3], expected, rtol=0, atol=0)
+        torch.testing.assert_close(self.calls[0][2], expected, rtol=0, atol=0)
         self.assertEqual(self.upscaled, [])
 
     def test_sampler_specific_penultimate_rule_and_denoise_match_native(self):
@@ -139,7 +141,8 @@ class H3SamplerTest(unittest.TestCase):
             for denoise in (1, 0.5, 0.13):
                 with self.subTest(sampler=sampler, denoise=denoise):
                     self.run_sampler(
-                        sampler_name=sampler, first_sigmas={"denoise": denoise}
+                        sampler_name=sampler,
+                        sigmas={"sigmas": "scheduler", "denoise": denoise},
                     )
                     native = comfy.samplers.KSampler(
                         self.model,
@@ -150,16 +153,16 @@ class H3SamplerTest(unittest.TestCase):
                         denoise=denoise,
                     )
                     torch.testing.assert_close(
-                        self.calls[-1][3], native.sigmas, rtol=0, atol=0
+                        self.calls[-1][2], native.sigmas, rtol=0, atol=0
                     )
 
     def test_two_pass_finishes_first_curve_and_uses_exact_template_size_not_time(self):
         source = latent(audio=True)
         target = latent(7, 11, frames=8, batch=3, audio=True, mask=torch.zeros(1))
         result = self.run_sampler(source, latent_second=target)
-        self.assertEqual([len(call[3]) - 1 for call in self.calls], [8, 3])
-        self.assertEqual(float(self.calls[0][3][-1]), 0)
-        self.assertAlmostEqual(float(self.calls[1][3][0]), 0.9035)
+        self.assertEqual([len(call[2]) - 1 for call in self.calls], [5, 3])
+        self.assertEqual(float(self.calls[0][2][-1]), 0)
+        self.assertAlmostEqual(float(self.calls[1][2][0]), 0.9035)
         video, audio = result["samples"].unbind()
         self.assertEqual(video.shape, (1, 24, 2, 7, 11))
         torch.testing.assert_close(audio, source["samples"].unbind()[1] + 20)
@@ -168,32 +171,32 @@ class H3SamplerTest(unittest.TestCase):
 
     def test_manual_first_curve_bypasses_native_scheduler_and_penultimate_rule(self):
         settings = {
-            "first_sigmas": "manual",
-            "sigmas": "0.9, 0.5, 0.1, 0",
+            "sigmas": "manual",
+            "values": "0.9, 0.5, 0.1, 0",
             "steps": -1,
             "denoise": -1,
             "scheduler": "not used",
         }
         for sampler in ("euler", "dpm_2", "uni_pc"):
             with mock.patch.object(comfy.samplers, "KSampler") as native:
-                self.run_sampler(first_sigmas=settings, sampler_name=sampler)
+                self.run_sampler(sigmas=settings, sampler_name=sampler)
             native.assert_not_called()
             torch.testing.assert_close(
-                self.calls[-1][3], torch.tensor([0.9, 0.5, 0.1, 0]), rtol=0, atol=0
+                self.calls[-1][2], torch.tensor([0.9, 0.5, 0.1, 0]), rtol=0, atol=0
             )
 
     def test_manual_stages_are_independent_and_second_can_have_more_steps(self):
         self.run_sampler(
-            first_sigmas={"first_sigmas": "manual", "sigmas": "1, 0"},
+            sigmas={"sigmas": "manual", "values": "1, 0"},
             second_sigmas={
                 "second_sigmas": "manual",
                 "sigmas": "0.6, 0.3, 0.05, 0",
             },
             latent_second=latent(8, 12),
         )
-        self.assertEqual([len(call[3]) - 1 for call in self.calls], [1, 3])
-        torch.testing.assert_close(self.calls[0][3], torch.tensor([1.0, 0]))
-        torch.testing.assert_close(self.calls[1][3], torch.tensor([0.6, 0.3, 0.05, 0]))
+        self.assertEqual([len(call[2]) - 1 for call in self.calls], [1, 3])
+        torch.testing.assert_close(self.calls[0][2], torch.tensor([1.0, 0]))
+        torch.testing.assert_close(self.calls[1][2], torch.tensor([0.6, 0.3, 0.05, 0]))
 
     def test_all_presets_match_advertised_intervals_and_do_not_change_first(self):
         for preset, text in sampling.SECOND_PASS_PRESETS:
@@ -202,17 +205,17 @@ class H3SamplerTest(unittest.TestCase):
                 self.calls.clear()
                 with self.assertLogs(level="INFO") as logs:
                     self.run_sampler(
-                        first_sigmas={"steps": 4},
+                        sigmas={"sigmas": "scheduler", "steps": 4},
                         second_sigmas={"second_sigmas": "preset", "preset": preset},
                         latent_second=latent(8, 12),
                     )
-                self.assertEqual([len(call[3]) - 1 for call in self.calls], [4, count])
-                self.assertEqual(float(self.calls[0][3][-1]), 0)
+                self.assertEqual([len(call[2]) - 1 for call in self.calls], [4, count])
+                self.assertEqual(float(self.calls[0][2][-1]), 0)
                 self.assertIn(
                     f"4 first-pass + {count} second-pass steps", logs.output[-1]
                 )
                 torch.testing.assert_close(
-                    self.calls[1][3],
+                    self.calls[1][2],
                     sampling.parse_sigmas(text, "preset"),
                     rtol=0,
                     atol=0,
@@ -220,10 +223,11 @@ class H3SamplerTest(unittest.TestCase):
 
     def test_invalid_active_curves_fail_before_any_sampling_or_upscale(self):
         for kwargs in (
-            {"first_sigmas": {"first_sigmas": "unknown"}},
-            {"first_sigmas": {"first_sigmas": "manual", "sigmas": "1, 0.1"}},
-            {"first_sigmas": {"steps": 0}},
-            {"first_sigmas": {"denoise": float("nan")}},
+            {"sigmas": {"sigmas": "unknown"}},
+            {"sigmas": {"sigmas": "preset", "preset": "unknown"}},
+            {"sigmas": {"sigmas": "manual", "values": "1, 0.1"}},
+            {"sigmas": {"sigmas": "scheduler", "steps": 0}},
+            {"sigmas": {"sigmas": "scheduler", "denoise": float("nan")}},
             {"second_sigmas": {"second_sigmas": "unknown"}},
             {"second_sigmas": {"preset": "unknown"}},
             {"second_sigmas": {"second_sigmas": "manual", "sigmas": "bad"}},
@@ -243,7 +247,7 @@ class H3SamplerTest(unittest.TestCase):
         self.assertEqual(result["samples"].shape, (1, 24, 2, 7, 11))
 
     def test_reused_keyframes_fail_before_first_dit_call(self):
-        with self.assertRaisesRegex(ValueError, "Connect matching conditioning_second"):
+        with self.assertRaisesRegex(ValueError, "Connect matching upscaled condition"):
             sampling.sample_h3(
                 self.model,
                 conditioning(4, 6),
@@ -253,17 +257,18 @@ class H3SamplerTest(unittest.TestCase):
             )
         self.assertEqual(self.calls, [])
 
-    def test_second_keyframes_allow_cfg_one_without_negative_second(self):
+    def test_second_keyframes_use_the_matching_condition(self):
+        second_condition = conditioning(8, 12)
         sampling.sample_h3(
             self.model,
             conditioning(4, 6),
             latent(),
             latent_second=latent(8, 12),
-            conditioning_second=conditioning(8, 12),
+            conditioning_second=second_condition,
             upscale_model=object(),
         )
         self.assertEqual(len(self.calls), 2)
-        self.assertIs(self.calls[1][1], self.calls[1][2])
+        self.assertIs(self.calls[1][1], second_condition)
 
     def test_second_keyframe_timeline_uses_first_not_template(self):
         with self.assertRaisesRegex(ValueError, "first latent"):
@@ -343,14 +348,57 @@ class H3SamplerTest(unittest.TestCase):
             video, target["samples"].expand_as(video), rtol=0, atol=0
         )
 
-    def test_cfg_requires_negative_and_second_negative_is_validated(self):
-        with self.assertRaisesRegex(ValueError, "Connect negative"):
-            self.run_sampler(cfg=2)
-        with self.assertRaisesRegex(ValueError, "negative_second"):
-            self.run_sampler(
-                cfg=2, negative=conditioning(4, 6), latent_second=latent(8, 12)
+    def test_presets_are_exact_and_do_not_use_the_scheduler(self):
+        self.assertEqual(
+            [name for name, _ in sampling.SIGMA_PRESETS], ["3+1", "4+1", "4+2", "6+2"]
+        )
+        expected_curves = (
+            [1, 0.960058, 0.857510, 0.706380, 0],
+            [1, 0.972973, 0.923077, 0.8, 0.631579, 0],
+            [1, 0.972973, 0.923077, 0.8, 0.705882, 0.521739, 0],
+            [
+                1,
+                0.983684,
+                0.960058,
+                0.923077,
+                0.857510,
+                0.706380,
+                0.600539,
+                0.414306,
+                0,
+            ],
+        )
+        for (preset, _), expected in zip(sampling.SIGMA_PRESETS, expected_curves):
+            with (
+                self.subTest(preset=preset),
+                mock.patch.object(comfy.samplers, "KSampler") as native,
+            ):
+                self.run_sampler(
+                    sigmas={"sigmas": "preset", "preset": preset}, sampler_name="dpm_2"
+                )
+                native.assert_not_called()
+                torch.testing.assert_close(
+                    self.calls[-1][2], torch.tensor(expected), rtol=0, atol=0
+                )
+
+    def test_default_and_manual_curves_are_the_same_four_plus_one(self):
+        self.run_sampler()
+        default = self.calls[-1][2]
+        self.run_sampler(sigmas={"sigmas": "manual"})
+        torch.testing.assert_close(default, self.calls[-1][2], rtol=0, atol=0)
+        self.assertEqual(
+            default.tolist(),
+            torch.tensor([1, 0.972973, 0.923077, 0.8, 0.631579, 0]).tolist(),
+        )
+        self.assertEqual(len(default) - 1, 5)
+        for settings in (None, {"second_sigmas": "manual"}):
+            curve = sampling.second_pass_sigmas(settings)
+            torch.testing.assert_close(
+                curve, torch.tensor([0.9035, 0.6316, 0.3158, 0]), rtol=0, atol=0
             )
-        self.assertEqual(self.calls, [])
+        self.assertEqual(len(sampling.SECOND_PASS_PRESETS), 3)
+        with self.assertRaisesRegex(ValueError, "Unknown second-pass sigma preset"):
+            sampling.second_pass_sigmas({"preset": "2 steps · 0.6316 → 0"})
 
 
 class SigmaTextTest(unittest.TestCase):
@@ -426,16 +474,17 @@ class H3StageTest(unittest.TestCase):
             mock.patch.object(patcher.model, "process_latent_out") as process,
         ):
             curve = torch.tensor([0.6, 0.3, 0])
-            task = sampling.H3SamplingTask(patcher, 17, 1, "euler", curve, None)
+            task = sampling.H3SamplingTask(patcher, 17, "euler", curve, None)
             result = task.sample_stage(
                 source,
-                conditioning(),
                 conditioning(),
                 curve,
             )
         self.assertIs(result["samples"], final)
         process.assert_not_called()
         preview.assert_called_once_with(patcher, 2)
+        self.assertEqual(native.call_args.args[2], 1)
+        self.assertEqual(native.call_args.args[6], [])
         native.call_args.kwargs["callback"](0, video, video, 2)
         callback.assert_called_once_with(0, video, video, 2)
         torch.testing.assert_close(result["samples"].unbind()[0], video + 2)
@@ -459,10 +508,9 @@ class H3StageTest(unittest.TestCase):
             ),
         ):
             curve = torch.tensor([0.6, 0.3, 0])
-            task = sampling.H3SamplingTask(model(), 0, 1, "euler", curve, None)
+            task = sampling.H3SamplingTask(model(), 0, "euler", curve, None)
             result = task.sample_stage(
                 source,
-                conditioning(),
                 conditioning(),
                 curve,
             )
@@ -472,7 +520,10 @@ class H3StageTest(unittest.TestCase):
         source = latent(audio=True)
         with mock.patch.object(comfy.sample, "sample_custom") as native:
             result = sampling.sample_h3(
-                model(), conditioning(), source, first_sigmas={"denoise": 0}
+                model(),
+                conditioning(),
+                source,
+                sigmas={"sigmas": "scheduler", "denoise": 0},
             )
         native.assert_not_called()
         for actual, expected in zip(
@@ -584,7 +635,7 @@ class H3NativeSamplerTest(unittest.TestCase):
                 source,
                 seed=17,
                 sampler_name="heun",
-                first_sigmas={"first_sigmas": "manual", "sigmas": ".9,.6,.3,0"},
+                sigmas={"sigmas": "manual", "values": ".9,.6,.3,0"},
                 second_sigmas={"second_sigmas": "manual", "sigmas": ".6,.3,0"},
                 latent_second=latent(7, 11),
                 upscale_model=object(),
@@ -602,7 +653,7 @@ class H3NativeSamplerTest(unittest.TestCase):
     ):
         device = torch.device("cpu")
         patcher = comfy.model_patcher.ModelPatcher(_TinyH3(device), device, device)
-        positive, negative = conditioning(), conditioning()
+        positive = conditioning()
         positive[0][0] += 0.02
         for denoise in (0, 0.5, 1):
             with self.subTest(denoise=denoise):
@@ -616,11 +667,11 @@ class H3NativeSamplerTest(unittest.TestCase):
                             source["samples"], 17, source["batch_index"]
                         ),
                         4,
-                        2,
+                        1,
                         "euler",
                         "simple",
                         positive,
-                        negative,
+                        [],
                         source["samples"],
                         denoise=denoise,
                         disable_pbar=True,
@@ -632,11 +683,11 @@ class H3NativeSamplerTest(unittest.TestCase):
                 expected = comfy.sample.sample_custom(
                     patcher,
                     comfy.sample.prepare_noise(high_samples, 17, source["batch_index"]),
-                    2,
+                    1,
                     comfy.samplers.sampler_object("euler"),
                     torch.tensor([0.6, 0.3, 0.05, 0]),
                     positive,
-                    negative,
+                    [],
                     high_samples,
                     disable_pbar=True,
                     seed=17,
@@ -658,10 +709,8 @@ class H3NativeSamplerTest(unittest.TestCase):
                         patcher,
                         positive,
                         source,
-                        negative=negative,
                         seed=17,
-                        cfg=2,
-                        first_sigmas={"steps": 4, "denoise": denoise},
+                        sigmas={"sigmas": "scheduler", "steps": 4, "denoise": denoise},
                         second_sigmas={
                             "second_sigmas": "manual",
                             "sigmas": "0.6, 0.3, 0.05, 0",
@@ -678,50 +727,47 @@ class H3NativeSamplerTest(unittest.TestCase):
     def test_single_pass_numerically_matches_native_ksampler(self, _load, _preview):
         device = torch.device("cpu")
         patcher = comfy.model_patcher.ModelPatcher(_TinyH3(device), device, device)
-        positive, negative = conditioning(), conditioning()
+        positive = conditioning()
         positive[0][0] += 0.02
         for av in (False, True):
-            for cfg in (1, 2):
-                for denoise in (1, 0.5):
-                    with self.subTest(av=av, cfg=cfg, denoise=denoise):
-                        source = latent(audio=av)
-                        native_samples = source["samples"]
-                        if not av:
-                            native_samples = NestedTensor(
-                                (native_samples, torch.zeros(1, 32, 2, 8))
-                            )
-                        expected = comfy.sample.sample(
-                            patcher,
-                            comfy.sample.prepare_noise(
-                                native_samples, 17, source["batch_index"]
-                            ),
-                            4,
-                            cfg,
-                            "euler",
-                            "simple",
-                            positive,
-                            negative,
-                            native_samples,
-                            denoise=denoise,
-                            disable_pbar=True,
-                            seed=17,
+            for denoise in (1, 0.5):
+                with self.subTest(av=av, denoise=denoise):
+                    source = latent(audio=av)
+                    native_samples = source["samples"]
+                    if not av:
+                        native_samples = NestedTensor(
+                            (native_samples, torch.zeros(1, 32, 2, 8))
                         )
-                        actual = sampling.sample_h3(
-                            patcher,
-                            positive,
-                            source,
-                            seed=17,
-                            first_sigmas={"steps": 4, "denoise": denoise},
-                            cfg=cfg,
-                            negative=negative,
-                        )["samples"]
-                        if av:
-                            for a, e in zip(actual.unbind(), expected.unbind()):
-                                torch.testing.assert_close(a, e, rtol=0, atol=0)
-                        else:
-                            torch.testing.assert_close(
-                                actual, expected.unbind()[0], rtol=0, atol=0
-                            )
+                    expected = comfy.sample.sample(
+                        patcher,
+                        comfy.sample.prepare_noise(
+                            native_samples, 17, source["batch_index"]
+                        ),
+                        4,
+                        1,
+                        "euler",
+                        "simple",
+                        positive,
+                        [],
+                        native_samples,
+                        denoise=denoise,
+                        disable_pbar=True,
+                        seed=17,
+                    )
+                    actual = sampling.sample_h3(
+                        patcher,
+                        positive,
+                        source,
+                        seed=17,
+                        sigmas={"sigmas": "scheduler", "steps": 4, "denoise": denoise},
+                    )["samples"]
+                    if av:
+                        for a, e in zip(actual.unbind(), expected.unbind()):
+                            torch.testing.assert_close(a, e, rtol=0, atol=0)
+                    else:
+                        torch.testing.assert_close(
+                            actual, expected.unbind()[0], rtol=0, atol=0
+                        )
 
     @mock.patch("latent_preview.get_previewer", return_value=None)
     @mock.patch("comfy.model_management.load_models_gpu")
@@ -747,7 +793,7 @@ class H3NativeSamplerTest(unittest.TestCase):
                 patcher,
                 conditioning(),
                 source,
-                first_sigmas={"steps": 4},
+                sigmas={"sigmas": "scheduler", "steps": 4},
                 latent_second=target,
                 upscale_model=object(),
             )
@@ -785,7 +831,7 @@ class H3NativeSamplerTest(unittest.TestCase):
                 patcher,
                 conditioning(),
                 latent(audio=True),
-                first_sigmas={"steps": 4},
+                sigmas={"sigmas": "scheduler", "steps": 4},
                 latent_second=latent(7, 11, frames=9),
                 upscale_model=upscale_patcher,
             )
@@ -849,7 +895,7 @@ class H3TaskProgressTest(unittest.TestCase):
             self.patcher,
             conditioning(),
             latent(audio=True),
-            first_sigmas={"steps": 4},
+            sigmas={"sigmas": "scheduler", "steps": 4},
             latent_second=latent(7, 11),
             second_sigmas={"second_sigmas": "manual", "sigmas": ".6, .3, 0"},
             upscale_model=object(),
@@ -882,22 +928,34 @@ class H3TaskProgressTest(unittest.TestCase):
         )
 
     def test_heun_correctors_do_not_consume_an_extra_step(self):
-        self.run_task(sampler_name="heun", cfg=2, negative=conditioning())
-        # Native CFG runs positive/negative as separate batches on this fixture.
+        self.run_task(sampler_name="heun")
         self.assertEqual(
             [r[0] for r in self.records],
-            [step for step in [0, 0, 1, 1, 2, 2, 3, 4, 4, 5] for _ in range(2)],
+            [0, 0, 1, 1, 2, 2, 3, 4, 4, 5],
         )
         self.assertEqual(
-            [r[2] for r in self.records], [True] * 4 + [False] * 14 + [True] * 2
+            [r[2] for r in self.records], [True] * 2 + [False] * 7 + [True]
         )
+
+    def test_default_preset_and_second_curve_have_one_eight_step_task(self):
+        sampling.sample_h3(
+            self.patcher,
+            conditioning(),
+            latent(audio=True),
+            latent_second=latent(7, 11),
+            upscale_model=object(),
+        )
+        self.assertEqual([r[0] for r in self.records], list(range(8)))
+        self.assertTrue(all(r[1] == 8 for r in self.records))
+        self.assertEqual([r[2] for r in self.records], [True] + [False] * 6 + [True])
+        self.assertEqual([r[3] for r in self.records], [(4, 6)] * 5 + [(7, 11)] * 3)
 
     def test_duplicate_sigmas_are_distinct_intervals(self):
         sampling.sample_h3(
             self.patcher,
             conditioning(),
             latent(audio=True),
-            first_sigmas={"first_sigmas": "manual", "sigmas": ".8,.8,.4,0"},
+            sigmas={"sigmas": "manual", "values": ".8,.8,.4,0"},
         )
         self.assertEqual(
             [r[:3] for r in self.records],
@@ -941,7 +999,7 @@ class H3TaskProgressTest(unittest.TestCase):
             self.patcher,
             conditioning(),
             latent(audio=True),
-            first_sigmas={"denoise": 0},
+            sigmas={"sigmas": "scheduler", "denoise": 0},
             latent_second=latent(7, 11),
             second_sigmas={"second_sigmas": "manual", "sigmas": ".6,.3,0"},
             upscale_model=object(),
@@ -973,7 +1031,7 @@ class H3TaskProgressTest(unittest.TestCase):
 
         original_trange = kd.trange, uni_pc.trange
         source = latent(audio=True)
-        positive, negative = conditioning(), conditioning()
+        positive = conditioning()
         curve = torch.tensor([0.9, 0.6, 0.3, 0.1, 0])
         for name in comfy.samplers.KSampler.SAMPLERS:
             with self.subTest(sampler=name):
@@ -984,11 +1042,11 @@ class H3TaskProgressTest(unittest.TestCase):
                 expected = comfy.sample.sample_custom(
                     self.patcher,
                     noise,
-                    2,
+                    1,
                     comfy.samplers.sampler_object(name),
                     curve,
                     positive,
-                    negative,
+                    [],
                     source["samples"],
                     disable_pbar=True,
                     seed=13,
@@ -998,10 +1056,8 @@ class H3TaskProgressTest(unittest.TestCase):
                     positive,
                     source,
                     seed=13,
-                    cfg=2,
-                    negative=negative,
                     sampler_name=name,
-                    first_sigmas={"first_sigmas": "manual", "sigmas": ".9,.6,.3,.1,0"},
+                    sigmas={"sigmas": "manual", "values": ".9,.6,.3,.1,0"},
                 )["samples"]
                 for a, e in zip(actual.unbind(), expected.unbind()):
                     torch.testing.assert_close(a, e, rtol=0, atol=0, equal_nan=True)
@@ -1017,7 +1073,61 @@ class H3TaskProgressTest(unittest.TestCase):
 
 
 class H3SamplerLoaderTest(unittest.TestCase):
-    def test_dynamic_schemas_and_native_executor_execute_all_four_mode_pairs(self):
+    def test_h3_schema_has_one_condition_per_stage_and_explicit_curve_defaults(self):
+        schema = MiniMaxH3KSampler.GET_SCHEMA()
+        fields = {item.id: item for item in schema.inputs}
+        self.assertFalse(
+            {"negative", "negative_second", "cfg", "first_sigmas", "precision"}
+            & fields.keys()
+        )
+        self.assertTrue(all(not item.advanced for item in schema.inputs))
+        for field, label in {
+            "conditioning_second": "upscaled condition",
+            "latent_second": "upscaled latent",
+            "second_sigmas": "upscaled sigmas",
+            "model_name": "upscaler model",
+            "mask_grow": "mask grow",
+        }.items():
+            self.assertEqual(fields[field].display_name, label)
+        self.assertEqual(
+            [item.id for item in schema.inputs[-2:]], ["model_name", "mask_grow"]
+        )
+        self.assertEqual(
+            [item.id for item in schema.inputs[:5]],
+            ["model", "conditioning", "latent", "conditioning_second", "latent_second"],
+        )
+        options = {option.key: option.inputs for option in fields["sigmas"].options}
+        self.assertEqual(list(options), ["preset", "scheduler", "manual"])
+        self.assertEqual(options["preset"][0].default, "4+1")
+        self.assertEqual(options["manual"][0].default, sampling.DEFAULT_SIGMAS)
+        second = {
+            option.key: option.inputs for option in fields["second_sigmas"].options
+        }
+        self.assertEqual(
+            second["manual"][0].default, sampling.SECOND_PASS_PRESETS[0][1]
+        )
+        self.assertEqual(len(second["preset"][0].options), 3)
+
+    def test_public_node_direct_execution_uses_auto_upscale_precision(self):
+        source, target = latent(), latent(8, 12)
+        sentinel = object()
+        with (
+            mock.patch(
+                "comfyui_turing_utils.nodes.minimax_sampler.load_h3_latent_upscaler",
+                return_value=sentinel,
+            ) as load,
+            mock.patch(
+                "comfyui_turing_utils.nodes.minimax_sampler.sample_h3",
+                return_value=source,
+            ) as sample,
+        ):
+            MiniMaxH3KSampler.execute(
+                model_name="test.safetensors", latent=source, latent_second=target
+            )
+        load.assert_called_once_with("test.safetensors", "auto")
+        self.assertIs(sample.call_args.kwargs["upscale_model"], sentinel)
+
+    def test_dynamic_schemas_and_native_executor_execute_all_six_mode_pairs(self):
         import execution
         import nodes
         from comfyui_turing_utils.registration import NODE_CLASS_MAPPINGS
@@ -1041,25 +1151,27 @@ class H3SamplerLoaderTest(unittest.TestCase):
                 },
             }
         }
-        for first in ("automatic", "manual"):
+        for first in ("scheduler", "preset", "manual"):
             for second in ("preset", "manual"):
                 with self.subTest(first=first, second=second):
                     inputs = prompt["s"]["inputs"]
-                    inputs["first_sigmas"] = first
+                    inputs["sigmas"] = first
                     inputs["second_sigmas"] = second
                     for key in tuple(inputs):
-                        if key.startswith(("first_sigmas.", "second_sigmas.")):
+                        if key.startswith(("sigmas.", "second_sigmas.")):
                             inputs.pop(key)
-                    if first == "automatic":
+                    if first == "scheduler":
                         inputs.update(
                             {
-                                "first_sigmas.steps": 4,
-                                "first_sigmas.scheduler": "simple",
-                                "first_sigmas.denoise": 1,
+                                "sigmas.steps": 4,
+                                "sigmas.scheduler": "simple",
+                                "sigmas.denoise": 1,
                             }
                         )
+                    elif first == "preset":
+                        inputs["sigmas.preset"] = "4+1"
                     else:
-                        inputs["first_sigmas.sigmas"] = "1, .5, .1, 0"
+                        inputs["sigmas.values"] = "1, .5, .1, 0"
                     if second == "preset":
                         inputs["second_sigmas.preset"] = sampling.SECOND_PASS_PRESETS[
                             1
@@ -1087,10 +1199,11 @@ class H3SamplerLoaderTest(unittest.TestCase):
                         )
                     self.assertTrue(executor.success, executor.status_messages)
                     self.assertEqual(stage.call_count, 2)
-                    first_curve = stage.call_args_list[0].args[4]
-                    second_curve = stage.call_args_list[1].args[4]
+                    first_curve = stage.call_args_list[0].args[3]
+                    second_curve = stage.call_args_list[1].args[3]
                     self.assertEqual(
-                        len(first_curve) - 1, 4 if first == "automatic" else 3
+                        len(first_curve) - 1,
+                        {"scheduler": 4, "preset": 5, "manual": 3}[first],
                     )
                     self.assertEqual(
                         len(second_curve) - 1, 4 if second == "preset" else 2
@@ -1149,10 +1262,10 @@ class H3SamplerLoaderTest(unittest.TestCase):
                     "conditioning": conditioning(),
                     "latent": source,
                     "model_name": "test.safetensors",
-                    "first_sigmas": "automatic",
-                    "first_sigmas.steps": 8,
-                    "first_sigmas.scheduler": "simple",
-                    "first_sigmas.denoise": 1,
+                    "sigmas": "scheduler",
+                    "sigmas.steps": 8,
+                    "sigmas.scheduler": "simple",
+                    "sigmas.denoise": 1,
                     "second_sigmas": "manual",
                     "second_sigmas.sigmas": "invalid but unused",
                 },
@@ -1197,7 +1310,7 @@ class H3SamplerLoaderTest(unittest.TestCase):
             self.assertTrue(executor.success, executor.status_messages)
             load.assert_not_called()
             self.assertIsNone(sample.call_args.kwargs.get("upscale_model"))
-            self.assertEqual(sample.call_args.kwargs["first_sigmas"]["steps"], 8)
+            self.assertEqual(sample.call_args.kwargs["sigmas"]["steps"], 8)
             self.assertEqual(
                 sample.call_args.kwargs["second_sigmas"]["sigmas"], "invalid but unused"
             )

@@ -52,17 +52,6 @@ class NodeConfigurationTest(unittest.TestCase):
                     )
                     if metadata.get("advanced"):
                         found.add(key)
-                elif name == "TuringUtilsMiniMaxH3KSampler":
-                    self.assertEqual(
-                        bool(metadata.get("advanced")),
-                        key
-                        in {
-                            "mask_grow",
-                            "model_name",
-                            "precision",
-                        },
-                        key,
-                    )
                 else:
                     self.assertFalse(metadata.get("advanced"), (name, key))
         self.assertEqual(found, expected)

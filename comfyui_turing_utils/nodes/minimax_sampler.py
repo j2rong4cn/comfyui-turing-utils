@@ -9,7 +9,14 @@ from comfy_api.latest import io
 from . import INTERNAL_NODE_NOTE
 from .minimax import H3LatentUpscaleModel
 from ..adapters.minimax.latent_upscaler import load_h3_latent_upscaler
-from ..adapters.minimax.sampling import SECOND_PASS_PRESETS, needs_upscaler, sample_h3
+from ..adapters.minimax.sampling import (
+    DEFAULT_PRESET,
+    DEFAULT_SIGMAS,
+    SIGMA_PRESETS,
+    SECOND_PASS_PRESETS,
+    needs_upscaler,
+    sample_h3,
+)
 
 
 _ABSENT = object()
@@ -25,9 +32,9 @@ class _H3KSamplerApply(io.ComfyNode):
             is_dev_only=True,
             description=INTERNAL_NODE_NOTE
             + (
-                "Finish an automatic or manual first curve to zero. A second latent enables a separate preset or manual curve; "
+                "Finish a scheduler, preset or manual curve to zero. H3 uses a single condition without negative conditioning or CFG. A second latent enables a separate preset or manual curve; "
                 "only its H/W are used unless a first-pass video mask protects part of the base. "
-                "Steps/denoise/scheduler apply only to automatic first sampling. Manual curves are used exactly as entered."
+                "Steps/denoise/scheduler apply only to scheduler mode. Preset and manual curves are used exactly as entered."
                 " Attention step protection and preview progress span both stages without a second prefix restart."
             ),
             inputs=[
@@ -36,19 +43,17 @@ class _H3KSamplerApply(io.ComfyNode):
                 io.Latent.Input("latent"),
                 io.Conditioning.Input(
                     "conditioning_second",
+                    display_name="upscaled condition",
                     optional=True,
                     lazy=True,
                     tooltip="Optional high-resolution condition. Empty reuses conditioning; keyframes must match second-pass H/W and first-pass time.",
                 ),
                 io.Latent.Input(
                     "latent_second",
+                    display_name="upscaled latent",
                     optional=True,
                     tooltip="Connect to enable second sampling. Supplies exact output H/W, and the protected high-resolution base for masked inpainting. Its own mask/audio are ignored.",
                 ),
-                io.Conditioning.Input(
-                    "negative", optional=True, tooltip="Required when cfg is not 1."
-                ),
-                io.Conditioning.Input("negative_second", optional=True, lazy=True),
                 io.Int.Input(
                     "seed",
                     default=0,
@@ -56,17 +61,27 @@ class _H3KSamplerApply(io.ComfyNode):
                     max=0xFFFFFFFFFFFFFFFF,
                     control_after_generate=True,
                 ),
-                io.Float.Input("cfg", default=1, min=0, max=100, step=0.1),
                 io.Combo.Input(
                     "sampler_name",
                     options=comfy.samplers.KSampler.SAMPLERS,
                     default="euler",
                 ),
                 io.DynamicCombo.Input(
-                    "first_sigmas",
+                    "sigmas",
                     options=[
                         io.DynamicCombo.Option(
-                            "automatic",
+                            "preset",
+                            [
+                                io.Combo.Input(
+                                    "preset",
+                                    options=[name for name, _ in SIGMA_PRESETS],
+                                    default=DEFAULT_PRESET,
+                                    tooltip="An exact full curve: base steps + supplemental points, not an upscale split. No points are inserted automatically.",
+                                ),
+                            ],
+                        ),
+                        io.DynamicCombo.Option(
+                            "scheduler",
                             [
                                 io.Int.Input("steps", default=8, min=1, max=10000),
                                 io.Combo.Input(
@@ -83,18 +98,20 @@ class _H3KSamplerApply(io.ComfyNode):
                             "manual",
                             [
                                 io.String.Input(
-                                    "sigmas",
-                                    default="1, 0.8, 0.6, 0.3, 0",
+                                    "values",
+                                    display_name="sigmas",
+                                    default=DEFAULT_SIGMAS,
                                     multiline=True,
                                     tooltip="Complete first-pass curve, ending at zero. Commas, whitespace and scientific notation are supported; no points are added or removed.",
                                 ),
                             ],
                         ),
                     ],
-                    tooltip="Automatic matches native KSampler. Manual uses the exact FP32 curve, without steps/scheduler/denoise processing.",
+                    tooltip="Preset defaults to 4+1. Scheduler matches native KSampler. Preset/manual use the exact FP32 curve, without steps/scheduler/denoise processing.",
                 ),
                 io.DynamicCombo.Input(
                     "second_sigmas",
+                    display_name="upscaled sigmas",
                     options=[
                         io.DynamicCombo.Option(
                             "preset",
@@ -111,6 +128,7 @@ class _H3KSamplerApply(io.ComfyNode):
                             [
                                 io.String.Input(
                                     "sigmas",
+                                    display_name="upscaled sigmas",
                                     default=SECOND_PASS_PRESETS[0][1],
                                     multiline=True,
                                     tooltip="Complete second-pass curve, ending at zero. Its first sigma controls native re-noising after upscale.",
@@ -118,16 +136,15 @@ class _H3KSamplerApply(io.ComfyNode):
                             ],
                         ),
                     ],
-                    tooltip="Used only when latent_second is connected. Actual steps are the number of intervals in the selected curve.",
+                    tooltip="Used only when upscaled latent is connected. Actual steps are the number of intervals in the selected curve.",
                 ),
                 H3LatentUpscaleModel.Input("upscale_model", optional=True, lazy=True),
                 io.Int.Input(
                     "mask_grow",
-                    display_name="inpaint.mask_grow",
+                    display_name="mask grow",
                     default=0,
                     min=0,
                     max=4096,
-                    advanced=True,
                     tooltip="Grow the second-pass video mask by this many high-resolution DiT patch rings. Time/audio are never grown.",
                 ),
             ],
@@ -140,20 +157,12 @@ class _H3KSamplerApply(io.ComfyNode):
         latent,
         latent_second=None,
         conditioning_second=_ABSENT,
-        negative_second=_ABSENT,
         upscale_model=_ABSENT,
         **kwargs,
     ):
         if latent_second is None:
             return []
-        required = [
-            name
-            for name, value in (
-                ("conditioning_second", conditioning_second),
-                ("negative_second", negative_second),
-            )
-            if value is None
-        ]
+        required = ["conditioning_second"] if conditioning_second is None else []
         if upscale_model is None and needs_upscaler(latent, latent_second):
             required.append("upscale_model")
         return required
@@ -182,20 +191,12 @@ class MiniMaxH3KSampler(io.ComfyNode):
             [
                 io.Combo.Input(
                     "model_name",
-                    display_name="upscale.model_name",
-                    advanced=True,
+                    display_name="upscaler model",
                     options=[
                         "none",
                         *folder_paths.get_filename_list("latent_upscale_models"),
                     ],
                     default="none",
-                ),
-                io.Combo.Input(
-                    "precision",
-                    display_name="upscale.precision",
-                    advanced=True,
-                    options=["auto", "fp16", "bf16", "fp32"],
-                    default="auto",
                 ),
                 mask_grow,
             ]
@@ -207,26 +208,18 @@ class MiniMaxH3KSampler(io.ComfyNode):
         cls,
         latent_second=None,
         conditioning_second=_ABSENT,
-        negative_second=_ABSENT,
         **kwargs,
     ):
         if latent_second is None:
             return []
-        return [
-            name
-            for name, value in (
-                ("conditioning_second", conditioning_second),
-                ("negative_second", negative_second),
-            )
-            if value is None
-        ]
+        return ["conditioning_second"] if conditioning_second is None else []
 
     @classmethod
-    def execute(cls, model_name="none", precision="auto", **kwargs):
+    def execute(cls, model_name="none", **kwargs):
         upscale_model = None
         if (
             needs_upscaler(kwargs["latent"], kwargs.get("latent_second"))
             and model_name != "none"
         ):
-            upscale_model = load_h3_latent_upscaler(model_name, precision)
+            upscale_model = load_h3_latent_upscaler(model_name, "auto")
         return io.NodeOutput(sample_h3(upscale_model=upscale_model, **kwargs))

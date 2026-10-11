@@ -11,16 +11,21 @@ SeC positive_coords and negative_coords are optional socket-only STRING inputs,
 in that order immediately before bounding_box. Use native force_input rather
 than JavaScript widget hiding; their JSON point format is unchanged.
 
-Only Multimodal Prompt Chat's former Options parameters and the explicitly
-requested MiniMax H3 KSampler upscale/inpaint details are advanced;
+Only Multimodal Prompt Chat's former Options parameters are advanced;
 system_prompt and existing ordinary-node inputs remain ordinary.
-H3 KSampler uses native DynamicCombo branches: first_sigmas automatic/manual,
-second_sigmas preset/manual. Only automatic first sampling exposes steps,
-scheduler and denoise; only manual branches expose sigma text. Both curves
-finish independently at zero. Advanced fields are upscale.model_name,
-upscale.precision and inpaint.mask_grow. The seven fixed media inputs keep their
+H3 KSampler uses native DynamicCombo branches: sigmas preset/scheduler/manual
+(default: preset 4+1), upscaled sigmas preset/manual (default: 3 steps).
+Preset names describe base steps plus supplemental points within a complete
+first curve; they are not an upscale split. Only scheduler mode exposes steps,
+scheduler and denoise; only manual branches expose sigma text. Manual defaults
+are the 4+1 first curve and the 3-step second curve. Both curves
+finish independently at zero. The upscaler model and mask grow are ordinary
+inputs; upscaler precision is fixed to auto, without a precision control.
+H3 has no advanced, negative or CFG inputs. Upscale sockets are displayed as
+upscaled condition and upscaled latent; their saved IDs remain unchanged.
+The five fixed model/condition/latent inputs keep their
 order when switching modes. No Refiner or combined-step split is retained.
-web/chat_advanced.js opts these two nodes into the small
+web/chat_advanced.js opts only Multimodal Prompt Chat into the small
 enableAdvancedLayout helper in web/lib/advanced_layout.js. On classic frontend
 1.53.6, construction sets options.advanced but drawing reads widget.advanced;
 native layout also includes advanced widgets even while drawing omits them.
