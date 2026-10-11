@@ -1,7 +1,14 @@
 import { app } from "../../scripts/app.js";
-import { INPUTS, OUTPUTS, entries, syncPorts } from "./lib/canvas_ports.js";
+import {
+  INPUTS,
+  OUTPUTS,
+  entries,
+  syncPorts,
+  syncDynamicTargets,
+} from "./lib/canvas_ports.js";
 import { installEndpoint } from "./lib/endpoint_interaction.js";
 import { expandDynamicParameters } from "./lib/dynamic_parameter.js";
+import { hideMetadataSocket, restoreMaterialWidgets } from "./lib/workflow_metadata.js";
 
 app.registerExtension({
   name: "TuringUtils.CanvasEndpoints",
@@ -25,6 +32,12 @@ app.registerExtension({
   nodeCreated(node) {
     const type = node.comfyClass || node.constructor.type || node.type;
     if (type?.startsWith("TuringMaterial")) {
+      hideMetadataSocket(node, "stub_id");
+      const configure = node.onConfigure;
+      node.onConfigure = function (data) {
+        configure?.call(this, data);
+        restoreMaterialWidgets(this, data);
+      };
       const kind = type.slice("TuringMaterial".length).toLowerCase();
       const id = node.widgets?.find((w) => w.name === "stub_id");
       if (id) {
@@ -62,7 +75,22 @@ app.registerExtension({
       };
     }
     if (![INPUTS, OUTPUTS].includes(type)) return;
+    hideMetadataSocket(node, "ports");
     installEndpoint(node);
+    const configure = node.onConfigure;
+    node.onConfigure = function (data) {
+      configure?.call(this, data);
+      this.portReorder.finish(false);
+      // loadedGraphNode is not called for clone/paste/direct configure. Repair
+      // every local restoration too; labels/IDs mirror workspace/templates.py.
+      // During graph.configure peers have not restored their DynamicCombo
+      // schemas yet. Rebuild local slots synchronously; propagate only after
+      // the native graph restoration has completed, including nested subgraphs.
+      syncPorts(this, entries(this), { syncTargets: false });
+      queueMicrotask(() => {
+        for (const port of entries(this)) syncDynamicTargets(this, port);
+      });
+    };
     queueMicrotask(() => syncPorts(node, entries(node)));
   },
   loadedGraphNode(node) {

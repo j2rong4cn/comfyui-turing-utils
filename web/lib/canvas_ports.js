@@ -1,4 +1,5 @@
 import { parameterWidget } from "./parameter_widget.js";
+import { hideMetadataSocket } from "./workflow_metadata.js";
 import {
   DYNAMIC_COMBO,
   dynamicDefinition,
@@ -108,104 +109,123 @@ export function syncDynamicTargets(node, port) {
 export function entries(node) {
   return JSON.parse(node.widgets.find((w) => w.name === "ports").value || "[]");
 }
-export function syncPorts(node, ports) {
+export function syncPorts(node, ports, { syncTargets = true } = {}) {
+  const width = node.size[0];
   node._syncingPorts = true;
-  for (let i = (node.inputs?.length || 0) - 1; i >= 0; i--)
-    if (node.inputs[i]._append || node.inputs[i].name === "＋") node.removeInput(i);
-  for (let i = (node.outputs?.length || 0) - 1; i >= 0; i--)
-    if (node.outputs[i]._append || node.outputs[i].name === "＋") node.removeOutput(i);
-  const old = entries(node),
-    ids = new Map(old.map((p) => [p.slot, p.id]));
-  for (const input of node.inputs || [])
-    if (input.name.startsWith("port_"))
-      input._portId ??= ids.get(Number(input.name.slice(5)));
-  (node.outputs || []).forEach((output, i) => (output._portId ??= ids.get(i)));
-  const wanted = new Set(ports.map((p) => p.id));
-  for (let i = (node.inputs?.length || 0) - 1; i >= 0; i--) {
-    const s = node.inputs[i];
-    if (
-      s.name.startsWith("port_") &&
-      (!wanted.has(s._portId) ||
-        ports.find((p) => p.id === s._portId)?.kind === "position" ||
-        ports.find((p) => p.id === s._portId)?.type === DYNAMIC_COMBO)
-    )
-      node.removeInput(i);
-  }
-  for (let i = (node.outputs?.length || 0) - 1; i >= 0; i--)
-    if (!wanted.has(node.outputs[i]._portId)) node.removeOutput(i);
-  for (const p of ports) {
-    if (
-      p.kind !== "position" &&
-      p.type !== DYNAMIC_COMBO &&
-      !node.inputs.some((s) => s._portId === p.id)
-    ) {
-      node.addInput("port_" + p.slot, p.type);
-      node.inputs.at(-1)._portId = p.id;
+  try {
+    hideMetadataSocket(node, "ports");
+    for (let i = (node.inputs?.length || 0) - 1; i >= 0; i--)
+      if (node.inputs[i]._append || node.inputs[i].name === "＋") node.removeInput(i);
+    for (let i = (node.outputs?.length || 0) - 1; i >= 0; i--)
+      if (node.outputs[i]._append || node.outputs[i].name === "＋")
+        node.removeOutput(i);
+    const old = entries(node),
+      ids = new Map(old.map((p) => [p.slot, p.id]));
+    for (const input of node.inputs || [])
+      if (input.name.startsWith("port_"))
+        input._portId ??= ids.get(Number(input.name.slice(5)));
+    (node.outputs || []).forEach((output, i) => (output._portId ??= ids.get(i)));
+    const wanted = new Set(ports.map((p) => p.id));
+    for (let i = (node.inputs?.length || 0) - 1; i >= 0; i--) {
+      const s = node.inputs[i];
+      if (
+        s.name.startsWith("port_") &&
+        (!wanted.has(s._portId) ||
+          ports.find((p) => p.id === s._portId)?.kind === "position" ||
+          ports.find((p) => p.id === s._portId)?.type === DYNAMIC_COMBO)
+      )
+        node.removeInput(i);
     }
-    if (!node.outputs.some((s) => s._portId === p.id)) {
-      node.addOutput(p.name, p.kind === "position" ? POSITION : p.type);
-      node.outputs.at(-1)._portId = p.id;
+    for (let i = (node.outputs?.length || 0) - 1; i >= 0; i--)
+      if (!wanted.has(node.outputs[i]._portId)) node.removeOutput(i);
+    for (const p of ports) {
+      if (
+        p.kind !== "position" &&
+        p.type !== DYNAMIC_COMBO &&
+        !node.inputs.some((s) => s._portId === p.id)
+      ) {
+        node.addInput("port_" + p.slot, p.type);
+        node.inputs.at(-1)._portId = p.id;
+      }
+      if (!node.outputs.some((s) => s._portId === p.id)) {
+        node.addOutput(p.name, p.kind === "position" ? POSITION : p.type);
+        node.outputs.at(-1)._portId = p.id;
+      }
     }
+    const order = new Map(ports.map((p, i) => [p.id, i]));
+    // Modern LiteGraph derives connectivity from slot indices. Snapshot links
+    // before moving descriptors; reading slot.links afterwards reads another port.
+    const inputLinks = new Map(
+      node.inputs.map((s) => [s._portId, node.graph?.links[s.link]]),
+    );
+    const outputLinks = new Map(
+      node.outputs.map((s) => [
+        s._portId,
+        (s.links || []).map((id) => node.graph?.links[id]).filter(Boolean),
+      ]),
+    );
+    // Vacate target slots before assigning their new indices (input slots are unique).
+    for (const [id, link] of inputLinks)
+      if (link) link.target_slot = node.inputs.length + order.get(id);
+    node.inputs.sort(
+      (a, b) => (order.get(a._portId) ?? -1) - (order.get(b._portId) ?? -1),
+    );
+    node.outputs.sort((a, b) => order.get(a._portId) - order.get(b._portId));
+    ports.forEach((p, i) => (p.slot = i));
+    for (let i = 0; i < node.inputs.length; i++) {
+      const s = node.inputs[i],
+        p = ports.find((p) => p.id === s._portId);
+      if (!p) continue;
+      s.name = "port_" + p.slot;
+      // name is the API execution key; label is user-visible. Keep both label
+      // fields explicit, as in workspace/templates.py, so stale translations and
+      // native configure do not turn a renamed port back into "port_N" or "*".
+      s.label = p.name;
+      s.localized_name = p.name;
+      s.type = p.type;
+      const link = inputLinks.get(s._portId);
+      if (link) link.target_slot = i;
+    }
+    for (let i = 0; i < node.outputs.length; i++) {
+      const s = node.outputs[i],
+        p = ports[i];
+      s.name = p.name;
+      s.label = p.name;
+      s.localized_name = p.name;
+      s.type = p.kind === "position" ? POSITION : p.type;
+      for (const link of outputLinks.get(s._portId) || []) link.origin_slot = i;
+    }
+    node.widgets.find((w) => w.name === "ports").value = JSON.stringify(ports);
+    syncParameterWidgets(node, ports);
+  } finally {
+    node._syncingPorts = false;
   }
-  const order = new Map(ports.map((p, i) => [p.id, i]));
-  // Modern LiteGraph derives connectivity from slot indices. Snapshot links
-  // before moving descriptors; reading slot.links afterwards reads another port.
-  const inputLinks = new Map(
-    node.inputs.map((s) => [s._portId, node.graph?.links[s.link]]),
-  );
-  const outputLinks = new Map(
-    node.outputs.map((s) => [
-      s._portId,
-      (s.links || []).map((id) => node.graph?.links[id]).filter(Boolean),
-    ]),
-  );
-  // Vacate target slots before assigning their new indices (input slots are unique).
-  for (const [id, link] of inputLinks)
-    if (link) link.target_slot = node.inputs.length + order.get(id);
-  node.inputs.sort(
-    (a, b) => (order.get(a._portId) ?? -1) - (order.get(b._portId) ?? -1),
-  );
-  node.outputs.sort((a, b) => order.get(a._portId) - order.get(b._portId));
-  ports.forEach((p, i) => (p.slot = i));
-  for (let i = 0; i < node.inputs.length; i++) {
-    const s = node.inputs[i],
-      p = ports.find((p) => p.id === s._portId);
-    if (!p) continue;
-    s.name = "port_" + p.slot;
-    s.label = p.name;
-    s.type = p.type;
-    const link = inputLinks.get(s._portId);
-    if (link) link.target_slot = i;
-  }
-  for (let i = 0; i < node.outputs.length; i++) {
-    const s = node.outputs[i],
-      p = ports[i];
-    s.name = p.name;
-    s.label = p.name;
-    s.type = p.kind === "position" ? POSITION : p.type;
-    for (const link of outputLinks.get(s._portId) || []) link.origin_slot = i;
-  }
-  node.widgets.find((w) => w.name === "ports").value = JSON.stringify(ports);
-  syncParameterWidgets(node, ports);
-  node._syncingPorts = false;
-  for (const port of ports) syncDynamicTargets(node, port);
+  if (syncTargets) for (const port of ports) syncDynamicTargets(node, port);
   appendSocket(node);
   alignInputs(node);
-  node.setSize(node.computeSize());
+  const minimum = node.computeSize();
+  node.setSize([Math.max(width, minimum[0]), minimum[1]]);
   node.graph?.setDirtyCanvas(true, true);
 }
 export function appendSocket(node) {
   if (node._appendingSocket || node._syncingPorts) return;
   node._appendingSocket = true;
-  for (const inputs of [true, false]) {
-    const slots = inputs ? node.inputs : node.outputs;
-    if (!slots?.some((s) => s._append)) {
-      if (inputs) node.addInput("＋", "*");
-      else node.addOutput("＋", "*");
-      (inputs ? node.inputs : node.outputs).at(-1)._append = true;
+  try {
+    for (const inputs of [true, false]) {
+      const slots = inputs ? node.inputs : node.outputs;
+      if (!slots?.some((s) => s._append)) {
+        if (inputs) node.addInput("＋", "*");
+        else node.addOutput("＋", "*");
+        (inputs ? node.inputs : node.outputs).at(-1)._append = true;
+      }
+      const append = (inputs ? node.inputs : node.outputs).find((s) => s._append);
+      // The ASCII plus is available in standard UI fonts on all target machines.
+      append.label = "+";
+      append.localized_name = "+";
     }
+  } finally {
+    node._appendingSocket = false;
   }
-  node._appendingSocket = false;
 }
 export function alignInputs(node) {
   for (const s of [...node.inputs, ...node.outputs]) delete s.pos;

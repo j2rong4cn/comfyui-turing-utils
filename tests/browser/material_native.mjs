@@ -238,6 +238,19 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     if (!linkedSuccess) throw Error("Cross-card execution ignored source");
+    for (const node of app.graph._nodes.filter((n) => n.type === "TuringCanvasCard")) {
+      for (const [slots, ports] of [
+        [node.inputs, node.properties.card.ports],
+        [node.outputs, node.properties.card.outputs],
+      ]) {
+        for (const [index, port] of ports.entries())
+          if (
+            slots[index].label !== port.name ||
+            slots[index].renderingLabel !== port.name
+          )
+            throw Error("Projected card lost its explicit interface label");
+      }
+    }
     return {
       directory,
       nativeWidgets: true,

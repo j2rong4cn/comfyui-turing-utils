@@ -35,17 +35,30 @@ def material_template(kinds=("image", "video", "audio", "text")):
         }
         if kind == "video":
             values.update(fps=30.0, bit_depth="auto", color_space="sRGB", codec="none")
+        # Python API inputs and frontend widget order are different contracts.
+        # Remote combos add a native presentation-only toggle after file/audio;
+        # it belongs to workflow positional values, never the execution prompt.
+        # Named values are authoritative on restoration (web/lib/workflow_metadata.js).
+        widget_values = {}
+        for name, value in values.items():
+            widget_values[name] = value
+            if kind != "text" and name in {"file", "audio"}:
+                widget_values["Auto-refresh after generation"] = False
         sockets = (
             [
+                dict(name="position", type=POSITION, link=i * 2 + 1),
                 dict(name="images", type="IMAGE", link=None),
                 dict(name="audio", type="AUDIO", link=None),
             ]
             if kind == "video"
             else [
-                dict(name="text" if kind == "text" else "value", type=type_, link=None)
+                dict(name="text" if kind == "text" else "value", type=type_, link=None),
+                dict(name="position", type=POSITION, link=i * 2 + 1),
             ]
         )
-        sockets.append(dict(name="position", type=POSITION, link=i * 2 + 1))
+        position_slot = next(
+            j for j, socket in enumerate(sockets) if socket["name"] == "position"
+        )
         nodes.append(
             dict(
                 id=node_id,
@@ -57,14 +70,15 @@ def material_template(kinds=("image", "video", "audio", "text")):
                 order=i + 1,
                 mode=0,
                 properties={},
-                widgets_values=list(values.values()),
+                widgets_values=list(widget_values.values()),
+                widgets_values_named=widget_values,
                 inputs=sockets,
                 outputs=[dict(name=type_, type=type_, links=[i * 2 + 2])],
             )
         )
         links.extend(
             [
-                [i * 2 + 1, 1, i, node_id, len(sockets) - 1, POSITION],
+                [i * 2 + 1, 1, i, node_id, position_slot, POSITION],
                 [i * 2 + 2, node_id, 0, 2, i, type_],
             ]
         )
@@ -89,15 +103,29 @@ def material_template(kinds=("image", "video", "audio", "text")):
                 mode=0,
                 properties={},
                 widgets_values=[text],
+                widgets_values_named={"ports": text},
                 inputs=[]
                 if node_id == 1
                 else [
-                    dict(name=f"port_{i}", type=p["type"], link=i * 2 + 2)
+                    # Execution uses port_N, display uses label; stable IDs survive
+                    # rename/reorder. Mirror web/lib/canvas_ports.js here: new
+                    # templates must render correctly before any frontend repair.
+                    dict(
+                        name=f"port_{i}",
+                        label=p["name"],
+                        localized_name=p["name"],
+                        _portId=p["id"],
+                        type=p["type"],
+                        link=i * 2 + 2,
+                    )
                     for i, p in enumerate(ports)
                 ],
                 outputs=[
                     dict(
                         name=p["name"],
+                        label=p["name"],
+                        localized_name=p["name"],
+                        _portId=p["id"],
                         type=p["type"],
                         links=[i * 2 + 1] if node_id == 1 else [],
                     )

@@ -82,8 +82,20 @@ function configureCard(node, card, document, directory) {
       Array.isArray(document.prompt[id].inputs[name]),
     ),
   }));
-  node.inputs = card.ports.map((p) => ({ name: p.name, type: p.type, link: null }));
-  node.outputs = card.outputs.map((p) => ({ name: p.name, type: p.type, links: [] }));
+  // Projected cards are native node descriptors too: don't depend on translated
+  // schema defaults to render the current interface's user-defined names.
+  node.inputs = card.ports.map((p) => ({
+    name: p.name,
+    label: p.name,
+    type: p.type,
+    link: null,
+  }));
+  node.outputs = card.outputs.map((p) => ({
+    name: p.name,
+    label: p.name,
+    type: p.type,
+    links: [],
+  }));
 }
 function prepare({ workflow, document, statistics }) {
   workflow.nodes.find((n) => n.type === ROOT).properties.statistics = statistics;

@@ -305,6 +305,46 @@ class WorkspaceTest(unittest.TestCase):
             ):
                 self.assertNotIn(removed, schema["required"])
 
+    def test_template_endpoint_descriptors_have_explicit_display_names(self):
+        # The generated JSON must be correct without frontend repair. Browser
+        # tests separately exercise native configure, rendering and old files.
+        material_kinds = ("image", "video", "audio", "text")
+        for kinds in (material_kinds, *((kind,) for kind in material_kinds)):
+            with self.subTest(kinds=kinds):
+                workflow, prompt = material_template(kinds)
+                for endpoint in workflow["nodes"][-2:]:
+                    ports = json.loads(endpoint["widgets_values_named"]["ports"])
+                    self.assertEqual(endpoint["widgets_values"], [json.dumps(ports)])
+                    for slot, port in zip(endpoint["outputs"], ports):
+                        self.assertEqual(slot["name"], port["name"])
+                        self.assertEqual(slot["label"], port["name"])
+                        self.assertEqual(slot["localized_name"], port["name"])
+                        self.assertEqual(slot["_portId"], port["id"])
+                    for slot, port in zip(endpoint["inputs"], ports):
+                        self.assertEqual(slot["name"], f"port_{port['slot']}")
+                        self.assertEqual(slot["label"], port["name"])
+                        self.assertEqual(slot["localized_name"], port["name"])
+                        self.assertEqual(slot["_portId"], port["id"])
+                        self.assertIn(slot["name"], prompt[str(endpoint["id"])]["inputs"])
+
+    def test_template_widgets_and_links_match_native_contract(self):
+        workflow, prompt = material_template()
+        for material in workflow["nodes"][:-2]:
+            values = material["widgets_values_named"]
+            self.assertEqual(material["widgets_values"], list(values.values()))
+            inputs = prompt[str(material["id"])]["inputs"]
+            for name, value in inputs.items():
+                if name != "position":
+                    self.assertEqual(values[name], value)
+            self.assertNotIn("Auto-refresh after generation", inputs)
+            if material["type"] != "TuringMaterialText":
+                self.assertFalse(values["Auto-refresh after generation"])
+            for index, socket in enumerate(material["inputs"]):
+                if socket["link"] is not None:
+                    link = next(v for v in workflow["links"] if v[0] == socket["link"])
+                    self.assertEqual(link[3:5], [material["id"], index])
+                    self.assertEqual(socket["name"], "position")
+
     def test_native_video_components_and_priority(self):
         images = torch.zeros(3, 16, 16, 3)
         audio = {"waveform": torch.zeros(1, 1, 4410), "sample_rate": 44100}
