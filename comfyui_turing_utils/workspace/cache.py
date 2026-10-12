@@ -49,14 +49,19 @@ class TaskContinuation:
                 before = self.prompt[node_id]
                 if node == before:
                     continue
-                # Only an empty material reader may acquire its new publication.
-                field = "text" if "text" in before["inputs"] else "asset"
-                allowed = node["class_type"].startswith(
-                    "_TuringMaterialRead"
-                ) and not before["inputs"].get(field)
+                # A waiting reader may be released, but already completed
+                # inputs and ordinary computations remain frozen for this run.
+                allowed = (
+                    node["class_type"].startswith("_TuringMaterialRead")
+                    and before["inputs"].get("source_state") in {"current", "waiting"}
+                    and node["inputs"].get("source_state") == "resumed"
+                )
                 normalized = {
                     **node,
-                    "inputs": {**node["inputs"], field: before["inputs"].get(field)},
+                    "inputs": {
+                        **node["inputs"],
+                        "source_state": before["inputs"].get("source_state"),
+                    },
                 }
                 if not allowed or normalized != before or node_id in self.completed:
                     raise ValueError(

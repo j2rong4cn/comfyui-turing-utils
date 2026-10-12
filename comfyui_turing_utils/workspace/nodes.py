@@ -118,7 +118,11 @@ class Read:
         if cls.KIND == "text":
             return {
                 "required": {"text": ("STRING",), "run_id": ("STRING",)},
-                "optional": {"directory": ("STRING",), "target": ("STRING",)},
+                "optional": {
+                    "directory": ("STRING",),
+                    "target": ("STRING",),
+                    "source_state": (["current", "waiting", "resumed"],),
+                },
             }
         return {
             "required": {
@@ -128,7 +132,11 @@ class Read:
                 "start": ("FLOAT",),
                 "end": ("FLOAT",),
             },
-            "optional": {"target": ("STRING",), "max_megapixels": ("FLOAT",)},
+            "optional": {
+                "target": ("STRING",),
+                "max_megapixels": ("FLOAT",),
+                "source_state": (["current", "waiting", "resumed"],),
+            },
         }
 
     def read(
@@ -141,12 +149,22 @@ class Read:
         text="",
         target="",
         max_megapixels=None,
+        source_state="current",
     ):
-        if target and not (text if self.KIND == "text" else asset):
-            # Only a branch actually evaluated by Comfy's lazy scheduler asks
-            # for missing content. The task service resumes after publication.
-            Project(directory).wait_for_material(run_id, target)
-            return (ExecutionBlocker(None),)
+        if target:
+            project = Project(directory)
+            selected = (
+                {}
+                if source_state == "waiting"
+                else project.selections().get(target, {})
+            )
+            text, asset = selected.get("text", ""), selected.get("asset", "")
+            if not (text if self.KIND == "text" else asset):
+                # Resolve only when this branch actually executes. Successful
+                # reads are retained by the logical task's continuation, while
+                # empty/waiting reads stay unresolved until its dependency ends.
+                project.wait_for_material(run_id, target)
+                return (ExecutionBlocker(None),)
         if self.KIND == "text":
             return (text,)
         return read_selected(self.KIND, directory, asset, start, end, max_megapixels)

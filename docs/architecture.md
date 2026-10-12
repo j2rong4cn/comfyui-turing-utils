@@ -222,6 +222,12 @@ when missing material becomes available. Native lazy evaluation decides which
 absent boundary is actually needed; unused branches never generate or wait.
 Batch targets share one frozen graph, with separate selection maps rather than
 deep copies of the entire workflow for every material.
+Input readers carry the material's stable identity, not a submit-time filename
+or text value. Each native reader resolves the current selected content when it
+first executes, including changes made while queued. The logical continuation
+retains successful reads across dependency retries; subsequent tasks resolve
+again. A resumed reader also changes its native cache-key state so blocked model
+preparation entries cannot survive publication with stale blocker outputs.
 Concurrent callers share a material execution. A downstream request made while
 its source is running waits for that publication instead of reading the old file.
 Browser disconnects do not cancel inference. A server restart marks interrupted

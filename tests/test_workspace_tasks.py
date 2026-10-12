@@ -11,6 +11,7 @@ from unittest import mock
 
 import execution
 import nodes
+import torch
 from comfy import model_management
 from comfy_execution.cache_provider import (
     CacheProvider,
@@ -29,6 +30,7 @@ from comfyui_turing_utils.workspace.store import Project
 from comfyui_turing_utils.workspace.templates import material_template
 from comfyui_turing_utils.workspace.tasks import compile_task
 from comfyui_turing_utils.workspace.native import project_workflow, save_layout
+from comfyui_turing_utils.workspace.materials import read_selected
 from comfyui_turing_utils.workspace import workflow_files
 
 
@@ -42,6 +44,21 @@ class Text:
 
     def execute(self, text):
         return (text + "!",)
+
+
+class LazyJoin:
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"a": ("STRING",), "b": ("STRING", {"lazy": True})}}
+
+    def check_lazy_status(self, a, b=None):
+        return ["b"] if b is None else []
+
+    def execute(self, a, b):
+        return (a + b,)
 
 
 class Server:
@@ -83,6 +100,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                 **PUBLIC_NODES,
                 **INTERNAL_NODES,
                 "TaskText": Text,
+                "TaskJoin": LazyJoin,
                 "TuringUtilsLazyIfElse": LazyIfElse,
                 "TuringUtilsStageBarrier": StageBarrier,
                 "TuringUtilsStagePath": StagePath,
@@ -147,6 +165,162 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                 if state["status"] not in {"queued", "running"}:
                     return state
                 await asyncio.sleep(0.01)
+
+    async def queued(self):
+        async with asyncio.timeout(5):
+            while True:
+                _, queued = self.server.prompt_queue.get_current_queue_volatile()
+                if queued:
+                    return queued[0][2]
+                await asyncio.sleep(0.01)
+
+    async def test_queued_task_reads_current_binding_when_native_reader_executes(self):
+        def graph(prompt):
+            prompt["compute"]["inputs"]["text"] = ["4", 0]
+
+        for mode in execution.CacheType:
+            with self.subTest(mode=mode):
+                self.worker.cancel()
+                await asyncio.gather(self.worker, return_exceptions=True)
+                self.executor = execution.PromptExecutor(
+                    self.server,
+                    cache_type=mode,
+                    cache_args={"ram": 0, "ram_inactive": 0, "lru": 100},
+                )
+                _, targets = self.card(graph, 2)
+                self.project.select(targets[1], {"text": "submit-time selection"})
+                operation = await self.tasks.start(
+                    "project", self.project.document()["revision"], target=targets[0]
+                )
+                submitted = await self.queued()
+                self.assertEqual(submitted[targets[1]]["inputs"]["text"], "")
+                self.project.select(targets[1], {"text": "manually selected history"})
+                self.worker = asyncio.create_task(self.work())
+                result = await self.finished(operation)
+                self.assertEqual(result["status"], "success", result)
+                self.assertEqual(
+                    self.project.selections()[targets[0]]["text"],
+                    "manually selected history!",
+                )
+
+    async def test_read_binding_stays_fixed_across_missing_branch_retry(self):
+        for mode in execution.CacheType:
+            with self.subTest(mode=mode):
+                started, gate = asyncio.Event(), asyncio.Event()
+
+                class Delayed(Text):
+                    async def execute(self, text):
+                        started.set()
+                        await gate.wait()
+                        return (text + "!",)
+
+                def graph(prompt):
+                    prompt["compute"] = {
+                        "class_type": "TaskJoin",
+                        "inputs": {"a": ["4", 0], "b": ["5", 0]},
+                    }
+                    prompt["delay"] = {
+                        "class_type": "TaskDelayed",
+                        "inputs": {"text": "upstream"},
+                    }
+                    prompt["5"]["inputs"]["text"] = ["delay", 0]
+
+                self.executor = execution.PromptExecutor(
+                    self.server,
+                    cache_type=mode,
+                    cache_args={"ram": 0, "ram_inactive": 0, "lru": 100},
+                )
+                with mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, TaskDelayed=Delayed):
+                    _, targets = self.card(graph, 3)
+                    self.project.select(targets[1], {"text": "first read"})
+                    operation = await self.tasks.start(
+                        "project",
+                        self.project.document()["revision"],
+                        target=targets[0],
+                    )
+                    async with asyncio.timeout(5):
+                        await started.wait()
+                    self.project.select(targets[1], {"text": "changed while retrying"})
+                    gate.set()
+                    result = await self.finished(operation)
+                    self.assertEqual(result["status"], "success", result)
+                    self.assertEqual(
+                        self.project.selections()[targets[0]]["text"],
+                        "first readupstream!",
+                    )
+
+    async def test_resumed_binding_invalidates_blocked_model_preparation(self):
+        class Loader(Text):
+            calls = 0
+
+            def execute(self, text):
+                Loader.calls += 1
+                return (text,)
+
+        def graph(prompt):
+            prompt["load"] = {"class_type": "UNETLoader", "inputs": {"text": ["4", 0]}}
+            prompt["compute"]["inputs"]["text"] = ["load", 0]
+            prompt["weights"] = {
+                "class_type": "TaskText",
+                "inputs": {"text": "weights"},
+            }
+            prompt["4"]["inputs"]["text"] = ["weights", 0]
+
+        with mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, UNETLoader=Loader):
+            for mode in execution.CacheType:
+                with self.subTest(mode=mode):
+                    Loader.calls = 0
+                    self.executor = execution.PromptExecutor(
+                        self.server,
+                        cache_type=mode,
+                        cache_args={"ram": 0, "ram_inactive": 0, "lru": 100},
+                    )
+                    _, targets = self.card(graph, 2)
+                    operation = await self.tasks.start(
+                        "project",
+                        self.project.document()["revision"],
+                        target=targets[0],
+                    )
+                    result = await self.finished(operation)
+                    self.assertEqual(result["status"], "success", result)
+                    self.assertEqual(Loader.calls, 1)
+                    self.assertEqual(
+                        self.project.selections()[targets[0]]["text"], "weights!!"
+                    )
+
+    async def test_queued_image_uses_selected_full_resolution_not_latest_history(self):
+        self.worker.cancel()
+        await asyncio.gather(self.worker, return_exceptions=True)
+        workflow, prompt = material_template(("image", "image"))
+        prompt["3"]["inputs"]["value"] = ["4", 0]
+        card = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, prompt), "Image"
+        )
+        targets = [card + ":" + prompt[str(i)]["inputs"]["stub_id"] for i in (3, 4)]
+        original = torch.tensor([0.2, 0.4, 0.6, 0.8]).expand(1, 48, 80, 4).clone()
+        run = self.project.begin_run(targets[1], 0)
+        older = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+            "project", targets[1], run, 0, "older", original
+        )["result"][0]
+        run = self.project.begin_run(targets[1], 1)
+        newer = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+            "project", targets[1], run, 1, "newer", torch.zeros(1, 16, 16, 3)
+        )["result"][0]
+        self.assertEqual(self.project.selections()[targets[1]]["asset"], newer)
+        operation = await self.tasks.start(
+            "project", self.project.document()["revision"], target=targets[0]
+        )
+        submitted = await self.queued()
+        self.assertEqual(submitted[targets[1]]["inputs"]["asset"], "")
+        self.project.select(targets[1], {"asset": older})
+        self.worker = asyncio.create_task(self.work())
+        result = await self.finished(operation)
+        self.assertEqual(result["status"], "success", result)
+        image = read_selected(
+            "image", "project", self.project.selections()[targets[0]]["asset"]
+        )[0]
+        self.assertEqual(tuple(image.shape), tuple(original.shape))
+        torch.testing.assert_close(image, original, atol=1 / 255, rtol=0)
 
     async def test_deduplication_publication_and_recovery(self):
         card, targets = self.card()
@@ -216,20 +390,6 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                 Count.calls += 1
                 return (text + " counted",)
 
-        class Join:
-            FUNCTION = "execute"
-            RETURN_TYPES = ("STRING",)
-
-            @classmethod
-            def INPUT_TYPES(cls):
-                return {"required": {"a": ("STRING",), "b": ("STRING", {"lazy": True})}}
-
-            def check_lazy_status(self, a, b=None):
-                return ["b"] if b is None else []
-
-            def execute(self, a, b):
-                return (a + b,)
-
         class Expanded(Text):
             calls = 0
 
@@ -255,7 +415,6 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(
             nodes.NODE_CLASS_MAPPINGS,
             TaskCount=Count,
-            TaskJoin=Join,
             TaskExpanded=Expanded,
         ):
             for mode in (
@@ -549,6 +708,72 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                     ).fetchone()[0],
                     1,
                 )
+
+    async def test_connected_cards_abab_read_each_current_publication(self):
+        started, gate = asyncio.Event(), asyncio.Event()
+
+        class Generate(Text):
+            calls = 0
+
+            async def execute(self, text):
+                Generate.calls += 1
+                started.set()
+                await gate.wait()
+                return (f"result-{Generate.calls}",)
+
+        source, destination, source_target, _ = self.connected_cards()
+        opened = workflow_files.read_instance(self.project.root, source)
+        prompt = copy.deepcopy(opened["workflow"]["extra"]["turing_card"]["prompt"])
+        prompt["compute"]["class_type"] = "TaskGenerate"
+        workflow_files.save_instance(
+            self.project.root, source, opened["workflow"], prompt, opened["revision"]
+        )
+        with mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, TaskGenerate=Generate):
+            for iteration in (1, 2):
+                started.clear()
+                gate.clear()
+                revision = self.project.document()["revision"]
+                first = await self.tasks.start(
+                    "project", revision, target=source_target
+                )
+                async with asyncio.timeout(5):
+                    await started.wait()
+                second = await self.tasks.start("project", revision, card=destination)
+                gate.set()
+                self.assertEqual((await self.finished(first))["status"], "success")
+                result = await self.finished(second)
+                self.assertEqual(result["status"], "success", result)
+                self.assertEqual(
+                    self.project.selections()[result["targets"][0]]["text"],
+                    f"result-{iteration}!",
+                )
+
+    async def test_failed_upstream_does_not_fall_back_to_existing_selection(self):
+        started, gate = asyncio.Event(), asyncio.Event()
+
+        class Failed(Text):
+            async def execute(self, text):
+                started.set()
+                await gate.wait()
+                raise ValueError("upstream generation failed")
+
+        def graph(prompt):
+            prompt["4"]["inputs"]["text"] = ["3", 0]
+
+        with mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, TaskText=Failed):
+            _, targets = self.card(graph, 2)
+            self.project.select(targets[0], {"text": "existing selection"})
+            revision = self.project.document()["revision"]
+            first = await self.tasks.start("project", revision, target=targets[0])
+            async with asyncio.timeout(5):
+                await started.wait()
+            second = await self.tasks.start("project", revision, target=targets[1])
+            gate.set()
+            self.assertEqual((await self.finished(first))["status"], "failed")
+            result = await self.finished(second)
+            self.assertEqual(result["status"], "failed", result)
+            self.assertIn("upstream generation failed", result["error"])
+            self.assertNotIn(targets[1], self.project.selections())
 
     async def test_batch_uses_newly_published_internal_boundaries(self):
         def graph(prompt):

@@ -112,14 +112,7 @@ class MaterialTasks:
                     "UPDATE operations SET status='running' WHERE id=?", (identity,)
                 )
             for target, snapshot in snapshots.items():
-                snapshot = {
-                    **snapshot,
-                    "selections": dict(snapshot["selections"]),
-                }
-                snapshot["completed_materials"] = list(completed)
-                current = project.selections()
-                for source in completed:
-                    snapshot["selections"][source] = current.get(source, {})
+                snapshot = {**snapshot, "completed_materials": list(completed)}
                 run = await self._material(
                     project, target, trims, client_id, set(), snapshot
                 )
@@ -206,7 +199,12 @@ class MaterialTasks:
                     # Let native lazy evaluation decide whether this reader is
                     # needed. A selected branch waits through the same missing-
                     # material path; an unselected branch never waits or runs.
-                    reader["text" if "text" in reader else "asset"] = ""
+                    if (
+                        not pending.done()
+                        or pending.cancelled()
+                        or pending.exception() is not None
+                    ):
+                        reader["source_state"] = "waiting"
             while True:
                 native_id = await self._submit(
                     project, prepared, client_id, continuation
@@ -256,7 +254,9 @@ class MaterialTasks:
                 generated.add(dependency)
                 for reader in reads:
                     if reader["target"] == dependency:
-                        self._refresh_reader(project, reader)
+                        # Also invalidate blocked configuration/loader entries
+                        # through Comfy's normal input-signature cache keys.
+                        reader["source_state"] = "resumed"
         except BaseException as error:
             project.run_state(
                 run_id,
@@ -283,12 +283,6 @@ class MaterialTasks:
             return await asyncio.shield(pending)
         finally:
             self.waits.pop(owner, None)
-
-    @staticmethod
-    def _refresh_reader(project, reader):
-        selection = project.selections().get(reader["target"], {})
-        field = "text" if "text" in reader else "asset"
-        reader[field] = selection.get(field, "")
 
     async def _submit(self, project, prepared, client_id, continuation):
         # Version-sensitive enqueue lives here, never in media/node code.

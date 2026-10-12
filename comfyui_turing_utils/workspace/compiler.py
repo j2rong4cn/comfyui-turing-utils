@@ -149,10 +149,13 @@ def compile_segment(
                 compiled[output_key] = {
                     "class_type": "_TuringMaterialReadText",
                     "inputs": {
-                        "text": selected.get("text", ""),
+                        # Bind to the material identity, not a submit-time file
+                        # or text snapshot. The native reader resolves it later.
+                        "text": "",
                         "run_id": run_id,
                         "directory": directory,
                         "target": key,
+                        "source_state": "current",
                     },
                 }
                 return output_key
@@ -162,11 +165,12 @@ def compile_segment(
                 "class_type": "_TuringMaterialRead" + kind.title(),
                 "inputs": {
                     "directory": directory,
-                    "asset": selected.get("asset", ""),
+                    "asset": "",
                     "start": selected.get("start", 0),
                     "end": selected.get("end", 0),
                     "run_id": run_id,
                     "target": key,
+                    "source_state": "current",
                     **(
                         {"max_megapixels": max_megapixels}
                         if max_megapixels is not None

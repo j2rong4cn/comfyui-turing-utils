@@ -3593,7 +3593,8 @@
       ],
       "optional": [
         "target",
-        "max_megapixels"
+        "max_megapixels",
+        "source_state"
       ]
     },
     "inputs": {
@@ -3620,6 +3621,9 @@
         ],
         "max_megapixels": [
           "FLOAT"
+        ],
+        "source_state": [
+          ["current", "waiting", "resumed"]
         ]
       }
     },
@@ -3641,7 +3645,8 @@
       ],
       "optional": [
         "target",
-        "max_megapixels"
+        "max_megapixels",
+        "source_state"
       ]
     },
     "inputs": {
@@ -3668,6 +3673,9 @@
         ],
         "max_megapixels": [
           "FLOAT"
+        ],
+        "source_state": [
+          ["current", "waiting", "resumed"]
         ]
       }
     },
@@ -3686,7 +3694,8 @@
       ],
       "optional": [
         "directory",
-        "target"
+        "target",
+        "source_state"
       ]
     },
     "inputs": {
@@ -3704,6 +3713,9 @@
         ],
         "target": [
           "STRING"
+        ],
+        "source_state": [
+          ["current", "waiting", "resumed"]
         ]
       }
     },
@@ -3725,7 +3737,8 @@
       ],
       "optional": [
         "target",
-        "max_megapixels"
+        "max_megapixels",
+        "source_state"
       ]
     },
     "inputs": {
@@ -3752,6 +3765,9 @@
         ],
         "max_megapixels": [
           "FLOAT"
+        ],
+        "source_state": [
+          ["current", "waiting", "resumed"]
         ]
       }
     },
