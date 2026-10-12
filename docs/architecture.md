@@ -193,14 +193,15 @@ from the node module that happens to consume them.
 | `workflow_files.py` | ordinary workflow serialization, instance files and atomic project updates |
 | `projection.py` | lightweight display descriptors or explicitly requested execution expansion |
 | `compiler.py`, `tasks.py` | material-boundary graph cuts and validated task creation |
-| `execution.py` | fresh ordinary-node execution adapters; no model preparation cache |
+| `execution.py` | server-owned operations, dependency waits and the single native-queue adapter |
+| `cache.py` | task-scoped intermediate eviction; preserves native node identity and model preparation |
 | `store.py`, `runs.py` | media index, selection revisions and recoverable publication |
 | `materials.py` | native media loading, import copying, serialization and selected-content decoding |
 | `previews.py` | lazy still posters with bounded concurrent decoding and request deduplication |
 | `directories.py`, `routes.py` | instance-owned filesystem operations and HTTP adapters respectively |
 | `web/workspace/project_state.js` | per-project save queue and request-local native graph snapshots |
 | `web/workspace/card_nodes.js` | native card/project presentation, with service-owned action callbacks |
-| `web/workspace/execution.js` | recursive material tasks, native submission and execution events |
+| `web/workspace/execution.js` | task requests, publication display and reconnect observation; no inference scheduler |
 | `web/workspace/material_controls.js` | native controls, posters and one active on-demand player |
 | `web/workspace/api.js` | API transport and native feedback |
 | `web/lib/native_graph.js` | isolated frontend-version workarounds for dynamic restoration and nested conversion |
@@ -214,16 +215,49 @@ adapter uses indexed link lookup for normal restoration and scans only when a
 clone has extra, not-yet-rehydrated input slots. It is a removable frontend
 1.53.6 workaround, not a second graph editor or a general monkey-patch framework.
 
+The browser submits one operation, not one prompt per material. The server freezes
+workflow parameters and the pixel limit, then runs boundaries on ComfyUI's existing
+single worker. Random controls are sampled once per logical segment and reused
+when missing material becomes available. Native lazy evaluation decides which
+absent boundary is actually needed; unused branches never generate or wait.
+Batch targets share one frozen graph, with separate selection maps rather than
+deep copies of the entire workflow for every material.
+Concurrent callers share a material execution. A downstream request made while
+its source is running waits for that publication instead of reading the old file.
+Browser disconnects do not cancel inference. A server restart marks interrupted
+operations explicitly; it does not silently replay them.
+
 Task compilation completes before a prepared run is recorded. Publication
 records a SQLite intent before updating `canvas.json`; retry or reopening can
 finish an interrupted publication. Selection revisions prevent a delayed run
 from replacing a newer manual choice. Text remains inline in the canvas file;
 the temporary publication payload is cleared on completion.
+Card-file and canvas-manifest writes have a separate recoverable JSON commit
+journal. Reopening finishes only the intended writes; externally changed files
+stop recovery and preserve the journal for inspection.
+Card edit revisions hash the same bytes returned to the editor, under the
+manifest lock. Damaged derived API metadata does not prevent opening native
+workflow content for repair. Canvas layout sockets carry stable port IDs;
+indices are never reinterpreted against a newer reordered interface. Invisible
+bindings on broken cards survive unrelated layout saves, but explicit deletion
+or destination reconnection still takes effect.
 
 Model and LoRA preparation still use ComfyUI's existing owners and shared loader
 identities. `workspace/cache.py` is the isolated, version-sensitive integration
 with the executor's intermediate cache. Do not spread private executor calls or
 global cache clearing into media, UI or model services.
+Ordinary `class_type` values remain unchanged. Stage Barrier and shared-loader
+transforms run before the material cut; only task-owned intermediates bypass
+local/external cache reuse. Ordinary workflow provider behavior is unchanged.
+Within a logical task only, completed branch frontiers survive a missing-material
+retry. Consumed ancestors are released; blocked results are never reused. The
+service closes this continuation on success, error or cancellation. The installed
+adapter owns a weak lookup registry, not a global tensor/model cache. Prompt hooks
+may not change frozen computations between attempts. This applies to native
+classic, LRU, RAM-pressure and disabled caches, without changing ordinary jobs.
+History lists share paged filename queries and merge refreshes. Vue media schema
+updates use the exposed app adapter only when schema changes, batched per frame;
+there is no supported single-definition API in frontend 1.53.6.
 
 ## Maintaining the structure
 

@@ -17,9 +17,8 @@ try {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
     const { addValueControlWidget } = await import("/scripts/widgets.js");
-    const workspace = await import(
-      "/extensions/comfyui-turing-utils/material_workspace.js"
-    );
+    const workspace =
+      await import("/extensions/comfyui-turing-utils/material_workspace.js");
     const check = (ok, message) => {
       if (!ok) throw Error(message);
     };
@@ -67,18 +66,16 @@ try {
     await workspace.addCard({ name });
     const card = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasCard");
     const button = card.widgets.find((w) => w.name.includes("执行到这里"));
-    const nativeFetch = window.fetch;
-    const submitted = [];
-    window.fetch = (...args) => {
-      if (String(args[0]).endsWith("/prompt")) submitted.push(JSON.parse(args[1].body));
-      return nativeFetch(...args);
-    };
-    try {
-      await button.callback();
-      await button.callback();
-    } finally {
-      window.fetch = nativeFetch;
-    }
+    await button.callback();
+    await button.callback();
+    const history = await (await api.fetchApi("/history")).json();
+    const submitted = Object.values(history)
+      .filter((record) => record.prompt[3].turing_material_run?.directory === directory)
+      .map((record) => ({
+        prompt_id: record.prompt[1],
+        prompt: record.prompt[2],
+        extra_data: record.prompt[3],
+      }));
     check(submitted.length === 2, "Local execution did not submit two tasks");
     const colors = [];
     for (const job of submitted) {

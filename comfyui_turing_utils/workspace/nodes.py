@@ -3,6 +3,7 @@
 from pathlib import Path
 import folder_paths
 from comfy_api.latest import Types
+from comfy_execution.graph import ExecutionBlocker
 from .store import Project
 from .endpoints import ENDPOINT_NODES, POSITION
 from ..nodes import INTERNAL_NODE_NOTE
@@ -115,7 +116,10 @@ class Read:
     @classmethod
     def INPUT_TYPES(cls):
         if cls.KIND == "text":
-            return {"required": {"text": ("STRING",), "run_id": ("STRING",)}}
+            return {
+                "required": {"text": ("STRING",), "run_id": ("STRING",)},
+                "optional": {"directory": ("STRING",), "target": ("STRING",)},
+            }
         return {
             "required": {
                 "directory": ("STRING",),
@@ -123,13 +127,29 @@ class Read:
                 "run_id": ("STRING",),
                 "start": ("FLOAT",),
                 "end": ("FLOAT",),
-            }
+            },
+            "optional": {"target": ("STRING",), "max_megapixels": ("FLOAT",)},
         }
 
-    def read(self, directory="", asset="", run_id="", start=0, end=0, text=""):
+    def read(
+        self,
+        directory="",
+        asset="",
+        run_id="",
+        start=0,
+        end=0,
+        text="",
+        target="",
+        max_megapixels=None,
+    ):
+        if target and not (text if self.KIND == "text" else asset):
+            # Only a branch actually evaluated by Comfy's lazy scheduler asks
+            # for missing content. The task service resumes after publication.
+            Project(directory).wait_for_material(run_id, target)
+            return (ExecutionBlocker(None),)
         if self.KIND == "text":
             return (text,)
-        return read_selected(self.KIND, directory, asset, start, end)
+        return read_selected(self.KIND, directory, asset, start, end, max_megapixels)
 
 
 class Write:

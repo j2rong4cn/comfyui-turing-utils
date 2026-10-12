@@ -3,6 +3,7 @@
 import copy
 
 from ..runtime.shared_loaders import compile_shared_loaders
+from ..runtime.stage_barrier_prompt import compile_stage_barrier_prompt
 from .protocol import MATERIALS
 
 
@@ -95,8 +96,19 @@ def material_order(prompt, targets):
 
 
 def compile_segment(
-    prompt, target, selections, directory, run_id, revision, fresh_type
+    prompt,
+    target,
+    selections,
+    directory,
+    run_id,
+    revision,
+    *,
+    allow_missing=False,
+    max_megapixels=None,
 ):
+    # Apply semantic graph transforms before cutting at materials. Never rename
+    # ordinary nodes to control caching: prompt hooks and schedulers use their IDs.
+    prompt, _ = compile_stage_barrier_prompt(prompt)
     prompt = compile_shared_loaders(prompt)
     if target not in prompt or prompt[target]["class_type"] not in MATERIALS:
         raise ValueError("Select a material output to execute")
@@ -132,23 +144,34 @@ def compile_segment(
         if kind and not destination:
             selected = selections.get(key, {})
             if kind == "text":
-                if not selected.get("text"):
+                if not selected.get("text") and not allow_missing:
                     raise MissingMaterial(key, kind)
                 compiled[output_key] = {
                     "class_type": "_TuringMaterialReadText",
-                    "inputs": {"text": selected["text"], "run_id": run_id},
+                    "inputs": {
+                        "text": selected.get("text", ""),
+                        "run_id": run_id,
+                        "directory": directory,
+                        "target": key,
+                    },
                 }
                 return output_key
-            if not selected.get("asset"):
+            if not selected.get("asset") and not allow_missing:
                 raise MissingMaterial(key, kind)
             compiled[output_key] = {
                 "class_type": "_TuringMaterialRead" + kind.title(),
                 "inputs": {
                     "directory": directory,
-                    "asset": selected["asset"],
+                    "asset": selected.get("asset", ""),
                     "start": selected.get("start", 0),
                     "end": selected.get("end", 0),
                     "run_id": run_id,
+                    "target": key,
+                    **(
+                        {"max_megapixels": max_megapixels}
+                        if max_megapixels is not None
+                        else {}
+                    ),
                 },
             }
             return output_key
@@ -187,10 +210,14 @@ def compile_segment(
             class_type = "_TuringMaterialWrite" + kind.title()
         else:
             class_type = node["class_type"]
-            # A model chain depending on fresh material correctly becomes fresh too.
-            if key not in preparation:
-                class_type = fresh_type(class_type)
-        compiled[key] = {"class_type": class_type, "inputs": inputs}
+        compiled[key] = {
+            "class_type": class_type,
+            "inputs": inputs,
+            "_meta": {
+                **copy.deepcopy(node.get("_meta", {})),
+                "turing_material_fresh": destination or key not in preparation,
+            },
+        }
         return key
 
     visit(target, True)

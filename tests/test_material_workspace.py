@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parents[1]))
 sys.path.insert(0, str(ROOT))
@@ -14,13 +16,11 @@ sys.path.insert(0, str(ROOT))
 import nodes
 import execution
 from comfy_api.latest import io
-from comfy_execution.caching import CacheKeySetInputSignature
-from comfy_execution.graph import DynamicPrompt
-from execution import IsChangedCache, validate_prompt, _async_map_node_over_list
+from comfy_extras.nodes_qwen import TextEncodeQwenImage21
+from execution import validate_prompt, _async_map_node_over_list
 from comfyui_turing_utils.workspace.compiler import compile_segment, material_order
 from comfyui_turing_utils.workspace.tasks import compile_task, plan_card
 from comfyui_turing_utils.workspace.nodes import PUBLIC_NODES, INTERNAL_NODES
-from comfyui_turing_utils.workspace.execution import fresh_type
 from comfyui_turing_utils.workspace.materials import material_path, read_selected
 from comfyui_turing_utils.workspace.directories import (
     list_directory,
@@ -36,7 +36,10 @@ from comfyui_turing_utils.workspace.endpoints import (
 from comfyui_turing_utils.workspace.cards import describe, flatten
 from comfyui_turing_utils.workspace.editor import select_material
 from comfyui_turing_utils.workspace import workflow_files, projection
-from comfyui_turing_utils.workspace.templates import material_template, new_card_template
+from comfyui_turing_utils.workspace.templates import (
+    material_template,
+    new_card_template,
+)
 from comfyui_turing_utils.workspace.native import project_workflow, save_layout
 from comfyui_turing_utils.workspace.value_controls import (
     workflow_controls,
@@ -202,11 +205,20 @@ class WorkspaceTest(unittest.TestCase):
                     "required": {
                         "scale": (
                             "FLOAT",
-                            {"min": -1, "max": 1, "step": 0.25, "control_prefix": "scale"},
+                            {
+                                "min": -1,
+                                "max": 1,
+                                "step": 0.25,
+                                "control_prefix": "scale",
+                            },
                         ),
                         "seed": (
                             "INT",
-                            {"min": 0, "max": 2**64 - 1, "control_after_generate": "roll"},
+                            {
+                                "min": 0,
+                                "max": 2**64 - 1,
+                                "control_after_generate": "roll",
+                            },
                         ),
                         "choice": (["randomize", "fixed"], {}),
                     }
@@ -228,8 +240,12 @@ class WorkspaceTest(unittest.TestCase):
                 )
             ]
         }
-        prompt = {"5": dict(class_type="NumericControls", inputs={"scale": 0, "seed": 0})}
-        with mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, NumericControls=NumericControls):
+        prompt = {
+            "5": dict(class_type="NumericControls", inputs={"scale": 0, "seed": 0})
+        }
+        with mock.patch.dict(
+            nodes.NODE_CLASS_MAPPINGS, NumericControls=NumericControls
+        ):
             controls = workflow_controls(workflow, prompt, {"5": "5"})
         self.assertEqual(set(controls["5"]), {"scale", "seed"})
         self.assertEqual(controls["5"]["seed"]["max"], 2**50)
@@ -237,7 +253,9 @@ class WorkspaceTest(unittest.TestCase):
             "comfyui_turing_utils.workspace.value_controls.secrets.randbelow",
             side_effect=[3, 5],
         ) as random:
-            self.assertEqual(randomize_inputs(prompt, controls), {"5": {"scale": -0.25, "seed": 5}})
+            self.assertEqual(
+                randomize_inputs(prompt, controls), {"5": {"scale": -0.25, "seed": 5}}
+            )
             self.assertEqual(random.call_args_list, [mock.call(8), mock.call(2**50)])
 
     def test_card_randomize_is_per_actual_segment_and_saved_in_execution_prompt(self):
@@ -297,7 +315,9 @@ class WorkspaceTest(unittest.TestCase):
             self.project.root, workflow_files.pack(workflow, graph), "internal"
         )
         saved, interface = workflow_files.unpack(
-            workflow_files.load_json(workflow_files.card_path(self.project.root, identity))
+            workflow_files.load_json(
+                workflow_files.card_path(self.project.root, identity)
+            )
         )
         self.assertEqual(interface["outputs"], [])
         self.assertIn("4", saved["prompt"])
@@ -582,12 +602,15 @@ class WorkspaceTest(unittest.TestCase):
         run = self.project.begin_run("upgrade", 1)
         with self.project.connect() as db:
             db.execute("DROP INDEX run_status")
+            db.execute("DROP TABLE operations")
+            db.execute("ALTER TABLE runs DROP COLUMN dependency")
+            db.execute("ALTER TABLE runs DROP COLUMN error")
             db.execute("PRAGMA user_version=1")
         reopened = Project("test")
         self.assertEqual(reopened.selections()["upgrade"]["text"], "kept")
         self.assertEqual(reopened.run(run)["status"], "prepared")
         with reopened.connect() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertIn(
                 "run_status",
                 {row["name"] for row in db.execute("PRAGMA index_list(runs)")},
@@ -719,9 +742,16 @@ class WorkspaceTest(unittest.TestCase):
     def test_native_card_copy_has_independent_workflow_parameters_and_selections(self):
         workflow, prompt = material_template(("text", "image"))
         ports = json.loads(prompt["1"]["inputs"]["ports"])
-        ports.append(dict(
-            id="steps", slot=2, name="Steps", kind="parameter", type="INT", default=6,
-        ))
+        ports.append(
+            dict(
+                id="steps",
+                slot=2,
+                name="Steps",
+                kind="parameter",
+                type="INT",
+                default=6,
+            )
+        )
         prompt["1"]["inputs"]["ports"] = json.dumps(ports)
         source = workflow_files.add_instance(
             self.project.root, workflow_files.pack(workflow, prompt), "original"
@@ -735,27 +765,58 @@ class WorkspaceTest(unittest.TestCase):
         self.project.register(asset, "image", {})
         self.project.select(f"{source}:{image}", {"asset": asset})
         revision = self.project.document()["revision"]
-        revision = self.project.patch(revision, [dict(
-            type="input", id=f"{source}:parameters", name="steps", value=8,
-        )])
+        revision = self.project.patch(
+            revision,
+            [
+                dict(
+                    type="input",
+                    id=f"{source}:parameters",
+                    name="steps",
+                    value=8,
+                )
+            ],
+        )
         identity = "a" * 32
         workflow_files.copy_instance(self.project.root, source, identity, revision)
         copied = workflow_files.read_instance(self.project.root, identity)
         self.assertEqual(copied["parameters"], {"steps": 8})
-        self.assertEqual(workflow_files.card_path(self.project.root, identity).read_bytes(), original)
-        self.assertEqual(self.project.selections()[f"{identity}:{image}"]["asset"], asset)
+        self.assertEqual(
+            workflow_files.card_path(self.project.root, identity).read_bytes(), original
+        )
+        self.assertEqual(
+            self.project.selections()[f"{identity}:{image}"]["asset"], asset
+        )
         self.project.select(f"{identity}:{text}", {"text": "copy only"})
-        self.assertEqual(self.project.selections()[f"{source}:{text}"]["text"], "selected text")
+        self.assertEqual(
+            self.project.selections()[f"{source}:{text}"]["text"], "selected text"
+        )
         revision = self.project.document()["revision"]
-        self.project.patch(revision, [dict(
-            type="input", id=f"{identity}:parameters", name="steps", value=12,
-        )])
-        self.assertEqual(workflow_files.read_instance(self.project.root, source)["parameters"], {"steps": 8})
+        self.project.patch(
+            revision,
+            [
+                dict(
+                    type="input",
+                    id=f"{identity}:parameters",
+                    name="steps",
+                    value=12,
+                )
+            ],
+        )
+        self.assertEqual(
+            workflow_files.read_instance(self.project.root, source)["parameters"],
+            {"steps": 8},
+        )
         self.assertEqual(len(self.project.history("image")), 1)
         before = (self.project.root / "canvas.json").read_bytes()
-        for bad_id, bad_revision in ((identity, revision + 1), ("invalid", revision + 1), ("b" * 32, revision)):
+        for bad_id, bad_revision in (
+            (identity, revision + 1),
+            ("invalid", revision + 1),
+            ("b" * 32, revision),
+        ):
             with self.assertRaises(ValueError):
-                workflow_files.copy_instance(self.project.root, source, bad_id, bad_revision)
+                workflow_files.copy_instance(
+                    self.project.root, source, bad_id, bad_revision
+                )
             self.assertEqual((self.project.root / "canvas.json").read_bytes(), before)
         self.assertFalse(workflow_files.card_path(self.project.root, "b" * 32).exists())
 
@@ -841,7 +902,9 @@ class WorkspaceTest(unittest.TestCase):
                         self.assertEqual(slot["label"], port["name"])
                         self.assertEqual(slot["localized_name"], port["name"])
                         self.assertEqual(slot["_portId"], port["id"])
-                        self.assertIn(slot["name"], prompt[str(endpoint["id"])]["inputs"])
+                        self.assertIn(
+                            slot["name"], prompt[str(endpoint["id"])]["inputs"]
+                        )
 
     def test_template_widgets_and_links_match_native_contract(self):
         workflow, prompt = material_template()
@@ -924,13 +987,15 @@ class WorkspaceTest(unittest.TestCase):
     def test_endpoints_reject_blank_names(self):
         for endpoint in (CanvasInputs, CanvasOutputs):
             for name in ("", " ", "\t\n", "\u3000"):
-                ports = json.dumps([
-                    dict(id="a", slot=0, name=name, kind="value", type="STRING")
-                ])
+                ports = json.dumps(
+                    [dict(id="a", slot=0, name=name, kind="value", type="STRING")]
+                )
                 with self.subTest(endpoint=endpoint.ENDPOINT, name=name):
                     with self.assertRaisesRegex(ValueError, "must not be empty"):
                         parse_ports(ports, endpoint=endpoint.ENDPOINT)
-                    self.assertIn("must not be empty", endpoint.VALIDATE_INPUTS(ports, {}))
+                    self.assertIn(
+                        "must not be empty", endpoint.VALIDATE_INPUTS(ports, {})
+                    )
 
     def test_endpoint_parameter_types_and_defaults(self):
         ports = [
@@ -954,17 +1019,26 @@ class WorkspaceTest(unittest.TestCase):
         self.assertTrue(CanvasInputs.VALIDATE_INPUTS(encoded, {"port_0": "INT"}))
         self.assertNotEqual(CanvasOutputs.VALIDATE_INPUTS(encoded, {}), True)
         invalid_values = [
-            (0, True), (0, 1.5), (1, float("nan")), (2, 1), (3, []), (4, "invalid")
+            (0, True),
+            (0, 1.5),
+            (1, float("nan")),
+            (2, 1),
+            (3, []),
+            (4, "invalid"),
         ]
         for index, invalid in invalid_values:
             changed = copy.deepcopy(ports)
             changed[index]["default"] = invalid
-            with self.subTest(index=index, invalid=invalid), self.assertRaisesRegex(
-                ValueError, "parameter type"
+            with (
+                self.subTest(index=index, invalid=invalid),
+                self.assertRaisesRegex(ValueError, "parameter type"),
             ):
                 parse_ports(json.dumps(changed))
         for type_ in ("MODEL", "LATENT", "MASK", "IMAGE", "CUSTOM", "*"):
-            with self.subTest(type=type_), self.assertRaisesRegex(ValueError, "editable"):
+            with (
+                self.subTest(type=type_),
+                self.assertRaisesRegex(ValueError, "editable"),
+            ):
                 parse_ports(json.dumps([{**ports[0], "type": type_}]))
         changed = copy.deepcopy(ports)
         changed[4]["options"] = {"values": [{"key": "euler"}]}
@@ -976,20 +1050,25 @@ class WorkspaceTest(unittest.TestCase):
         ports = json.loads(graph["1"]["inputs"]["ports"])
         parameters = [
             dict(
-                id="steps", name="Steps", type="INT", default=8,
+                id="steps",
+                name="Steps",
+                type="INT",
+                default=8,
                 options={"min": 1, "step": 10},
             ),
             dict(id="denoise", name="Denoise", type="FLOAT", default=0.8),
             dict(id="refine", name="Refine", type="BOOLEAN", default=True),
             dict(id="label", name="Label", type="STRING", default="initial"),
             dict(
-                id="sampler", name="Sampler", type="COMBO", default="euler",
+                id="sampler",
+                name="Sampler",
+                type="COMBO",
+                default="euler",
                 options={"values": ["euler", "heun"]},
             ),
         ]
         ports += [
-            {**p, "kind": "parameter", "slot": i + 1}
-            for i, p in enumerate(parameters)
+            {**p, "kind": "parameter", "slot": i + 1} for i, p in enumerate(parameters)
         ]
         graph["1"]["inputs"]["ports"] = json.dumps(ports)
         graph["compute"] = {
@@ -1002,8 +1081,11 @@ class WorkspaceTest(unittest.TestCase):
         b = workflow_files.add_instance(self.project.root, package, "B")
         before = workflow_files.card_path(self.project.root, a).read_bytes()
         values = {
-            "steps": 12, "denoise": 0.35, "refine": False,
-            "label": "edited", "sampler": "heun",
+            "steps": 12,
+            "denoise": 0.35,
+            "refine": False,
+            "label": "edited",
+            "sampler": "heun",
         }
         self.project.patch(
             self.project.document()["revision"],
@@ -1014,7 +1096,9 @@ class WorkspaceTest(unittest.TestCase):
         )
         canvas = workflow_files.load_json(self.project.root / "canvas.json")
         self.assertEqual(canvas["cards"][0]["parameters"], values)
-        self.assertEqual(workflow_files.card_path(self.project.root, a).read_bytes(), before)
+        self.assertEqual(
+            workflow_files.card_path(self.project.root, a).read_bytes(), before
+        )
         self.assertEqual(
             workflow_files.read_instance(self.project.root, a)["parameters"], values
         )
@@ -1032,7 +1116,9 @@ class WorkspaceTest(unittest.TestCase):
         native = project_workflow(self.project)["workflow"]
         save_layout(self.project, native, document["revision"])
         self.assertEqual(
-            workflow_files.load_json(self.project.root / "canvas.json")["cards"][0]["parameters"],
+            workflow_files.load_json(self.project.root / "canvas.json")["cards"][0][
+                "parameters"
+            ],
             values,
         )
         reopened = workflow_files.read_instance(self.project.root, a)
@@ -1040,12 +1126,18 @@ class WorkspaceTest(unittest.TestCase):
             self.project.root, a, workflow, graph, reopened["revision"]
         )
         self.assertEqual(
-            self.project.document(execution=True)["prompt"][a + ":node:compute"]["inputs"],
+            self.project.document(execution=True)["prompt"][a + ":node:compute"][
+                "inputs"
+            ],
             values,
         )
         reopened = workflow_files.read_instance(self.project.root, a)
         workflow_files.save_instance(
-            self.project.root, a, workflow, graph, reopened["revision"],
+            self.project.root,
+            a,
+            workflow,
+            graph,
+            reopened["revision"],
             parameters={"steps": 8},
         )
         values["steps"] = 8
@@ -1062,7 +1154,12 @@ class WorkspaceTest(unittest.TestCase):
                 revision,
                 [
                     dict(type="input", id=a + ":parameters", name="steps", value=20),
-                    dict(type="input", id=a + ":parameters", name="refine", value="invalid"),
+                    dict(
+                        type="input",
+                        id=a + ":parameters",
+                        name="refine",
+                        value="invalid",
+                    ),
                 ],
             )
         self.assertEqual(
@@ -1097,6 +1194,99 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(result["ui"]["audio"][0]["type"], "output")
         self.assertTrue(material_path(result["ui"]["material_file"][0]).is_file())
         self.assertFalse(list(Path(self.tmp.name).rglob("*.partial*")))
+
+    def test_generated_rgba_roundtrips_in_workflow_and_project(self):
+        image = torch.tensor([25, 51, 76, 64], dtype=torch.float32).div(255)
+        image = image.expand(1, 32, 64, 4).clone()
+        node = PUBLIC_NODES["TuringMaterialImage"]()
+        result = node.read(value=image)
+        name = result["ui"]["material_file"][0]
+        with Image.open(material_path(name)) as saved:
+            self.assertEqual(saved.mode, "RGBA")
+        loaded = node.read(file=name)["result"][0]
+        self.assertEqual(loaded.shape, image.shape)
+        torch.testing.assert_close(loaded.cpu().float(), image, atol=1 / 255, rtol=0)
+
+        run = self.project.begin_run("rgba", 0)
+        asset = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+            "test", "rgba", run, 0, "rgba", image
+        )["result"][0]
+        selected = read_selected("image", "test", asset)[0]
+        torch.testing.assert_close(selected, loaded.cpu().float(), atol=1 / 255, rtol=0)
+        self.assertEqual(tuple(selected.shape), (1, 32, 64, 4))
+
+    def test_image_transparency_survives_project_pixel_limit(self):
+        for mode, color in (("RGBA", (25, 51, 76, 64)), ("LA", (51, 64)), ("P", 0)):
+            with self.subTest(mode=mode):
+                asset, path = self.project.reserve("image", ".png", mode)
+                source = Image.new(mode, (64, 64), color)
+                if mode == "P":
+                    source.putpalette([25, 51, 76] + [0] * 765)
+                    source.info["transparency"] = bytes([64])
+                source.save(path)
+                self.project.register(asset, "image", {"width": 64, "height": 64})
+                before = read_selected("image", "test", asset)[0]
+                self.assertEqual(tuple(before.shape), (1, 64, 64, 4))
+                torch.testing.assert_close(
+                    before[..., 3], torch.full((1, 64, 64), 64 / 255)
+                )
+
+        self.project.save_settings({"name": "Scene", "max_megapixels": 0.001}, 0)
+        resized = read_selected("image", "test", asset)[0]
+        self.assertEqual(resized.shape[-1], 4)
+        self.assertLessEqual(resized.shape[1] * resized.shape[2], 0.001 * 1024 * 1024)
+        torch.testing.assert_close(
+            resized[..., 3], torch.full_like(resized[..., 3], 64 / 255)
+        )
+
+    def test_qwen21_saved_reference_keeps_alpha_and_matching_latent_size(self):
+        class Clip:
+            def tokenize(self, text, images, **kwargs):
+                self.images = images
+                return text
+
+            def encode_from_tokens_scheduled(self, tokens):
+                return [[torch.zeros(1, 1, 1), {}]]
+
+        class Vae:
+            def encode(self, image):
+                self.image = image
+                return torch.zeros(1, 64, image.shape[1] // 16, image.shape[2] // 16)
+
+        # Exercise the real conditioning node but not model weights or sampling.
+        for width, height, resolution, expected in (
+            (256, 144, 0, (256, 128)),
+            (256, 144, 1024, (1376, 768)),
+            (1344, 768, 0, (1344, 768)),
+            (1344, 768, 1024, (1344, 768)),
+        ):
+            with self.subTest(size=(width, height), resolution=resolution):
+                image = torch.tensor([25, 51, 76, 64], dtype=torch.float32).div(255)
+                image = image.expand(1, height, width, 4).clone()
+                run = self.project.begin_run("reference", 0)
+                asset = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+                    "test", "reference", run, 0, "reference", image
+                )["result"][0]
+                reference = read_selected("image", "test", asset)[0]
+                self.assertEqual(tuple(reference.shape), tuple(image.shape))
+                clip, vae = Clip(), Vae()
+                result = TextEncodeQwenImage21.execute(
+                    clip, "edit", "", vae, resolution, {"image_1": reference}
+                ).result
+                expected_w, expected_h = expected
+                self.assertEqual(tuple(vae.image.shape), (1, expected_h, expected_w, 4))
+                self.assertEqual(
+                    tuple(result[2]["samples"].shape),
+                    (1, 64, expected_h // 16, expected_w // 16),
+                )
+                composited = (
+                    vae.image[..., :3] * vae.image[..., 3:] + 1 - vae.image[..., 3:]
+                )
+                torch.testing.assert_close(clip.images[0], composited)
+                self.assertIs(
+                    result[0][0][1]["reference_latents"][0],
+                    result[1][0][1]["reference_latents"][0],
+                )
 
     def test_project_media_write_and_statistics(self):
         run = self.project.begin_run("image", 0)
@@ -1233,7 +1423,6 @@ class WorkspaceTest(unittest.TestCase):
             "test",
             self.project.begin_run("3", 0),
             0,
-            fresh_type,
         )
 
     def test_boundary_and_input_immutability(self):
@@ -1275,42 +1464,24 @@ class WorkspaceTest(unittest.TestCase):
         result = asyncio.run(validate_prompt("test", self.compile(), ["3"]))
         self.assertTrue(result[0], result)
 
-    def test_v3_derived_node_executes_and_is_fresh(self):
-        name = fresh_type("WorkspaceTestV3")
-        cls = nodes.NODE_CLASS_MAPPINGS[name]
+    def test_task_keeps_original_v3_node_identity(self):
+        prompt = {
+            "node": {"class_type": "WorkspaceTestV3", "inputs": {"text": "hello"}},
+            "out": {
+                "class_type": "TuringMaterialText",
+                "inputs": {"text": ["node", 0]},
+            },
+        }
+        compiled = compile_segment(prompt, "out", {}, "test", "run", 0)
+        self.assertEqual(compiled["node"]["class_type"], "WorkspaceTestV3")
+        self.assertTrue(compiled["node"]["_meta"]["turing_material_fresh"])
+        self.assertNotIn("fingerprint_inputs", AddTextV3.__dict__)
         result = asyncio.run(
             _async_map_node_over_list(
-                "test", "v3", cls, {"text": ["hello"]}, cls.FUNCTION
+                "test", "v3", AddTextV3, {"text": ["hello"]}, AddTextV3.FUNCTION
             )
         )
         self.assertEqual(result[0].result[0], "hello?")
-        self.assertIsNot(cls, AddTextV3)
-        self.assertNotIn("fingerprint_inputs", AddTextV3.__dict__)
-        from comfyui_turing_utils.nodes import INTERNAL_NODE_NOTE
-
-        schema = cls.GET_SCHEMA()
-        self.assertEqual(schema.node_id, name)
-        self.assertTrue(schema.is_dev_only)
-        self.assertTrue(schema.display_name.endswith("(Internal)"))
-        self.assertTrue(schema.description.startswith(INTERNAL_NODE_NOTE))
-        self.assertFalse(AddTextV3.GET_SCHEMA().is_dev_only)
-
-    def test_fresh_signatures_differ(self):
-        async def signatures():
-            # No run-id inputs needed on the wrapped computation node itself.
-            name = fresh_type("WorkspaceTest")
-            prompt = {"2": {"class_type": name, "inputs": {"text": "same"}}}
-            values = []
-            for _ in range(2):
-                dynamic = DynamicPrompt(copy.deepcopy(prompt))
-                cache = IsChangedCache("test", dynamic, None)
-                keys = CacheKeySetInputSignature(dynamic, ["2"], cache)
-                await keys.add_keys(["2"])
-                values.append(keys.get_data_key("2"))
-            return values
-
-        first, second = asyncio.run(signatures())
-        self.assertNotEqual(first, second)
 
     def test_conflicting_result_stays_in_history(self):
         run = self.project.begin_run("3", 0)
@@ -1327,7 +1498,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def test_missing_material_and_cycle(self):
         with self.assertRaisesRegex(ValueError, "no saved"):
-            compile_segment(self.prompt, "3", {}, "test", "run", 0, fresh_type)
+            compile_segment(self.prompt, "3", {}, "test", "run", 0)
         self.prompt["2"]["inputs"]["text"] = ["2", 0]
         with self.assertRaisesRegex(ValueError, "cycle"):
             self.compile()
@@ -1418,9 +1589,7 @@ class WorkspaceTest(unittest.TestCase):
                     .get("revision", 0)
                 )
                 run = self.project.begin_run("3", revision)
-                prompt = compile_segment(
-                    self.prompt, "3", {}, "test", run, revision, fresh_type
-                )
+                prompt = compile_segment(self.prompt, "3", {}, "test", run, revision)
                 executor.execute(prompt, run, {}, ["3"])
                 self.assertTrue(executor.success, executor.status_messages)
                 self.assertIsNone(executor.caches.outputs.get_local("compute"))
@@ -1516,7 +1685,7 @@ class WorkspaceTest(unittest.TestCase):
                         )
                         run = self.project.begin_run(target, revision)
                         prompt = compile_segment(
-                            graph, target, {}, "test", run, revision, fresh_type
+                            graph, target, {}, "test", run, revision
                         )
                         executor.execute(prompt, run, {}, [target])
                         self.assertTrue(executor.success, executor.status_messages)

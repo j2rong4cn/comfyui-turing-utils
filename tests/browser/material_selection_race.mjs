@@ -13,15 +13,12 @@ try {
   console.log(
     await page.evaluate(async () => {
       const { api } = await import("/scripts/api.js");
-      const { installProjectMaterials } = await import(
-        "/extensions/comfyui-turing-utils/workspace/editor_materials.js"
-      );
-      const { settleMaterials } = await import(
-        "/extensions/comfyui-turing-utils/workspace/material_selection.js"
-      );
-      const { setWidgetValue } = await import(
-        "/extensions/comfyui-turing-utils/lib/parameter_widget.js"
-      );
+      const { installProjectMaterials } =
+        await import("/extensions/comfyui-turing-utils/workspace/editor_materials.js");
+      const { settleMaterials, materialChanged, selectionChanged } =
+        await import("/extensions/comfyui-turing-utils/workspace/material_selection.js");
+      const { setWidgetValue } =
+        await import("/extensions/comfyui-turing-utils/lib/parameter_widget.js");
       const check = (ok, message) => {
         if (!ok) throw Error(message);
       };
@@ -78,15 +75,24 @@ try {
           return reply({ revision: ++revision });
         }
         if (route === "project/save") return reply({ revision: ++revision });
-        if (route === "compile") {
+        if (route === "task/start") {
           compiles++;
           events.push("compile");
           return reply({
-            run_id: `fixture-${compiles}`,
-            prompt: {},
+            id: `fixture-${compiles}`,
             observed: selections.get("source"),
           });
         }
+        if (route === "task/status")
+          return reply({
+            status: "failed",
+            error: "fixture stops before execution",
+            completed: [],
+            targets: ["result"],
+          });
+        if (route === "task/list") return reply({ items: [] });
+        if (route === "selections")
+          return reply({ items: Object.fromEntries(selections) });
         if (route === "import") {
           events.push("import-start");
           await pause(100);
@@ -286,6 +292,74 @@ try {
           stub.widgets.find((widget) => widget.name === "执行到这里").callback(),
         ]);
         check(observed === "new editor", "Editor execution read stale text");
+        materialChanged(directory, target, { text: "old response", revision: 0 });
+        check(
+          text.value === "new editor",
+          "Late selection response replaced a newer publication",
+        );
+        check(
+          !selectionChanged(
+            { revision: 2, text: "same" },
+            { revision: 2, text: "same" },
+          ),
+          "Duplicate publication was not coalesced",
+        );
+
+        const { bindMaterialCombo } =
+          await import("/extensions/comfyui-turing-utils/lib/material_combo.js");
+        const files = Array.from({ length: 125 }, (_, index) => ({
+          id: `${index}`,
+          name: `file-${index}.png`,
+        }));
+        const history = LiteGraph.createNode("TuringCanvasCard");
+        app.rootGraph.add(history);
+        const combo = history.addWidget("combo", "history-fixture", "", () => {}, {
+          values: [],
+        });
+        let picked,
+          calls = 0;
+        await bindMaterialCombo(history, combo, {
+          key: "history-pagination-fixture",
+          kind: "image",
+          selected: () => "file-124.png",
+          select: async (id) => {
+            picked = id;
+          },
+          list: async ({ offset, limit, query }) => {
+            calls++;
+            await pause(10);
+            return files
+              .filter((file) => file.name.includes(query))
+              .slice(offset, offset + limit);
+          },
+        });
+        check(
+          combo.options.values.includes("file-124.png"),
+          "Selection outside the first page disappeared",
+        );
+        await combo.callback("加载更多历史…");
+        await combo.callback("file-124.png");
+        check(
+          picked === "124",
+          "Next-page selection did not resolve the material identity",
+        );
+        const count = calls;
+        await Promise.all(
+          Array.from({ length: 10 }, () => combo.refreshMaterialList()),
+        );
+        check(calls - count <= 2, "Shared history refresh issued one request per view");
+        const prompt = app.extensionManager.dialog.prompt;
+        app.extensionManager.dialog.prompt = async () => "file-12";
+        try {
+          await combo.callback("查找历史文件…");
+          check(
+            combo.options.values.includes("file-12.png") &&
+              !combo.options.values.includes("file-20.png"),
+            "Filename search mixed old and new pages",
+          );
+        } finally {
+          app.extensionManager.dialog.prompt = prompt;
+        }
         return "Card/editor writes, parameter and settings failure/retry, uploads and interleaved layout passed";
       } finally {
         app.rootGraph.clear();

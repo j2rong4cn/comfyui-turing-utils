@@ -7,9 +7,16 @@ import torch
 from PIL import Image, ImageOps
 
 
+def has_alpha(image):
+    return "A" in image.getbands() or "transparency" in image.info
+
+
 def read_image(path, max_megapixels):
     with Image.open(path) as image:
-        image = ImageOps.exif_transpose(image).convert("RGB")
+        image = ImageOps.exif_transpose(image)
+        # IMAGE may be RGBA (notably Qwen Image 2.1); alpha is material data,
+        # not a preview-only mask. Palette/tRNS transparency needs RGBA too.
+        image = image.convert("RGBA" if has_alpha(image) else "RGB")
         limit = max_megapixels * 1024 * 1024
         scale = min(1, math.sqrt(limit / (image.width * image.height)))
         dimensions = max(1, int(image.width * scale)), max(1, int(image.height * scale))

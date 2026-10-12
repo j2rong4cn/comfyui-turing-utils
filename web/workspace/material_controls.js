@@ -86,12 +86,12 @@ export function controls(node, m, { select, importMedia, run }) {
     const directory = node.properties.directory;
     bindMaterialCombo(node, w, {
       key: `${directory}:${m.kind}`,
-      list: async () =>
+      list: async (page) =>
         (
           await request("history", {
             directory,
             kind: m.kind,
-            limit: 0,
+            ...page,
           })
         ).items,
       selected: () => m.selection.asset,

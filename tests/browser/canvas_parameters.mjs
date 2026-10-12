@@ -21,12 +21,10 @@ try {
   await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
-    const workspace = await import(
-      "/extensions/comfyui-turing-utils/material_workspace.js"
-    );
-    const { entries, addPort, syncPorts } = await import(
-      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
-    );
+    const workspace =
+      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const { entries, addPort, syncPorts } =
+      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
     const check = (condition, message) => {
       if (!condition) throw Error(message);
     };
@@ -236,6 +234,23 @@ try {
     const opened = await workspace.request("card/open", { directory, id: added.id });
     for (const [type, value] of Object.entries(values))
       check(opened.parameters[ids[type]] === value, `${type} value was not persisted`);
+    // Native undo/tab drafts can restore older display values, but cannot roll
+    // back already persisted parameters. Rehydrate without a full graph rebuild.
+    card.properties.values[ids.INT] = 2;
+    const oldWidget = card.widgets.find((w) => w.name === ids.INT);
+    oldWidget.value = 2;
+    app.graph.extra.turing_project.revision = 0;
+    const { restoreTasks } =
+      await import("/extensions/comfyui-turing-utils/workspace/execution.js");
+    await restoreTasks(directory);
+    check(
+      oldWidget.value === values.INT && card.properties.values[ids.INT] === values.INT,
+      "Native draft values differ from persisted execution parameters",
+    );
+    check(
+      app.graph.extra.turing_project.revision > 0,
+      "Native draft kept an obsolete project revision",
+    );
     check(
       JSON.stringify((await workspace.request("template/open", { name })).workflow) ===
         JSON.stringify(template.workflow),

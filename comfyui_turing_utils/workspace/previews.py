@@ -13,6 +13,10 @@ import uuid
 import av
 from PIL import Image, ImageOps
 
+from ..media.files import has_alpha
+
+RENDER_VERSION = 2
+
 
 class PreviewStore:
     def __init__(self, directory: Path, concurrency: int = 2):
@@ -27,9 +31,7 @@ class PreviewStore:
             raise ValueError("Invalid thumbnail time")
         path = Path(path)
         stat = await asyncio.to_thread(path.stat)
-        identity = (
-            f"{project_root}:{asset_id}:{stat.st_size}:{stat.st_mtime_ns}:{start:.3f}"
-        )
+        identity = f"{RENDER_VERSION}:{project_root}:{asset_id}:{stat.st_size}:{stat.st_mtime_ns}:{start:.3f}"
         digest = hashlib.sha256(identity.encode()).hexdigest()
         preview = self.directory / (digest + ".jpg")
         if await asyncio.to_thread(preview.is_file):
@@ -59,7 +61,8 @@ class PreviewStore:
 def render_poster(path, kind, start, preview):
     if kind == "image":
         with Image.open(path) as source:
-            image = ImageOps.exif_transpose(source).convert("RGB")
+            image = ImageOps.exif_transpose(source)
+            image = image.convert("RGBA" if has_alpha(image) else "RGB")
     else:
         with av.open(str(path)) as container:
             stream = container.streams.video[0]
@@ -80,6 +83,10 @@ def render_poster(path, kind, start, preview):
             image = frame.to_image().convert("RGB")
 
     image.thumbnail((512, 512))
+    if image.mode == "RGBA":
+        # JPEG has no alpha: composite the small poster, never flatten the asset.
+        background = Image.new("RGBA", image.size, "white")
+        image = Image.alpha_composite(background, image).convert("RGB")
     preview.parent.mkdir(parents=True, exist_ok=True)
     temporary = preview.with_name(uuid.uuid4().hex + ".partial")
     try:

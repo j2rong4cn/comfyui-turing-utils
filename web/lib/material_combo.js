@@ -1,6 +1,9 @@
 import { app } from "../../../scripts/app.js";
 
 const lists = new Map();
+const MORE = "加载更多历史…";
+const SEARCH = "查找历史文件…";
+const PAGE_SIZE = 120;
 const cardMedia = new Map();
 let definitions;
 let refreshPending = false;
@@ -55,7 +58,7 @@ function registerCardMedia(node, widget, kind) {
 function refreshCardDefinitions() {
   if (refreshPending) return;
   refreshPending = true;
-  queueMicrotask(() => {
+  requestAnimationFrame(() => {
     refreshPending = false;
     // 1.53.6 exposes this app adapter but not per-widget media registration.
     // Only card schema changes rebuild definitions; list/selection updates do not.
@@ -129,7 +132,10 @@ export function bindMaterialCombo(
         byName: new Map(),
         listeners: new Set(),
         load: null,
+        reload: false,
         loaded: false,
+        more: false,
+        query: "",
         list,
       }),
     );
@@ -149,6 +155,8 @@ export function bindMaterialCombo(
     widget.value = selected()?.split("/").at(-1) || "";
     if (widget.value && !widget.options.values.includes(widget.value))
       widget.options.values.push(widget.value);
+    if (entry.more) widget.options.values.push(MORE);
+    widget.options.values.push(SEARCH);
     node.graph?.setDirtyCanvas(true, true);
   };
   entry.listeners.add(update);
@@ -159,6 +167,23 @@ export function bindMaterialCombo(
     remove?.call(widget);
   };
   widget.callback = async (name) => {
+    if (name === MORE || name === SEARCH) {
+      if (name === SEARCH) {
+        const query = await app.extensionManager.dialog.prompt({
+          title: "查找历史文件",
+          message: "文件名关键词；留空显示全部",
+          defaultValue: entry.query,
+        });
+        if (query === null || query === undefined) {
+          update();
+          return;
+        }
+        entry.query = query;
+      }
+      await refreshMaterialList(key, name === MORE);
+      update();
+      return;
+    }
     const item = entry.byName.get(name);
     if (!item) {
       update();
@@ -175,20 +200,36 @@ export function bindMaterialCombo(
   return entry.loaded ? Promise.resolve() : refreshMaterialList(key);
 }
 
-export async function refreshMaterialList(key) {
+export async function refreshMaterialList(key, append = false) {
   const entry = lists.get(key);
   if (!entry) return;
-  if (!entry.load)
-    entry.load = entry
-      .list()
-      .then((items) => {
-        entry.items = items;
-        entry.byName = new Map(items.map((item) => [item.name, item]));
+  if (entry.load) {
+    // A publication or search while loading needs one follow-up first page.
+    // Many views share this entry; don't issue one reload for each listener.
+    if (!append) entry.reload = true;
+    return entry.load;
+  }
+  entry.load = (async () => {
+    do {
+      entry.reload = false;
+      const query = entry.query;
+      const items = await entry.list({
+        offset: append ? entry.items.length : 0,
+        limit: PAGE_SIZE,
+        query,
+      });
+      if (query !== entry.query) entry.reload = true;
+      else {
+        entry.items = append ? [...entry.items, ...items] : items;
+        entry.more = items.length === PAGE_SIZE;
+        entry.byName = new Map(entry.items.map((item) => [item.name, item]));
         entry.loaded = true;
         for (const update of entry.listeners) update();
-      })
-      .finally(() => {
-        entry.load = null;
-      });
+      }
+      append = false;
+    } while (entry.reload);
+  })().finally(() => {
+    entry.load = null;
+  });
   return entry.load;
 }

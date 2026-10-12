@@ -15,6 +15,14 @@ from .parameters import (
 
 
 def describe(prompt):
+    if not isinstance(prompt, dict) or any(
+        not isinstance(node, dict)
+        or not isinstance(node.get("class_type"), str)
+        or not isinstance(node.get("inputs"), dict)
+        or not isinstance(node.get("_meta", {}), dict)
+        for node in prompt.values()
+    ):
+        raise ValueError("Card execution graph must contain nodes with object inputs")
     inputs = [key for key, node in prompt.items() if node["class_type"] == INPUTS]
     outputs = [key for key, node in prompt.items() if node["class_type"] == OUTPUTS]
     if len(inputs) != 1 or len(outputs) != 1:
@@ -22,8 +30,8 @@ def describe(prompt):
             "A card needs exactly one Canvas Inputs and one Canvas Outputs"
         )
     input_id, output_id = inputs[0], outputs[0]
-    incoming = parse_ports(prompt[input_id]["inputs"]["ports"])
-    outgoing = parse_ports(prompt[output_id]["inputs"]["ports"], endpoint=OUTPUTS)
+    incoming = parse_ports(prompt[input_id]["inputs"].get("ports"))
+    outgoing = parse_ports(prompt[output_id]["inputs"].get("ports"), endpoint=OUTPUTS)
     for node in prompt.values():
         bindings = node.get("_meta", {}).get(DYNAMIC_BINDINGS, {})
         if not isinstance(bindings, dict):

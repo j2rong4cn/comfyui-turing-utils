@@ -1,6 +1,7 @@
 """Poster requests must not become unbounded or eager video playback."""
 
 import asyncio
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -47,6 +48,32 @@ class MaterialPreviewsTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await self.store.get(self.root, "audio", self.source, "audio")
             render.assert_not_called()
+
+    async def test_rgba_poster_composites_alpha_without_changing_material(self):
+        Image.new("RGBA", (1280, 720), (25, 51, 76, 64)).save(self.source)
+        original = self.source.read_bytes()
+        poster = await self.store.get(self.root, "image", self.source, "image")
+        with Image.open(poster) as image:
+            self.assertEqual(image.mode, "RGB")
+            self.assertEqual(image.size, (512, 288))
+            for actual, expected in zip(image.getpixel((100, 100)), (197, 204, 210)):
+                self.assertLessEqual(abs(actual - expected), 2)
+        self.assertEqual(self.source.read_bytes(), original)
+
+    async def test_render_version_does_not_reuse_old_alpha_poster(self):
+        Image.new("RGBA", (32, 32), (0, 0, 0, 0)).save(self.source)
+        stat = self.source.stat()
+        identity = f"{self.root}:image:{stat.st_size}:{stat.st_mtime_ns}:0.000"
+        previous = self.store.directory / (
+            hashlib.sha256(identity.encode()).hexdigest() + ".jpg"
+        )
+        previous.parent.mkdir(parents=True)
+        Image.new("RGB", (32, 32), "black").save(previous)
+        poster = await self.store.get(self.root, "image", self.source, "image")
+        self.assertNotEqual(poster, previous)
+        with Image.open(poster) as image:
+            self.assertEqual(image.getpixel((0, 0)), (255, 255, 255))
+        self.assertTrue(previous.is_file())
 
     async def test_disconnect_does_not_cancel_shared_render(self):
         started, finish = asyncio.Event(), asyncio.Event()

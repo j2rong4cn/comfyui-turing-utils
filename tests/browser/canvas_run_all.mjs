@@ -15,9 +15,9 @@ try {
   await selectRenderer(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
-    const workspace = await import(
-      "/extensions/comfyui-turing-utils/material_workspace.js"
-    );
+    const { api } = await import("/scripts/api.js");
+    const workspace =
+      await import("/extensions/comfyui-turing-utils/material_workspace.js");
     const check = (ok, message) => {
       if (!ok) throw Error(message);
     };
@@ -32,9 +32,21 @@ try {
       else nativeToast(message);
     };
     const nativeFetch = window.fetch;
-    window.fetch = (...args) => {
-      if (String(args[0]).endsWith("/prompt")) submitted.push(JSON.parse(args[1].body));
-      return nativeFetch(...args);
+    const syncSubmitted = async () => {
+      const history = await (await api.fetchApi("/history")).json();
+      const records = Object.values(history)
+        .filter(
+          (record) => record.prompt[3].turing_material_run?.directory === directory,
+        )
+        .sort((a, b) => a.prompt[0] - b.prompt[0]);
+      submitted.splice(
+        0,
+        submitted.length,
+        ...records.map((record) => ({
+          prompt: record.prompt[2],
+          partial_execution_targets: record.prompt[4],
+        })),
+      );
     };
     async function createChain(seed, cycle = false) {
       const scaffold = await (
@@ -92,7 +104,7 @@ try {
     const runAll = (card) => {
       const button = card.widgets.at(-1);
       check(button.name === "执行全部桩节点", "Run-all button is not at the bottom");
-      return button.callback();
+      return button.callback().then(syncSubmitted);
     };
     try {
       const { card, targets } = await createChain("generated");
@@ -130,7 +142,7 @@ try {
       const empty = await createChain("");
       await runAll(empty.card);
       check(
-        submitted.length === 7 && failures.at(-1)?.includes("仍为空"),
+        submitted.length === 8 && failures.at(-1)?.includes("still empty"),
         "Empty upstream was retried or downstream execution continued",
       );
       check(

@@ -1,6 +1,7 @@
 /** Per-project save ordering and lightweight native graph snapshots. */
 import { app } from "../../../scripts/app.js";
 import { SerialWrites } from "../lib/serial_writes.js";
+import { setWidgetValue } from "../lib/parameter_widget.js";
 import { request } from "./api.js";
 import { settleMaterials } from "./material_selection.js";
 
@@ -15,6 +16,49 @@ export function projectState(directory) {
   return app.extensionManager.workflow.openWorkflows.find(
     (workflow) => workflow.activeState?.extra?.turing_project?.directory === directory,
   )?.activeState?.extra?.turing_project;
+}
+
+export function restoreSavedValues(directory, saved) {
+  const state = projectState(directory);
+  if (!state || !Number.isInteger(saved.revision) || state.revision > saved.revision)
+    return;
+  state.revision = saved.revision;
+  const nodes =
+    project()?.directory === directory
+      ? app.rootGraph._nodes
+      : snapshot(directory)?.nodes;
+  for (const node of nodes || []) {
+    if (node.type === ROOT) {
+      const previous = node.properties.settings;
+      for (const [name, key] of [
+        ["项目名称", "name"],
+        ["素材像素上限（MP）", "max_megapixels"],
+      ]) {
+        const widget = node.widgets?.find((w) => w.name === name);
+        if (widget && widget.value === previous[key])
+          setWidgetValue(widget, saved.settings[key]);
+      }
+      node.properties.settings = saved.settings;
+      continue;
+    }
+    const parameters = saved.parameters?.[node.properties.instance];
+    if (!parameters) continue;
+    for (const field of node.properties.card?.fields || []) {
+      if (!(field.input in parameters)) continue;
+      const widget = node.widgets?.find((w) => w.name === field.input);
+      // A newer edit may have begun while the state request was in flight.
+      // Don't replace that draft. Native undo/tab snapshots have matching values.
+      if (
+        widget &&
+        JSON.stringify(widget.value) !==
+          JSON.stringify(node.properties.values[field.input])
+      )
+        continue;
+      node.properties.values[field.input] = parameters[field.input];
+      if (widget) setWidgetValue(widget, parameters[field.input]);
+    }
+    node.graph?.setDirtyCanvas(true, true);
+  }
 }
 function snapshot(directory) {
   if (project()?.directory === directory) return app.graph.serialize();
@@ -60,6 +104,13 @@ export function assertProjectSaved(directory) {
   } catch (error) {
     throw Error(`参数修改保存失败，请重新修改对应参数后再执行：${error.message}`);
   }
+}
+
+export async function discardProjectFailures(directory) {
+  const queue = saves.get(directory);
+  if (!queue) return;
+  await queue.writes.discardFailures();
+  if (queue.writes.idle) saves.delete(directory);
 }
 export async function settleProjectWrites(directory) {
   for (;;) {
@@ -107,7 +158,20 @@ export async function saveProjectLayout(directory) {
         type: n.type,
         pos: n.pos,
         size: n.size,
-        properties: { instance: n.properties.instance },
+        properties: {
+          instance: n.properties.instance,
+          port_ids:
+            n.type === CARD
+              ? {
+                  inputs: (n.inputs || []).map(
+                    (p, index) => p._portId || n.properties.card?.ports[index]?.id,
+                  ),
+                  outputs: (n.outputs || []).map(
+                    (p, index) => p._portId || n.properties.card?.outputs[index]?.id,
+                  ),
+                }
+              : undefined,
+        },
       }));
       return request("project/save", {
         directory,

@@ -7,13 +7,15 @@ import uuid
 from pathlib import Path
 import numpy as np
 import av
+import torch
 import nodes
 import folder_paths
+from PIL import Image
 from comfy_api.latest import InputImpl, Types
 from comfy_extras.nodes_video import CreateVideo
 from comfy_extras.nodes_audio import load as load_audio
 from .store import Project, inside
-from ..media.files import read_image, read_audio
+from ..media.files import has_alpha, read_image, read_audio
 
 
 def material_path(file):
@@ -100,7 +102,7 @@ def create_video(
     ]
 
 
-def read_selected(kind, directory, asset, start=0, end=0):
+def read_selected(kind, directory, asset, start=0, end=0, max_megapixels=None):
     project = Project(directory)
     if project.asset(asset)["kind"] != kind:
         raise ValueError("Material kind does not match this node")
@@ -112,7 +114,13 @@ def read_selected(kind, directory, asset, start=0, end=0):
         or (end and end <= start)
     ):
         raise ValueError("End time must be after start time")
-    maximum = project.settings()["max_megapixels"]
+    maximum = (
+        project.settings()["max_megapixels"]
+        if max_megapixels is None
+        else max_megapixels
+    )
+    if not math.isfinite(maximum) or maximum <= 0:
+        raise ValueError("Maximum megapixels must be positive and finite")
     if kind == "video":
         video = InputImpl.VideoFromFile(
             str(project.path(asset)),
@@ -204,7 +212,13 @@ def resolve_material(kind, file="", **kwargs):
         if kind == "video":
             value = InputImpl.VideoFromFile(str(path))
         elif kind == "image":
-            value = nodes.LoadImage().load_image(file)[0]
+            value, mask = nodes.LoadImage().load_image(file)
+            # Native LoadImage splits alpha into MASK. Rejoin only alpha-bearing
+            # files so an IMAGE material preserves the same channels when saved
+            # and reopened in an ordinary workflow as it does on a Canvas.
+            with Image.open(path) as source:
+                if has_alpha(source):
+                    value = torch.cat((value, (1.0 - mask).unsqueeze(-1)), dim=-1)
         else:
             waveform, rate = load_audio(str(path))
             value = {"waveform": waveform.unsqueeze(0), "sample_rate": rate}

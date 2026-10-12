@@ -77,7 +77,7 @@ class Project:
             uuid.UUID(data["id"])
         with workflow_files.LOCK, self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise ValueError("Unsupported Canvas database version")
             if version == 0:
                 db.executescript("""
@@ -96,6 +96,14 @@ class Project:
                 # completed runs each time a history or preview is requested.
                 db.execute("CREATE INDEX IF NOT EXISTS run_status ON runs(status)")
                 db.execute("PRAGMA user_version=2")
+            if version < 3:
+                db.execute("ALTER TABLE runs ADD COLUMN dependency TEXT")
+                db.execute("ALTER TABLE runs ADD COLUMN error TEXT")
+                db.execute("""CREATE TABLE operations (
+                    id TEXT PRIMARY KEY, targets TEXT NOT NULL, status TEXT NOT NULL,
+                    completed TEXT NOT NULL DEFAULT '[]', error TEXT,
+                    created INTEGER NOT NULL DEFAULT(unixepoch()))""")
+                db.execute("PRAGMA user_version=3")
         recover_publications(self)
 
     @contextmanager
@@ -197,14 +205,15 @@ class Project:
             raise ValueError("Material file is missing")
         return path
 
-    def history(self, kind, offset=0, prefix="", limit=50):
+    def history(self, kind, offset=0, prefix="", limit=50, query=""):
         with self.connect() as db:
             # instr avoids treating user prefixes as SQL LIKE patterns.
             rows = db.execute(
-                "SELECT id,name,kind FROM materials WHERE kind=? AND instr(name,?)=1 ORDER BY created DESC,id DESC LIMIT ? OFFSET ?",
+                "SELECT id,name,kind FROM materials WHERE kind=? AND instr(name,?)=1 AND instr(name,?)>0 ORDER BY created DESC,id DESC LIMIT ? OFFSET ?",
                 (
                     kind,
                     prefix,
+                    query,
                     -1 if limit == 0 else max(1, min(int(limit), 1000)),
                     max(0, int(offset)),
                 ),
@@ -275,3 +284,40 @@ class Project:
         if row is None:
             raise ValueError("Unknown execution")
         return dict(row)
+
+    def wait_for_material(self, run_id, target):
+        with self.connect() as db:
+            db.execute(
+                "UPDATE runs SET status='waiting',dependency=? WHERE id=?",
+                (target, run_id),
+            )
+
+    def run_state(self, run_id, status, error=None):
+        with self.connect() as db:
+            db.execute(
+                "UPDATE runs SET status=?,error=?,dependency=NULL WHERE id=? AND status NOT IN ('success','publishing')",
+                (status, error, run_id),
+            )
+
+    def operation(self, identity):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM operations WHERE id=?", (identity,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("Unknown Canvas task")
+        return {
+            **dict(row),
+            "targets": json.loads(row["targets"]),
+            "completed": json.loads(row["completed"]),
+        }
+
+    def operations(self):
+        with self.connect() as db:
+            ids = [
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM operations WHERE status IN ('queued','running') OR rowid=(SELECT max(rowid) FROM operations) ORDER BY rowid DESC"
+                )
+            ]
+        return [self.operation(identity) for identity in ids]

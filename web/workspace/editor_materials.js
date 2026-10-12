@@ -9,6 +9,7 @@ import {
   materialChanged,
   materialChanges,
   mutateMaterial,
+  selectionChanged,
 } from "./material_selection.js";
 
 export function installProjectMaterials(graph, editing, run) {
@@ -82,8 +83,14 @@ export function installProjectMaterials(graph, editing, run) {
     const select = (content) =>
       mutateMaterial(editing.directory, target, () => persistSelection(content));
     const listener = ({ detail }) => {
-      if (detail.directory === editing.directory && detail.target === target)
+      if (
+        detail.directory === editing.directory &&
+        detail.target === target &&
+        selectionChanged(state.selection, detail.selection)
+      ) {
         update(detail.selection);
+        widget.refreshMaterialList?.().catch(report);
+      }
     };
     materialChanges.addEventListener("select", listener);
     const removed = node.onRemoved;
@@ -104,8 +111,8 @@ export function installProjectMaterials(graph, editing, run) {
       widget.serializeValue = canonical;
       bindMaterialCombo(node, widget, {
         key: `${editing.directory}:${kind}`,
-        list: async () =>
-          (await request("history", { directory: editing.directory, kind, limit: 0 }))
+        list: async (page) =>
+          (await request("history", { directory: editing.directory, kind, ...page }))
             .items,
         selected: () => state.selection.asset,
         select: action((asset) => select({ asset })),
@@ -135,16 +142,7 @@ export function installProjectMaterials(graph, editing, run) {
       };
     }
     update(state.selection);
-    button(node, "执行到这里", () =>
-      run(node, target, async () => {
-        materialChanged(
-          editing.directory,
-          target,
-          await request("selection", { directory: editing.directory, node: target }),
-        );
-        await widget.refreshMaterialList?.();
-      }),
-    );
+    button(node, "执行到这里", () => run(node, target));
     node.setSize(node.computeSize());
   }
 }

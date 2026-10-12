@@ -30,10 +30,13 @@ class PackageArchitectureTest(unittest.TestCase):
             "/text",
             "/run",
             "/metadata",
+            "/compile",
+            "/card/plan",
         }
         self.assertFalse(routes & retired)
         self.assertTrue(
-            {"/select", "/selection", "/project/save", "/compile"} <= routes
+            {"/select", "/selection", "/project/save", "/task/start", "/task/status"}
+            <= routes
         )
 
     def test_frontend_extension_is_registered(self):

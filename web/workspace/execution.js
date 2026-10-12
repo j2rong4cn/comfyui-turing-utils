@@ -1,7 +1,7 @@
 /** Local material tasks and their native execution lifecycle. */
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
-import { action, report, request } from "./api.js";
+import { report, request } from "./api.js";
 import { materialChanged, settleMaterials } from "./material_selection.js";
 import {
   assertProjectSaved,
@@ -12,110 +12,103 @@ import {
   saveProject,
   setProjectStatus,
   settleProjectWrites,
+  restoreSavedValues,
 } from "./project_state.js";
 
-const cardRuns = new Map();
-
-export function runCardMaterials(state, instance, trims, onSuccess) {
-  const key = `${state.directory}:${instance}`;
-  if (cardRuns.has(key)) return cardRuns.get(key);
-  const running = (async () => {
-    await saveProject(state.directory);
-    const plan = await enqueueSave(state, (revision) =>
-      request("card/plan", { directory: state.directory, id: instance, revision }),
-    );
-    const executed = new Set();
-    for (const target of plan.targets)
-      await runMaterial(
-        state,
-        target,
-        trims,
-        () => onSuccess(target),
-        new Set(),
-        executed,
-      );
-  })().finally(() => cardRuns.delete(key));
-  cardRuns.set(key, running);
-  return running;
-}
-
-export async function runMaterial(
-  state,
-  target,
-  trims,
-  onSuccess,
-  ancestors = new Set(),
-  executed = new Set(),
-) {
+async function start(state, spec, trims) {
   await settleMaterials(state.directory);
   await settleProjectWrites(state.directory);
-  if (ancestors.has(target))
-    throw Error(`素材依赖形成循环，且没有可读取的已有输出：${target}`);
-  const path = new Set([...ancestors, target]);
-  // Keep execution preparation in the same project queue as autosaves: a
-  // completed background job must not advance the revision during compilation.
-  let compiled;
-  for (;;) {
-    compiled = await enqueueSave(state, async (revision) => {
-      assertProjectSaved(state.directory);
-      return {
-        ...(await request("compile", { ...state, revision, target, trims })),
+  const operation = await enqueueSave(state, async (revision) => {
+    assertProjectSaved(state.directory);
+    return {
+      ...(await request("task/start", {
+        directory: state.directory,
         revision,
-      };
-    });
-    if (!compiled.dependency) break;
-    const dependency = compiled.dependency;
-    if (executed.has(dependency))
-      throw Error(`上游素材在本次执行后仍为空，已停止后续执行：${dependency}`);
-    await runMaterial(
-      state,
-      dependency,
-      trims,
-      async () => {
-        const selection = await request("selection", {
-          directory: state.directory,
-          node: dependency,
-        });
-        materialChanged(state.directory, dependency, selection);
-        if (!selection.text && !selection.asset)
-          throw Error(`上游素材生成后仍为空，已停止执行：${dependency}`);
-      },
-      path,
-      executed,
-    );
-  }
-  let resolve, reject;
-  const completed = new Promise((done, fail) => {
-    resolve = done;
-    reject = fail;
-  });
-  // An immediate CPU task can fail before its /prompt response arrives.
-  completed.catch(() => {});
-  jobs.set(compiled.run_id, { onSuccess, directory: state.directory, resolve, reject });
-  setProjectStatus(state.directory, "执行中");
-  try {
-    const r = await api.fetchApi("/prompt", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: compiled.prompt,
-        prompt_id: compiled.run_id,
+        ...spec,
+        trims,
+        id: crypto.randomUUID(),
         client_id: api.clientId,
-        partial_execution_targets: [target],
-        // Native history records the exact seeds/cache counters used by this
-        // task, not a future seed or the template's saved placeholder value.
-        extra_data: { turing_value_controls: compiled.controls },
-      }),
-    });
-    if (!r.ok) throw Error(JSON.stringify(await r.json()));
-  } catch (error) {
-    jobs.delete(compiled.run_id);
-    setProjectStatus(state.directory, "执行失败");
-    throw error;
-  }
-  await completed;
-  executed.add(target);
+      })),
+      revision,
+    };
+  });
+  return watchTask(state.directory, operation.id);
 }
+
+export async function runCardMaterials(state, instance, trims) {
+  await saveProject(state.directory);
+  return start(state, { card: instance }, trims);
+}
+
+export function runMaterial(state, target, trims) {
+  return start(state, { target }, trims);
+}
+
+export async function runSelectedCards(state, cards, trims = {}) {
+  await saveProject(state.directory);
+  return start(state, { cards }, trims);
+}
+
+function watchTask(directory, id) {
+  const existing = jobs.get(id);
+  if (existing) return existing.promise;
+  const synced = new Set();
+  const job = { directory };
+  job.promise = (async () => {
+    for (;;) {
+      let status;
+      try {
+        status = await request("task/status", { directory, id });
+      } catch (error) {
+        setProjectStatus(directory, "任务状态暂不可用；服务端任务不受影响");
+        throw error;
+      }
+      for (const [target, selection] of Object.entries(status.selections || {})) {
+        if (synced.has(target)) continue;
+        materialChanged(directory, target, selection);
+        synced.add(target);
+      }
+      setProjectStatus(
+        directory,
+        `任务 ${status.status} · ${status.completed.length}/${status.targets.length}`,
+      );
+      if (!["queued", "running"].includes(status.status)) {
+        // Saved materials are already durable. Save the visible layout once,
+        // not once per publication; presentation errors never re-run inference.
+        if (synced.size) await saveProject(directory).catch(report);
+        if (status.status === "selection_changed") report(Error(status.error));
+        else if (status.status !== "success")
+          throw Error(status.error || "任务未完成，已保存素材保留");
+        return status;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  })().finally(() => jobs.delete(id));
+  jobs.set(id, job);
+  return job.promise;
+}
+
+export async function restoreTasks(directory) {
+  await settleMaterials(directory);
+  await settleProjectWrites(directory);
+  const [{ items }, selections] = await Promise.all([
+    request("task/list", { directory }),
+    request("selections", { directory }),
+  ]);
+  restoreSavedValues(directory, selections);
+  for (const [target, selection] of Object.entries(selections.items))
+    materialChanged(directory, target, selection);
+  for (const task of items)
+    if (["queued", "running"].includes(task.status))
+      watchTask(directory, task.id).catch(report);
+  const last = items[0];
+  if (last && !["queued", "running"].includes(last.status))
+    setProjectStatus(
+      directory,
+      `上次任务 ${last.status}${last.error ? " · " + last.error : ""}`,
+    );
+}
+
 export function installLocalExecution() {
   const queue = app.queuePrompt;
   app.queuePrompt = function (...args) {
@@ -125,26 +118,12 @@ export function installLocalExecution() {
     }
     return queue.apply(this, args);
   };
-  for (const event of ["execution_success", "execution_error", "execution_interrupted"])
-    api.addEventListener(
-      event,
-      action(async (e) => {
-        const job = jobs.get(e.detail.prompt_id);
-        if (!job) return;
-        jobs.delete(e.detail.prompt_id);
-        if (event !== "execution_success") {
-          setProjectStatus(job.directory, "执行未完成");
-          job.reject(Error("执行未完成，已有素材保持不变"));
-          return;
-        }
-        try {
-          await job.onSuccess();
-          await saveProject(job.directory);
-          job.resolve();
-        } catch (error) {
-          setProjectStatus(job.directory, "执行未完成");
-          job.reject(error);
-        }
-      }),
-    );
+  api.addEventListener("reconnected", () => {
+    if (project()) restoreTasks(project().directory).catch(report);
+    else if (editor()?.id) restoreTasks(editor().directory).catch(report);
+  });
+  api.addEventListener("turing_material_changed", (event) => {
+    const { directory, target, selection } = event.detail;
+    materialChanged(directory, target, selection);
+  });
 }

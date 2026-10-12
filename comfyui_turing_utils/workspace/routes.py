@@ -1,4 +1,4 @@
-"""Project routes; actual inference is submitted through ComfyUI /prompt."""
+"""Project routes; inference belongs to the server-owned material task service."""
 
 import asyncio
 import hashlib
@@ -12,7 +12,7 @@ from aiohttp import web
 from server import PromptServer
 
 from .compiler import MATERIALS
-from .tasks import compile_task, plan_card
+from .execution import MaterialTasks
 from .directories import list_directory, remove_empty_directory
 from .materials import material_files, material_path
 from .previews import PreviewStore
@@ -29,6 +29,7 @@ def install_routes():
     if server is None or getattr(server, "_turing_material_workspace", False):
         return
     server._turing_material_workspace = True
+    tasks = MaterialTasks(server)
     previews = PreviewStore(
         Path(folder_paths.base_path) / ".cache" / "material-previews"
     )
@@ -136,9 +137,7 @@ def install_routes():
         if not folder_paths.filter_files_content_types([path.name], ["video"]):
             raise ValueError("Expected a video material")
         poster = await previews.get(path.parent, path.name, path, "video")
-        return web.FileResponse(
-            poster, headers={"X-Content-Type-Options": "nosniff"}
-        )
+        return web.FileResponse(poster, headers={"X-Content-Type-Options": "nosniff"})
 
     def template_path(request, name):
         root = library(request)
@@ -354,6 +353,7 @@ def install_routes():
                 data.get("offset", 0),
                 data.get("prefix", ""),
                 data.get("limit", 50),
+                data.get("query", ""),
             )
         )
         return web.json_response({"items": result})
@@ -370,11 +370,34 @@ def install_routes():
     async def select(request):
         data = await request.json()
         result = await asyncio.to_thread(
-            lambda: Project(data["directory"]).select(
-                data["node"], data["selection"], data["revision"]
+            lambda: select_material(
+                Project(data["directory"]),
+                *data["node"].split(":", 1),
+                data["selection"],
+                data["revision"],
             )
         )
         return web.json_response({"revision": result})
+
+    @endpoint("post", "/selections")
+    async def selections(request):
+        data = await request.json()
+
+        def state():
+            project = Project(data["directory"])
+            with workflow_files.LOCK:
+                canvas = workflow_files.load_json(project.root / "canvas.json")
+                return {
+                    "items": canvas["selections"],
+                    "revision": canvas["revision"],
+                    "settings": project.settings(canvas),
+                    "parameters": {
+                        card["id"]: card.get("parameters", {})
+                        for card in canvas["cards"]
+                    },
+                }
+
+        return web.json_response(await asyncio.to_thread(state))
 
     @endpoint("post", "/selection")
     async def selection(request):
@@ -385,30 +408,31 @@ def install_routes():
             )
         )
 
-    @endpoint("post", "/card/plan")
-    async def plan_card_request(request):
+    @endpoint("post", "/task/start")
+    async def start_task(request):
         data = await request.json()
         return web.json_response(
-            await asyncio.to_thread(
-                lambda: plan_card(
-                    Project(data["directory"]), data["id"], data["revision"]
-                )
+            await tasks.start(
+                data["directory"],
+                data["revision"],
+                target=data.get("target"),
+                card=data.get("card"),
+                cards=data.get("cards"),
+                trims=data.get("trims"),
+                identity=data.get("id"),
+                client_id=data.get("client_id"),
             )
         )
 
-    @endpoint("post", "/compile")
-    async def compile_request(request):
+    @endpoint("post", "/task/status")
+    async def task_status(request):
         data = await request.json()
-        return web.json_response(
-            await asyncio.to_thread(
-                lambda: compile_task(
-                    Project(data["directory"]),
-                    data["target"],
-                    data["revision"],
-                    data.get("trims"),
-                )
-            )
-        )
+        return web.json_response(await tasks.status(data["directory"], data["id"]))
+
+    @endpoint("post", "/task/list")
+    async def task_list(request):
+        data = await request.json()
+        return web.json_response({"items": await tasks.list(data["directory"])})
 
     @endpoint("post", "/import")
     async def upload(request):

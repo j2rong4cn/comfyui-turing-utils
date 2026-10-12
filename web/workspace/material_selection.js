@@ -33,11 +33,25 @@ export async function settleMaterials(directory) {
   }
 }
 
+export async function discardMaterialFailures(directory) {
+  const queue = mutations.get(directory);
+  if (!queue) return;
+  await queue.discardFailures();
+  if (queue.idle) mutations.delete(directory);
+}
+
 export function materialChanged(directory, target, selection) {
   materialChanges.dispatchEvent(
     new CustomEvent("select", {
       detail: { directory, target, selection },
     }),
+  );
+}
+
+export function selectionChanged(current, next) {
+  if ((next.revision || 0) < (current.revision || 0)) return false;
+  return ["revision", "asset", "text", "start", "end"].some(
+    (key) => current[key] !== next[key],
   );
 }
 

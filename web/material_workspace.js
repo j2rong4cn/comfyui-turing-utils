@@ -21,6 +21,8 @@ import {
   materialChanged,
   materialChanges,
   mutateMaterial,
+  discardMaterialFailures,
+  selectionChanged,
 } from "./workspace/material_selection.js";
 import { request, report, action, prompt } from "./workspace/api.js";
 import { url, stopActivePreview } from "./workspace/material_controls.js";
@@ -34,11 +36,14 @@ import {
   saveProject,
   saveProjectLayout,
   setProjectStatus,
+  discardProjectFailures,
 } from "./workspace/project_state.js";
 import {
   installLocalExecution,
   runCardMaterials,
   runMaterial,
+  restoreTasks,
+  runSelectedCards,
 } from "./workspace/execution.js";
 
 let templates = [];
@@ -63,9 +68,12 @@ const directoryPicker = (create, options) =>
     app.extensionManager.dialog.confirm({ title: "删除空目录", message }),
   ).choose(create, options);
 function configureCard(node, card, document, directory) {
-  if (card.error) throw Error(card.error);
   node.properties.card = card;
   node.properties.directory = directory;
+  node.properties.port_ids = {
+    inputs: card.ports.map((p) => p.id),
+    outputs: card.outputs.map((p) => p.id),
+  };
   node.properties.values = Object.fromEntries(
     card.fields.map((f) => [f.input, document.prompt[f.node].inputs[f.input]]),
   );
@@ -86,12 +94,14 @@ function configureCard(node, card, document, directory) {
     name: p.name,
     label: p.name,
     type: p.type,
+    _portId: p.id,
     link: null,
   }));
   node.outputs = card.outputs.map((p) => ({
     name: p.name,
     label: p.name,
     type: p.type,
+    _portId: p.id,
     links: [],
   }));
 }
@@ -285,7 +295,7 @@ function restoreEditor(graph, editing) {
   installEditorMaterials(graph, editing);
 }
 function installEditorMaterials(graph, editing) {
-  installProjectMaterials(graph, editing, async (node, target, onSuccess) => {
+  installProjectMaterials(graph, editing, async (node, target) => {
     // Use the same local task flow as outer cards, including missing upstream
     // materials. The editor never submits a full workflow run.
     await fileTab(editing).save();
@@ -293,7 +303,7 @@ function installEditorMaterials(graph, editing) {
       projectState(editing.directory) ||
       (await request("project/open", { directory: editing.directory })).workflow.extra
         .turing_project;
-    await runMaterial(state, target, {}, onSuccess);
+    await runMaterial(state, target, {});
   });
 }
 async function saveCard(editing = editor(), task) {
@@ -369,6 +379,12 @@ async function editTemplate() {
   if (!name) return;
   await openTab(await loadDocument({ name }), name);
 }
+
+async function saveCurrentCard() {
+  if (project()) throw Error("请在卡片工作流中保存卡片");
+  if (editor()) return app.extensionManager.command.execute("Comfy.SaveWorkflow");
+  return saveTemplate();
+}
 async function copyTemplate() {
   const name = await directoryPicker(false, { mode: "cards" });
   if (!name) return;
@@ -398,20 +414,13 @@ async function loadDocument(reference) {
   return data.workflow;
 }
 async function refreshMaterial(node, m, directory) {
-  m.selection = await request("selection", { directory, node: m.id });
-  materialChanged(directory, m.id, m.selection);
+  materialChanged(
+    directory,
+    m.id,
+    await request("selection", { directory, node: m.id }),
+  );
   const w = node.widgets.find((w) => w.name === m.id);
-  if (w)
-    setWidgetValue(
-      w,
-      m.kind === "text"
-        ? m.selection.text || ""
-        : m.selection.asset?.split("/").at(-1) || "",
-    );
   await w?.refreshMaterialList?.();
-  node.graph?.setDirtyCanvas(true, true);
-  const poster = node.posters?.get(m.id);
-  if (poster && m.selection.asset) poster.src = url(directory, m.selection.asset, true);
 }
 function select(node, m, content) {
   return mutateMaterial(node.properties.directory, m.id, () =>
@@ -446,23 +455,35 @@ async function importMedia(node, m, file) {
 async function run(node, m) {
   const state = { ...project() },
     trims = Object.assign({}, ...app.graph._nodes.map((n) => n.trims || {}));
-  if (!m)
-    return runCardMaterials(state, node.properties.instance, trims, (target) =>
-      refreshMaterial(
-        node,
-        node.properties.materials.find((material) => material.id === target),
-        state.directory,
-      ),
-    );
+  if (!m) return runCardMaterials(state, node.properties.instance, trims);
   await saveProject(state.directory);
-  await runMaterial(state, m.id, trims, () =>
-    refreshMaterial(node, m, state.directory),
-  );
+  await runMaterial(state, m.id, trims);
+}
+
+async function restoreProject(directory) {
+  const confirmed = await app.extensionManager.dialog.confirm({
+    title: "撤销未保存修改",
+    message:
+      "重新读取已保存的画布。未提交的参数、位置及连线将丢弃；已保存素材和正在执行的任务不受影响。",
+  });
+  if (!confirmed) return;
+  await Promise.all([
+    discardMaterialFailures(directory),
+    discardProjectFailures(directory),
+  ]);
+  await openProject(directory);
 }
 app.registerExtension({
   name: "TuringUtils.MaterialWorkspace",
   registerCustomNodes() {
-    registerCanvasNodes({ editCard, select, importMedia, run, copyCard });
+    registerCanvasNodes({
+      editCard,
+      select,
+      importMedia,
+      run,
+      copyCard,
+      restoreProject,
+    });
   },
   commands: [
     {
@@ -514,7 +535,7 @@ app.registerExtension({
     {
       id: "Turing.MaterialWorkspace.SaveTemplate",
       label: "保存卡片",
-      function: action(saveTemplate),
+      function: action(saveCurrentCard),
     },
   ],
   menuCommands: [
@@ -547,17 +568,23 @@ app.registerExtension({
     materialChanges.addEventListener("select", ({ detail }) => {
       const { directory, target, selection } = detail;
       for (const tab of app.extensionManager.workflow.openWorkflows) {
+        if (
+          tab === app.extensionManager.workflow.activeWorkflow &&
+          project()?.directory === directory
+        )
+          continue;
         const graph = tab.activeState;
         if (graph?.extra?.turing_project?.directory !== directory) continue;
         for (const n of graph.nodes) {
           const material = n.properties?.materials?.find((m) => m.id === target);
-          if (material) material.selection = selection;
+          if (material && selectionChanged(material.selection, selection))
+            material.selection = selection;
         }
       }
       if (project()?.directory !== directory) return;
       for (const node of app.rootGraph._nodes) {
         const m = node.properties.materials?.find((m) => m.id === target);
-        if (!m) continue;
+        if (!m || !selectionChanged(m.selection, selection)) continue;
         m.selection = selection;
         node.releasePlayer?.();
         const widget = node.widgets.find((w) => w.name === target);
@@ -568,6 +595,7 @@ app.registerExtension({
               ? selection.text || ""
               : selection.asset?.split("/").at(-1) || "",
           );
+        widget?.refreshMaterialList?.().catch(report);
         const poster = node.posters?.get(target);
         if (poster) {
           if (selection.asset) poster.src = url(directory, selection.asset, true);
@@ -608,6 +636,18 @@ app.registerExtension({
           },
         },
         { content: "保存项目", callback: action(saveProject) },
+        {
+          content: "执行选中卡片",
+          callback: action(() =>
+            runSelectedCards(
+              { ...project() },
+              Object.values(this.selected_nodes || {})
+                .filter((n) => n.type === CARD)
+                .map((n) => n.properties.instance),
+              Object.assign({}, ...app.rootGraph._nodes.map((n) => n.trims || {})),
+            ),
+          ),
+        },
         ...defaults.slice(1),
       ];
     };
@@ -632,5 +672,7 @@ app.registerExtension({
       for (const node of app.rootGraph._nodes)
         if (node.type === CARD) node.copyIfNeeded();
     if (editor()?.id) restoreEditor(app.rootGraph, editor());
+    const directory = project()?.directory || editor()?.directory;
+    if (directory) restoreTasks(directory).catch(report);
   },
 });

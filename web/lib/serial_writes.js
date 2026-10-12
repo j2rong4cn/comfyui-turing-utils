@@ -33,12 +33,21 @@ export class SerialWrites {
     if (this.errors.size) throw this.errors.values().next().value;
   }
 
-  async settle() {
+  async drain() {
     let tail;
     do {
       tail = this.tail;
       await tail;
     } while (tail !== this.tail);
+  }
+
+  async settle() {
+    await this.drain();
     this.assertSaved();
+  }
+
+  async discardFailures() {
+    await this.drain();
+    this.errors.clear();
   }
 }

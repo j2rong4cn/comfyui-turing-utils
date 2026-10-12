@@ -16,12 +16,10 @@ try {
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18187");
   await selectRenderer(page);
   const fixture = await page.evaluate(async () => {
-    const workspace = await import(
-      "/extensions/comfyui-turing-utils/material_workspace.js"
-    );
-    const { importAsset } = await import(
-      "/extensions/comfyui-turing-utils/workspace/material_selection.js"
-    );
+    const workspace =
+      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const { importAsset } =
+      await import("/extensions/comfyui-turing-utils/workspace/material_selection.js");
     const directory = `picker-${Date.now()}`;
     await workspace.request("directory/create", { directory });
     await workspace.openProject(directory, true);
@@ -112,7 +110,7 @@ try {
     await widget.refreshMaterialList();
     if (widget.value !== assets[1].split("/").at(-1))
       throw Error("Selection was not restored");
-    if (widget.options.items.length !== 2)
+    if (widget.options.items.filter((item) => item.preview_url).length !== 2)
       throw Error("History changed after reconfigure");
     await card.widgets.find((widget) => widget.name === "编辑工作流").callback();
     const materialNode = app.graph._nodes.find(
@@ -120,7 +118,11 @@ try {
     );
     const file = materialNode.widgets.find((widget) => widget.name === "file");
     await file.refreshMaterialList();
-    if (!file.options.items.every((item) => item.preview_url.includes(directory)))
+    if (
+      !file.options.items
+        .filter((item) => item.preview_url)
+        .every((item) => item.preview_url.includes(directory))
+    )
       throw Error("Project editor leaks global media");
     if (file.serializeValue() !== `${directory}/${assets[1]} [output]`)
       throw Error("Preview identity replaced the persistent filename");
@@ -156,9 +158,8 @@ try {
   }
   const media = await page.evaluate(async () => {
     const { workspace, directory } = pickerFixture;
-    const { importAsset } = await import(
-      "/extensions/comfyui-turing-utils/workspace/material_selection.js"
-    );
+    const { importAsset } =
+      await import("/extensions/comfyui-turing-utils/workspace/material_selection.js");
     await workspace.openProject(directory);
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = 32;

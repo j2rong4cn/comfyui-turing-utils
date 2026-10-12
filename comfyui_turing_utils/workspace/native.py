@@ -41,7 +41,13 @@ def project_workflow(project):
                     "flags": {},
                     "order": i - 1,
                     "mode": 0,
-                    "properties": {"instance": card["id"]},
+                    "properties": {
+                        "instance": card["id"],
+                        "port_ids": {
+                            "inputs": [p["id"] for p in card["ports"]],
+                            "outputs": [p["id"] for p in card["outputs"]],
+                        },
+                    },
                 }
             )
         # Runtime descriptors are re-read on opening; they are not a second editable graph.
@@ -82,7 +88,7 @@ def save_layout(project, workflow, revision):
                 "A Canvas project needs one project node and Canvas cards only"
             )
         cards = {c["id"]: c for c in canvas["cards"]}
-        layout, node_ids = {}, {}
+        layout, node_ids, port_ids = {}, {}, {}
         for node in nodes:
             if node["type"] != CARD:
                 continue
@@ -100,6 +106,7 @@ def save_layout(project, workflow, revision):
                     raise ValueError("Invalid node geometry")
             layout[identity] = {"pos": node["pos"], "size": node["size"]}
             node_ids[node["id"]] = identity
+            port_ids[identity] = node["properties"].get("port_ids")
         interfaces = {}
 
         def interface(identity):
@@ -116,6 +123,7 @@ def save_layout(project, workflow, revision):
                     ]
                     outputs.append(
                         {
+                            "id": port["id"],
                             "type": port["type"],
                             "source": f"{identity}:{stubs[source]}",
                             "slot": slot,
@@ -126,7 +134,7 @@ def save_layout(project, workflow, revision):
 
         connections, targets = [], set()
         for link in workflow.get("links", []):
-            _, source_id, source_slot, target_id, target_slot, _ = link
+            _, source_id, source_slot, target_id, target_slot, link_type = link
             source, target = node_ids[source_id], node_ids[target_id]
             if (
                 type(source_slot) is not int
@@ -135,14 +143,32 @@ def save_layout(project, workflow, revision):
                 or target_slot < 0
             ):
                 raise ValueError("Invalid material slot")
-            if (target_id, target_slot) in targets:
-                raise ValueError("A card input can have only one source")
-            targets.add((target_id, target_slot))
             outputs, inputs = interface(source)[1], interface(target)[0]
-            if source_slot >= len(outputs) or target_slot >= len(inputs):
+            source_ports, target_ports = port_ids[source], port_ids[target]
+            if not source_ports or not target_ports:
+                raise ValueError(
+                    "Card sockets lack stable IDs; reopen this Canvas before saving"
+                )
+            if source_slot >= len(source_ports["outputs"]) or target_slot >= len(
+                target_ports["inputs"]
+            ):
                 raise ValueError("Unknown material slot")
-            out, port = outputs[source_slot], inputs[target_slot]
-            if out["type"] != port["type"]:
+            out = next(
+                (p for p in outputs if p["id"] == source_ports["outputs"][source_slot]),
+                None,
+            )
+            port = next(
+                (p for p in inputs if p["id"] == target_ports["inputs"][target_slot]),
+                None,
+            )
+            if out is None or port is None:
+                raise ValueError(
+                    "Card interface changed; reopen this Canvas before saving"
+                )
+            if (target, port["id"]) in targets:
+                raise ValueError("A card input can have only one source")
+            targets.add((target, port["id"]))
+            if out["type"] != port["type"] or link_type != port["type"]:
                 raise ValueError("Connected material types differ")
             connections.append(
                 {
@@ -150,8 +176,31 @@ def save_layout(project, workflow, revision):
                     "slot": out["slot"],
                     "target": target,
                     "port": port["id"],
+                    "type": port["type"],
                 }
             )
+        # Broken cards cannot expose their sockets. An unrelated layout save
+        # must retain those invisible bindings, unless a card was deleted or
+        # that exact destination was explicitly connected to another source.
+        broken = set()
+        for connection in canvas.get("connections", []):
+            source = connection["source"].split(":", 1)[0]
+            target = connection["target"]
+            if (
+                source not in layout
+                or target not in layout
+                or (target, connection["port"]) in targets
+            ):
+                continue
+            for identity in (source, target):
+                if identity in broken:
+                    continue
+                try:
+                    interface(identity)
+                except (ValueError, OSError):
+                    broken.add(identity)
+            if source in broken or target in broken:
+                connections.append(copy.deepcopy(connection))
         canvas["cards"] = [c for c in canvas["cards"] if c["id"] in layout]
         canvas["layout"], canvas["connections"] = layout, connections
         canvas["view"] = copy.deepcopy(workflow.get("extra", {}).get("ds", {}))

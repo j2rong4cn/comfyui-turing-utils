@@ -34,6 +34,8 @@ class PortTypes(tuple):
 
 
 def parse_ports(value, *, endpoint=INPUTS):
+    if not isinstance(value, str):
+        raise ValueError("Endpoint ports must be a JSON string")
     result = json.loads(value)
     if not isinstance(result, list):
         raise ValueError("Endpoint ports must be a list")

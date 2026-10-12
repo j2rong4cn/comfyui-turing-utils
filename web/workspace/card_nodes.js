@@ -16,7 +16,14 @@ import {
   setProjectStatus,
 } from "./project_state.js";
 
-export function registerCanvasNodes({ editCard, select, importMedia, run, copyCard }) {
+export function registerCanvasNodes({
+  editCard,
+  select,
+  importMedia,
+  run,
+  copyCard,
+  restoreProject,
+}) {
   const instances = new WeakMap();
   class ProjectNode extends LiteGraph.LGraphNode {
     constructor() {
@@ -24,6 +31,7 @@ export function registerCanvasNodes({ editCard, select, importMedia, run, copyCa
       this.flags = { pinned: true };
       this.clonable = false;
       button(this, "保存项目", saveProject);
+      button(this, "撤销未保存修改", () => restoreProject(this.properties.directory));
     }
     onConfigure() {
       this.flags.pinned = true;
@@ -157,6 +165,15 @@ export function registerCanvasNodes({ editCard, select, importMedia, run, copyCa
       }
       const card = this.properties.card;
       if (!card) return;
+      if (card.error) {
+        const error = this.addWidget("text", "卡片错误", card.error, () => {}, {
+          serialize: false,
+        });
+        error.disabled = true;
+        button(this, "编辑工作流", () => editCard(this));
+        this.setSize(this.computeSize());
+        return;
+      }
       const materials = new Map(this.properties.materials.map((m) => [m.id, m]));
       for (const item of card.layout) {
         if (item.material) {
@@ -164,7 +181,7 @@ export function registerCanvasNodes({ editCard, select, importMedia, run, copyCa
           continue;
         }
         const f = item.field;
-        field(
+        const widget = field(
           this,
           f.input,
           f.type,
@@ -185,6 +202,11 @@ export function registerCanvasNodes({ editCard, select, importMedia, run, copyCa
           },
           { ...f.options, label: f.label },
         );
+        if (f.connected) {
+          widget.disabled = true;
+          if (widget.element) widget.element.readOnly = true;
+          widget.label = `${f.label} · 已连接`;
+        }
       }
       button(this, "编辑工作流", () => editCard(this));
       button(this, "执行全部桩节点", () => run(this));

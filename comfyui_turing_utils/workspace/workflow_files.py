@@ -11,6 +11,8 @@ import uuid
 
 from .cards import describe, project_content
 from .parameters import is_parameter, parameter_default, validate_parameter
+from .endpoints import INPUTS, parse_ports
+from .protocol import MATERIAL_TYPES
 
 LOCK = threading.RLock()
 KEY = "turing_card"
@@ -38,6 +40,60 @@ def digest(workflow):
     ).hexdigest()
 
 
+def commit_project(root, writes):
+    """One recoverable intent for a card file plus its project manifest."""
+    root = Path(root)
+    recover_commit(root)
+    entries = []
+    for path, value in writes:
+        path = Path(path)
+        before = (
+            hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+        )
+        entries.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "before": before,
+                "value": value,
+            }
+        )
+    atomic_json(root / ".canvas-commit.json", entries)
+    recover_commit(root)
+
+
+def recover_commit(root):
+    root = Path(root).resolve()
+    journal = root / ".canvas-commit.json"
+    if not journal.exists():
+        return
+    with LOCK:
+        entries = json.loads(journal.read_text(encoding="utf-8"))
+        prepared = []
+        for entry in entries:
+            name = entry["path"]
+            if name != "canvas.json" and not re.fullmatch(
+                r"cards/[a-f0-9]{32}/workflow\.json", name
+            ):
+                raise ValueError("Invalid Canvas commit destination")
+            path = (root / name).resolve()
+            if not path.is_relative_to(root):
+                raise ValueError("Canvas commit escapes its project")
+            content = json.dumps(entry["value"], ensure_ascii=False, indent=2).encode()
+            after = hashlib.sha256(content).hexdigest()
+            current = (
+                hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+            )
+            if current not in {entry["before"], after}:
+                raise ValueError(
+                    "File changed during an incomplete Canvas save; commit journal retained"
+                )
+            prepared.append((path, entry["value"], current != after))
+        for path, value, changed in prepared:
+            if changed:
+                atomic_json(path, value)
+        journal.unlink()
+
+
 def pack(workflow, prompt):
     describe(prompt)
     result = copy.deepcopy(workflow)
@@ -51,16 +107,22 @@ def pack(workflow, prompt):
 
 
 def unpack(workflow):
+    if not isinstance(workflow, dict) or not isinstance(
+        workflow.get("extra", {}), dict
+    ):
+        raise ValueError("Card workflow must be a JSON object with object metadata")
     data = workflow.get("extra", {}).get(KEY)
-    if not data or data.get("version") != 2:
+    if not isinstance(data, dict) or data.get("version") != 2:
         raise ValueError(
             "Open this workflow in ComfyUI and save it as a Canvas card first"
         )
-    if data["source_hash"] != digest(workflow):
+    if not isinstance(data.get("overrides", {}), dict):
+        raise ValueError("Card parameter overrides must be an object")
+    if data.get("source_hash") != digest(workflow):
         raise ValueError(
             "Workflow was edited externally; open it and Save (Ctrl+S) to refresh the execution graph"
         )
-    interface = describe(data["prompt"])
+    interface = describe(data.get("prompt"))
     return data, interface
 
 
@@ -83,6 +145,8 @@ def card_path(root, identity):
 
 
 def load_json(path):
+    if path.name == "canvas.json":
+        recover_commit(path.parent)
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -93,7 +157,6 @@ def add_instance(root, workflow, title):
         path = Path(root) / "canvas.json"
         canvas = load_json(path)
         identity = uuid.uuid4().hex
-        atomic_json(card_path(root, identity), workflow)
         canvas["cards"].append(
             {
                 "id": identity,
@@ -109,7 +172,7 @@ def add_instance(root, workflow, title):
             }
         )
         canvas["revision"] += 1
-        atomic_json(path, canvas)
+        commit_project(root, [(card_path(root, identity), workflow), (path, canvas)])
         return identity
 
 
@@ -138,32 +201,79 @@ def copy_instance(root, source, identity, revision):
                     **copy.deepcopy(selected),
                     "revision": 1,
                 }
-        atomic_json(destination, workflow)
         canvas["revision"] += 1
-        atomic_json(path, canvas)
+        commit_project(root, [(destination, workflow), (path, canvas)])
         return identity
 
 
 def read_instance(root, identity):
-    path = card_path(root, identity)
-    workflow = load_json(path)
-    canvas = load_json(Path(root) / "canvas.json")
-    instance = next(c for c in canvas["cards"] if c["id"] == identity)
-    parameters = {
-        **workflow.get("extra", {}).get(KEY, {}).get("overrides", {}),
-        **instance.get("parameters", {}),
-    }
-    # An externally edited source must remain repairable in the editor. Its
-    # stale API graph cannot safely decide which new source nodes to remove.
-    snapshot = workflow.get("extra", {}).get(KEY, {})
-    clean = snapshot.get("source_hash") == digest(workflow)
-    return {
-        "workflow": project_copy(workflow) if clean else workflow,
-        "revision": hashlib.sha256(
-            path.read_bytes() + json.dumps(parameters, sort_keys=True).encode()
-        ).hexdigest(),
-        "parameters": parameters,
-    }
+    with LOCK:
+        recover_commit(root)
+        path = card_path(root, identity)
+        content = path.read_bytes()
+        workflow = json.loads(content)
+        if not isinstance(workflow, dict) or not isinstance(
+            workflow.get("extra", {}), dict
+        ):
+            raise ValueError("Card workflow is not an editable JSON object")
+        canvas = load_json(Path(root) / "canvas.json")
+        instance = next((c for c in canvas["cards"] if c["id"] == identity), None)
+        if instance is None:
+            raise ValueError("The card no longer belongs to this Canvas")
+        snapshot = workflow.get("extra", {}).get(KEY, {})
+        overrides = snapshot.get("overrides", {}) if isinstance(snapshot, dict) else {}
+        parameters = {
+            **(overrides if isinstance(overrides, dict) else {}),
+            **instance.get("parameters", {}),
+        }
+        # The editor opens native content even when its derived API metadata is
+        # damaged. Only a verified graph may prune external test branches.
+        try:
+            unpack(workflow)
+        except ValueError:
+            clean = False
+        else:
+            clean = True
+        return {
+            "workflow": project_copy(workflow) if clean else workflow,
+            "revision": hashlib.sha256(
+                content + json.dumps(parameters, sort_keys=True).encode()
+            ).hexdigest(),
+            "parameters": parameters,
+        }
+
+
+def _saved_contract(workflow):
+    try:
+        data, interface = unpack(workflow)
+    except ValueError:
+        ports, materials = {}, {}
+        nodes = [*workflow.get("nodes", [])]
+        for graph in workflow.get("definitions", {}).get("subgraphs", []):
+            nodes.extend(graph.get("nodes", []))
+        kinds = {"TuringMaterial" + kind.title(): kind for kind in MATERIAL_TYPES}
+        for node in nodes:
+            values = node.get("widgets_values_named", {})
+            positional = node.get("widgets_values", [])
+            if node.get("type") == INPUTS:
+                value = values.get("ports", positional[0] if positional else "[]")
+                try:
+                    ports.update({p["id"]: p["type"] for p in parse_ports(value)})
+                except ValueError:
+                    pass
+            kind = kinds.get(node.get("type"))
+            if kind:
+                stub = values.get("stub_id", positional[0] if positional else None)
+                if isinstance(stub, str):
+                    materials[stub] = "TuringMaterial" + kind.title()
+        return ports, materials
+    return (
+        {p["id"]: p["type"] for p in interface["inputs"]},
+        {
+            stub: data["prompt"][node]["class_type"]
+            for stub, node in interface["stubs"].items()
+        },
+    )
 
 
 def save_instance(root, identity, workflow, prompt, revision, parameters=None):
@@ -174,14 +284,11 @@ def save_instance(root, identity, workflow, prompt, revision, parameters=None):
         result = project_copy(pack(workflow, prompt))
         canvas = load_json(Path(root) / "canvas.json")
         _, interface = unpack(result)
-        previous = current["workflow"]["extra"][KEY]
-        old_interface = describe(previous["prompt"])
+        old_ports, old_materials = _saved_contract(current["workflow"])
         instance = next(c for c in canvas["cards"] if c["id"] == identity)
         ports = {p["id"]: p for p in interface["inputs"] if is_parameter(p)}
         instance["parameters"] = {
-            key: value
-            for key, value in current["parameters"].items()
-            if key in ports
+            key: value for key, value in current["parameters"].items() if key in ports
         }
         for p in interface["inputs"]:
             if p["kind"] == "parameter":
@@ -192,8 +299,8 @@ def save_instance(root, identity, workflow, prompt, revision, parameters=None):
             instance["parameters"][key] = value
         for key, value in instance["parameters"].items():
             validate_parameter(ports[key], value)
-        for stub in old_interface["stubs"].keys() & interface["stubs"].keys():
-            old = previous["prompt"][old_interface["stubs"][stub]]["class_type"]
+        for stub in old_materials.keys() & interface["stubs"].keys():
+            old = old_materials[stub]
             if old != prompt[interface["stubs"][stub]]["class_type"]:
                 raise ValueError("A material's stable ID cannot change media type")
         exports = {
@@ -210,10 +317,24 @@ def save_instance(root, identity, workflow, prompt, revision, parameters=None):
                     ),
                     None,
                 )
-                old = next(
-                    p for p in old_interface["inputs"] if p["id"] == connection["port"]
-                )
-                if port is None or port["type"] != old["type"]:
+                expected = old_ports.get(connection["port"]) or connection.get("type")
+                if expected is None:
+                    source_id, stub = connection["source"].split(":", 1)
+                    source_types = _saved_contract(
+                        load_json(card_path(root, source_id))
+                    )[1]
+                    source_class = source_types.get(stub)
+                    kind = next(
+                        (
+                            kind
+                            for kind in MATERIAL_TYPES
+                            if source_class == "TuringMaterial" + kind.title()
+                        ),
+                        None,
+                    )
+                    if kind:
+                        expected = MATERIAL_TYPES[kind][connection.get("slot", 0)]
+                if port is None or expected is None or port["type"] != expected:
                     raise ValueError(
                         "Disconnect the card input before deleting it or changing its type"
                     )
@@ -226,9 +347,11 @@ def save_instance(root, identity, workflow, prompt, revision, parameters=None):
                     raise ValueError(
                         "Disconnect the card output before removing its material export"
                     )
-        atomic_json(card_path(root, identity), result)
         canvas["revision"] += 1
-        atomic_json(Path(root) / "canvas.json", canvas)
+        commit_project(
+            root,
+            [(card_path(root, identity), result), (Path(root) / "canvas.json", canvas)],
+        )
         return read_instance(root, identity)["revision"]
 
 
@@ -250,7 +373,9 @@ def patch(root, revision, changes):
                 if instance is None:
                     raise ValueError("Unknown card instance")
                 if identity not in interfaces:
-                    _, interfaces[identity] = unpack(load_json(card_path(root, identity)))
+                    _, interfaces[identity] = unpack(
+                        load_json(card_path(root, identity))
+                    )
                 interface = interfaces[identity]
                 port = next(
                     (
