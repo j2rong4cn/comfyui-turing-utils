@@ -3,9 +3,34 @@
 import math
 import uuid
 
-from .compiler import MissingMaterial, compile_segment
+from .compiler import MissingMaterial, compile_segment, is_link, material_order
 from .execution import fresh_type
 from .store import Conflict
+from .value_controls import randomize_inputs
+
+
+def plan_card(project, identity, revision):
+    document = project.document(card_ids={identity}, execution=True)
+    if document["revision"] != revision:
+        raise Conflict("Workflow changed; reload before running")
+    if not document["cards"]:
+        raise ValueError("The card no longer belongs to this Canvas")
+    card = document["cards"][0]
+    if "error" in card:
+        raise ValueError(card["error"])
+    prompt = document["prompt"]
+    ordered = material_order(prompt, card["materials"])
+    # Loader-only stubs already persist their selected file/text. They take part
+    # in dependency ordering but have no computation to submit to /prompt.
+    targets = [
+        key
+        for key in ordered
+        if any(
+            is_link(prompt[key]["inputs"].get(name))
+            for name in ("value", "images", "text")
+        )
+    ]
+    return {"revision": revision, "targets": targets}
 
 
 def compile_task(project, target, revision, trims=None):
@@ -40,5 +65,6 @@ def compile_task(project, target, revision, trims=None):
         # The UI runs this boundary through the same task API, then recompiles
         # from current selections. No partial graph or prepared run is retained.
         return {"dependency": missing.target}
+    controls = randomize_inputs(prompt, document["controls"])
     project.begin_run(target, selection_revision, run_id)
-    return {"prompt": prompt, "run_id": run_id, "target": target}
+    return {"prompt": prompt, "run_id": run_id, "target": target, "controls": controls}

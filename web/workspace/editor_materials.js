@@ -109,6 +109,9 @@ export function installProjectMaterials(graph, editing, run) {
             .items,
         selected: () => state.selection.asset,
         select: action((asset) => select({ asset })),
+        kind,
+        preview: (asset) =>
+          kind === "audio" ? "" : url(editing.directory, asset, true),
       }).catch(report);
       const upload = action((file) =>
         mutateMaterial(editing.directory, target, async () => {
@@ -117,7 +120,12 @@ export function installProjectMaterials(graph, editing, run) {
         }),
       );
       const uploadWidget = node.widgets.find((w) => w.name === "upload");
-      if (uploadWidget) uploadWidget.callback = () => chooseUpload(kind, upload);
+      if (uploadWidget) {
+        uploadWidget.callback = () => chooseUpload(kind, upload);
+        // The project's own import path must remain available in Nodes 2.0;
+        // the native dropdown upload writes to global input instead.
+        uploadWidget.options.canvasOnly = false;
+      }
       node.onDragOver = () => true;
       node.onDragDrop = (event) => {
         const file = event.dataTransfer?.files?.[0];

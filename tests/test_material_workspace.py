@@ -17,8 +17,8 @@ from comfy_api.latest import io
 from comfy_execution.caching import CacheKeySetInputSignature
 from comfy_execution.graph import DynamicPrompt
 from execution import IsChangedCache, validate_prompt, _async_map_node_over_list
-from comfyui_turing_utils.workspace.compiler import compile_segment
-from comfyui_turing_utils.workspace.tasks import compile_task
+from comfyui_turing_utils.workspace.compiler import compile_segment, material_order
+from comfyui_turing_utils.workspace.tasks import compile_task, plan_card
 from comfyui_turing_utils.workspace.nodes import PUBLIC_NODES, INTERNAL_NODES
 from comfyui_turing_utils.workspace.execution import fresh_type
 from comfyui_turing_utils.workspace.materials import material_path, read_selected
@@ -38,6 +38,10 @@ from comfyui_turing_utils.workspace.editor import select_material
 from comfyui_turing_utils.workspace import workflow_files, projection
 from comfyui_turing_utils.workspace.templates import material_template, new_card_template
 from comfyui_turing_utils.workspace.native import project_workflow, save_layout
+from comfyui_turing_utils.workspace.value_controls import (
+    workflow_controls,
+    randomize_inputs,
+)
 from comfyui_turing_utils.workspace.materials import material_files
 import torch
 
@@ -68,7 +72,212 @@ class AddTextV3(io.ComfyNode):
         return io.NodeOutput(text + "?")
 
 
+class SeedText:
+    FUNCTION = "run"
+    RETURN_TYPES = ("STRING",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 1000,
+                        "control_after_generate": True,
+                    },
+                )
+            }
+        }
+
+    def run(self, seed):
+        return (str(seed),)
+
+
 class WorkspaceTest(unittest.TestCase):
+    def test_card_plan_orders_all_computations_and_reuses_loader_only_material(self):
+        workflow, prompt = material_template(("text", "text", "text"))
+        prompt["3"]["inputs"]["text"] = ["8", 0]
+        prompt["4"]["inputs"]["text"] = ["7", 0]
+        prompt["5"]["inputs"]["text"] = "source"
+        prompt["7"] = dict(class_type="WorkspaceTest", inputs={"text": ["5", 0]})
+        prompt["8"] = dict(class_type="WorkspaceTest", inputs={"text": ["4", 0]})
+        workflow["nodes"].extend(dict(id=key, type="WorkspaceTest") for key in (7, 8))
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, prompt), "all"
+        )
+        targets = [
+            identity + ":" + prompt[key]["inputs"]["stub_id"] for key in ("4", "3")
+        ]
+        self.project.select(targets[0], {"text": "previous result"})
+        revision = self.project.document()["revision"]
+        self.assertEqual(
+            plan_card(self.project, identity, revision),
+            {"revision": revision, "targets": targets},
+        )
+        with self.assertRaises(Conflict):
+            plan_card(self.project, identity, revision - 1)
+        with self.assertRaisesRegex(ValueError, "no longer belongs"):
+            plan_card(self.project, "missing", revision)
+        with self.project.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM runs").fetchone()[0], 0)
+
+    def test_material_order_handles_nested_ids_external_boundaries_and_cycles(self):
+        prompt = {
+            "card:stub-b": dict(
+                class_type="TuringMaterialText", inputs={"text": ["card:node:9:7", 0]}
+            ),
+            "card:stub-a": dict(
+                class_type="TuringMaterialText", inputs={"text": ["other:stub", 0]}
+            ),
+            "card:stub-c": dict(
+                class_type="TuringMaterialText", inputs={"text": "source"}
+            ),
+            "card:node:9:7": dict(
+                class_type="WorkspaceTest", inputs={"text": ["card:stub-a", 0]}
+            ),
+            "other:stub": dict(class_type="TuringMaterialText", inputs={}),
+        }
+        targets = ["card:stub-b", "card:stub-a", "card:stub-c"]
+        self.assertEqual(
+            material_order(prompt, targets),
+            ["card:stub-a", "card:stub-b", "card:stub-c"],
+        )
+        prompt["card:stub-a"]["inputs"]["text"] = ["card:stub-b", 0]
+        with self.assertRaisesRegex(ValueError, "素材依赖存在循环"):
+            material_order(prompt, targets)
+        prompt["card:stub-a"]["inputs"]["text"] = "source"
+        prompt["card:node:9:7"]["inputs"]["text"] = ["card:node:9:7", 0]
+        with self.assertRaisesRegex(ValueError, "计算连线存在循环"):
+            material_order(prompt, targets)
+
+    def test_randomize_control_nested_ids_and_connected_inputs(self):
+        workflow = {
+            "nodes": [dict(id=9, type="nested")],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "nested",
+                        "nodes": [
+                            dict(
+                                id=identity,
+                                type="WorkspaceSeedText",
+                                widgets_values_named={
+                                    "seed": 0,
+                                    "control_after_generate": "randomize",
+                                },
+                            )
+                            for identity in (5, 6)
+                        ],
+                    }
+                ]
+            },
+        }
+        prompt = {
+            "9:5": dict(class_type="WorkspaceSeedText", inputs={"seed": 0}),
+            "9:6": dict(class_type="WorkspaceSeedText", inputs={"seed": ["9:5", 0]}),
+        }
+        identities = {key: "instance:node:" + key for key in prompt}
+        controls = workflow_controls(workflow, prompt, identities)
+        self.assertEqual(set(controls), {"instance:node:9:5"})
+        with mock.patch(
+            "comfyui_turing_utils.workspace.value_controls.secrets.randbelow",
+            return_value=123,
+        ) as random:
+            self.assertEqual(randomize_inputs({}, controls), {})
+            random.assert_not_called()
+            compiled = {"instance:node:9:5": copy.deepcopy(prompt["9:5"])}
+            self.assertEqual(
+                randomize_inputs(compiled, controls),
+                {"instance:node:9:5": {"seed": 123}},
+            )
+
+    def test_randomize_control_names_float_steps_and_native_numeric_cap(self):
+        class NumericControls:
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {
+                    "required": {
+                        "scale": (
+                            "FLOAT",
+                            {"min": -1, "max": 1, "step": 0.25, "control_prefix": "scale"},
+                        ),
+                        "seed": (
+                            "INT",
+                            {"min": 0, "max": 2**64 - 1, "control_after_generate": "roll"},
+                        ),
+                        "choice": (["randomize", "fixed"], {}),
+                    }
+                }
+
+        workflow = {
+            "nodes": [
+                dict(
+                    id=5,
+                    type="NumericControls",
+                    widgets_values_named={
+                        "scale": 0,
+                        "scale control_after_generate": "randomize",
+                        "seed": 0,
+                        "roll #2": "randomize",
+                        "choice": "randomize",
+                        "control_after_generate": "randomize",
+                    },
+                )
+            ]
+        }
+        prompt = {"5": dict(class_type="NumericControls", inputs={"scale": 0, "seed": 0})}
+        with mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, NumericControls=NumericControls):
+            controls = workflow_controls(workflow, prompt, {"5": "5"})
+        self.assertEqual(set(controls["5"]), {"scale", "seed"})
+        self.assertEqual(controls["5"]["seed"]["max"], 2**50)
+        with mock.patch(
+            "comfyui_turing_utils.workspace.value_controls.secrets.randbelow",
+            side_effect=[3, 5],
+        ) as random:
+            self.assertEqual(randomize_inputs(prompt, controls), {"5": {"scale": -0.25, "seed": 5}})
+            self.assertEqual(random.call_args_list, [mock.call(8), mock.call(2**50)])
+
+    def test_card_randomize_is_per_actual_segment_and_saved_in_execution_prompt(self):
+        workflow, graph = material_template(("text", "text"))
+        graph["5"] = {"class_type": "WorkspaceSeedText", "inputs": {"seed": 0}}
+        graph["6"] = {"class_type": "WorkspaceSeedText", "inputs": {"seed": 42}}
+        graph["3"]["inputs"]["text"] = ["5", 0]
+        graph["4"]["inputs"]["text"] = ["6", 0]
+        workflow["nodes"].extend(
+            dict(
+                id=node_id,
+                type="WorkspaceSeedText",
+                widgets_values_named={"seed": value, "control_after_generate": mode},
+            )
+            for node_id, value, mode in ((5, 0, "randomize"), (6, 42, "fixed"))
+        )
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "seed"
+        )
+        target = identity + ":" + graph["3"]["inputs"]["stub_id"]
+        fixed = identity + ":" + graph["4"]["inputs"]["stub_id"]
+        path = workflow_files.card_path(self.project.root, identity)
+        before = path.read_bytes()
+        revision = self.project.document()["revision"]
+        with mock.patch(
+            "comfyui_turing_utils.workspace.value_controls.secrets.randbelow",
+            side_effect=[123, 456],
+        ) as random:
+            first = compile_task(self.project, target, revision)
+            second = compile_task(self.project, target, revision)
+            kept = compile_task(self.project, fixed, revision)
+            self.assertEqual(random.call_count, 2)
+        key = identity + ":node:5"
+        self.assertEqual(first["prompt"][key]["inputs"]["seed"], 123)
+        self.assertEqual(second["prompt"][key]["inputs"]["seed"], 456)
+        self.assertEqual(second["controls"], {key: {"seed": 456}})
+        self.assertEqual(kept["prompt"][identity + ":node:6"]["inputs"]["seed"], 42)
+        self.assertEqual(kept["controls"], {})
+        self.assertEqual(path.read_bytes(), before)
+
     def test_position_only_material_keeps_computation_and_preview(self):
         workflow, graph = material_template(("text",))
         graph["2"]["inputs"] = {"ports": "[]"}
@@ -506,6 +715,49 @@ class WorkspaceTest(unittest.TestCase):
         graph["nodes"] = graph["nodes"][:1]
         save_layout(self.project, graph, result["revision"])
         self.assertTrue(workflow_files.card_path(self.project.root, identity).is_file())
+
+    def test_native_card_copy_has_independent_workflow_parameters_and_selections(self):
+        workflow, prompt = material_template(("text", "image"))
+        ports = json.loads(prompt["1"]["inputs"]["ports"])
+        ports.append(dict(
+            id="steps", slot=2, name="Steps", kind="parameter", type="INT", default=6,
+        ))
+        prompt["1"]["inputs"]["ports"] = json.dumps(ports)
+        source = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, prompt), "original"
+        )
+        original = workflow_files.card_path(self.project.root, source).read_bytes()
+        text = prompt["3"]["inputs"]["stub_id"]
+        image = prompt["4"]["inputs"]["stub_id"]
+        self.project.select(f"{source}:{text}", {"text": "selected text"})
+        asset, path = self.project.reserve("image", ".png", "selected")
+        path.write_bytes(b"media placeholder")
+        self.project.register(asset, "image", {})
+        self.project.select(f"{source}:{image}", {"asset": asset})
+        revision = self.project.document()["revision"]
+        revision = self.project.patch(revision, [dict(
+            type="input", id=f"{source}:parameters", name="steps", value=8,
+        )])
+        identity = "a" * 32
+        workflow_files.copy_instance(self.project.root, source, identity, revision)
+        copied = workflow_files.read_instance(self.project.root, identity)
+        self.assertEqual(copied["parameters"], {"steps": 8})
+        self.assertEqual(workflow_files.card_path(self.project.root, identity).read_bytes(), original)
+        self.assertEqual(self.project.selections()[f"{identity}:{image}"]["asset"], asset)
+        self.project.select(f"{identity}:{text}", {"text": "copy only"})
+        self.assertEqual(self.project.selections()[f"{source}:{text}"]["text"], "selected text")
+        revision = self.project.document()["revision"]
+        self.project.patch(revision, [dict(
+            type="input", id=f"{identity}:parameters", name="steps", value=12,
+        )])
+        self.assertEqual(workflow_files.read_instance(self.project.root, source)["parameters"], {"steps": 8})
+        self.assertEqual(len(self.project.history("image")), 1)
+        before = (self.project.root / "canvas.json").read_bytes()
+        for bad_id, bad_revision in ((identity, revision + 1), ("invalid", revision + 1), ("b" * 32, revision)):
+            with self.assertRaises(ValueError):
+                workflow_files.copy_instance(self.project.root, source, bad_id, bad_revision)
+            self.assertEqual((self.project.root / "canvas.json").read_bytes(), before)
+        self.assertFalse(workflow_files.card_path(self.project.root, "b" * 32).exists())
 
     def test_open_does_not_initialize_invalid_project(self):
         root = Path(self.tmp.name) / "invalid"
@@ -960,6 +1212,7 @@ class WorkspaceTest(unittest.TestCase):
                 **INTERNAL_NODES,
                 "WorkspaceTest": AddText,
                 "WorkspaceTestV3": AddTextV3,
+                "WorkspaceSeedText": SeedText,
             },
         )
         self.mapping.start()

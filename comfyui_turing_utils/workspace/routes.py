@@ -12,9 +12,9 @@ from aiohttp import web
 from server import PromptServer
 
 from .compiler import MATERIALS
-from .tasks import compile_task
+from .tasks import compile_task, plan_card
 from .directories import list_directory, remove_empty_directory
-from .materials import material_files
+from .materials import material_files, material_path
 from .previews import PreviewStore
 from ..media.files import probe
 from .store import Conflict, Project, inside
@@ -128,6 +128,16 @@ def install_routes():
     async def files(request):
         return web.json_response(
             await asyncio.to_thread(material_files, request.match_info["kind"])
+        )
+
+    @endpoint("get", "/file-preview")
+    async def file_preview(request):
+        path = await asyncio.to_thread(material_path, request.query["file"])
+        if not folder_paths.filter_files_content_types([path.name], ["video"]):
+            raise ValueError("Expected a video material")
+        poster = await previews.get(path.parent, path.name, path, "video")
+        return web.FileResponse(
+            poster, headers={"X-Content-Type-Options": "nosniff"}
         )
 
     def template_path(request, name):
@@ -272,6 +282,26 @@ def install_routes():
 
         return web.json_response(await asyncio.to_thread(locked_add))
 
+    @endpoint("post", "/card/copy")
+    async def copy_card(request):
+        data = await request.json()
+
+        def copy():
+            with workflow_files.LOCK:
+                project = Project(data["directory"])
+                identity = workflow_files.copy_instance(
+                    project.root, data["source"], data["id"], data["revision"]
+                )
+                document = project.document(card_ids={identity})
+                return {
+                    "id": identity,
+                    "revision": document["revision"],
+                    "document": document,
+                    "statistics": project.statistics(),
+                }
+
+        return web.json_response(await asyncio.to_thread(copy))
+
     @endpoint("post", "/card/open")
     async def open_card(request):
         data = await request.json()
@@ -352,6 +382,17 @@ def install_routes():
         return web.json_response(
             await asyncio.to_thread(
                 lambda: Project(data["directory"]).selections().get(data["node"], {})
+            )
+        )
+
+    @endpoint("post", "/card/plan")
+    async def plan_card_request(request):
+        data = await request.json()
+        return web.json_response(
+            await asyncio.to_thread(
+                lambda: plan_card(
+                    Project(data["directory"]), data["id"], data["revision"]
+                )
             )
         )
 

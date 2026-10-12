@@ -12,9 +12,14 @@ import { expandDynamicParameters } from "./lib/dynamic_parameter.js";
 import { hideMetadataSocket, restoreMaterialWidgets } from "./lib/workflow_metadata.js";
 import { installEndpointDomEvents } from "./lib/endpoint_dom.js";
 import { setWidgetValue } from "./lib/parameter_widget.js";
+import { mediaComboPreview, materialComboDefinitions } from "./lib/material_combo.js";
+import { api } from "../../scripts/api.js";
 
 app.registerExtension({
   name: "TuringUtils.CanvasEndpoints",
+  beforeRegisterVueAppNodeDefs(definitions) {
+    materialComboDefinitions(definitions);
+  },
   setup() {
     installEndpointDomEvents(app);
     const graphToPrompt = app.graphToPrompt;
@@ -83,6 +88,26 @@ app.registerExtension({
           (w) => w.name === (kind === "audio" ? "audio" : "file"),
         );
         if (file.value === "Loading...") file.value = "";
+        mediaComboPreview(node, file, kind, (value) => {
+          if (kind === "audio") return "";
+          if (kind === "video")
+            return api.apiURL(
+              "/turing/workspace/file-preview?" + new URLSearchParams({ file: value }),
+            );
+          const match = value.match(/^(.*) \[(input|output)\]$/);
+          return api.apiURL(
+            "/view?" +
+              new URLSearchParams({
+                filename: match ? match[1] : value,
+                type: match ? match[2] : "input",
+                preview: "webp;75",
+              }),
+          );
+        });
+        if (kind === "video") {
+          const upload = node.widgets.find((widget) => widget.name === "upload");
+          if (upload) upload.options.canvasOnly = false;
+        }
         if (kind === "audio") {
           node.widgets.find((w) => w.name === "audioUI").element.preload = "none";
         }

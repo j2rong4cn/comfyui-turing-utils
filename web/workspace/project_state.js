@@ -95,6 +95,13 @@ export async function saveProjectLayout(directory) {
       // changed the native graph while this autosave was waiting.
       const current = snapshot(directory);
       if (!current) return { revision };
+      // A native paste is visible before its asynchronous instance copy is
+      // committed. Earlier queued autosaves must not submit that placeholder.
+      current.nodes = current.nodes.filter((n) => !n.properties.copySource);
+      const ids = new Set(current.nodes.map((n) => n.id));
+      current.links = current.links.filter(
+        (link) => ids.has(link[1]) && ids.has(link[3]),
+      );
       current.nodes = current.nodes.map((n) => ({
         id: n.id,
         type: n.type,

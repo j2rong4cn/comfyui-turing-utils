@@ -41,6 +41,59 @@ class MissingMaterial(ValueError):
         self.target = target
 
 
+def material_order(prompt, targets):
+    """Order card-local boundaries by dependencies through ordinary nodes.
+
+    Other cards remain saved boundaries. Interface order breaks traversal ties;
+    cycles fail before any task can publish partial results.
+    """
+    targets = list(targets)
+    local = set(targets)
+    dependencies, visiting = {}, set()
+
+    def sources(key):
+        node = prompt[key]
+        if node["class_type"] in MATERIALS:
+            return {key} if key in local else set()
+        if key in dependencies:
+            return dependencies[key]
+        if key in visiting:
+            raise ValueError("卡片内计算连线存在循环，无法按拓扑顺序执行")
+        visiting.add(key)
+        result = set()
+        for value in node.get("inputs", {}).values():
+            if is_link(value):
+                result.update(sources(value[0]))
+        visiting.remove(key)
+        dependencies[key] = result
+        return result
+
+    edges = {}
+    for key in targets:
+        edges[key] = set()
+        for value in prompt[key].get("inputs", {}).values():
+            if is_link(value):
+                edges[key].update(sources(value[0]))
+    order = {key: index for index, key in enumerate(targets)}
+    result, completed = [], set()
+
+    def visit(key):
+        if key in completed:
+            return
+        if key in visiting:
+            raise ValueError("卡片内素材依赖存在循环，无法按拓扑顺序执行")
+        visiting.add(key)
+        for source in sorted(edges[key], key=order.__getitem__):
+            visit(source)
+        visiting.remove(key)
+        completed.add(key)
+        result.append(key)
+
+    for key in targets:
+        visit(key)
+    return result
+
+
 def compile_segment(
     prompt, target, selections, directory, run_id, revision, fresh_type
 ):

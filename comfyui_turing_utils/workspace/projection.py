@@ -13,6 +13,7 @@ from .parameters import (
 )
 from .protocol import MATERIAL_TYPES
 from .workflow_files import card_path, load_json, unpack
+from .value_controls import workflow_controls
 
 
 def material_options(workflow, interface, identities):
@@ -43,7 +44,7 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         canvas = load_json(Path(root) / "canvas.json")
     if canvas.get("format") != 3:
         raise ValueError("Unsupported Canvas project format")
-    prompt, cards, connections = {}, [], {}
+    prompt, cards, connections, controls = {}, [], {}, {}
     for connection in canvas.get("connections", []):
         connections.setdefault(connection["target"], {})[connection["port"]] = (
             connection
@@ -99,6 +100,8 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                 if node not in identities
             }
         )
+        if execution:
+            controls.update(workflow_controls(workflow, data["prompt"], identities))
         for node_id, node in local.items():
             for value in node["inputs"].values():
                 if is_link(value):
@@ -192,4 +195,5 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         "workflow": {},
         "cards": cards,
         "format": 3,
+        **({"controls": controls} if execution else {}),
     }

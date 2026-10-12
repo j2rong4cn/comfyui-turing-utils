@@ -16,11 +16,13 @@ import {
   setProjectStatus,
 } from "./project_state.js";
 
-export function registerCanvasNodes({ editCard, select, importMedia, run }) {
+export function registerCanvasNodes({ editCard, select, importMedia, run, copyCard }) {
+  const instances = new WeakMap();
   class ProjectNode extends LiteGraph.LGraphNode {
     constructor() {
       super("Canvas Project");
       this.flags = { pinned: true };
+      this.clonable = false;
       button(this, "保存项目", saveProject);
     }
     onConfigure() {
@@ -87,10 +89,42 @@ export function registerCanvasNodes({ editCard, select, importMedia, run }) {
     constructor() {
       super("Canvas Card");
     }
+    clone() {
+      const node = super.clone();
+      if (node) {
+        const source = this.properties.copySource || {
+          directory: this.properties.directory,
+          id: this.properties.instance,
+        };
+        node.properties.copySource = { ...source };
+        node.properties.instance = source.id;
+      }
+      return node;
+    }
+    onAdded() {
+      this.copyIfNeeded();
+    }
+    copyIfNeeded() {
+      if (
+        !this.graph?.extra?.turing_project ||
+        !this.properties.instance ||
+        this.copyPending
+      )
+        return;
+      let registered = instances.get(this.graph);
+      if (!registered) instances.set(this.graph, (registered = new Map()));
+      const previous = registered.get(this.properties.instance);
+      const duplicate = previous && previous !== this && previous.graph === this.graph;
+      if (this.properties.copySource || duplicate) {
+        this.copyPending = true;
+        copyCard(this).catch(report);
+      } else registered.set(this.properties.instance, this);
+    }
     onDragOver() {
       return true;
     }
     onDragDrop(event) {
+      if (this.copyPending) return true;
       const file = event.dataTransfer?.files?.[0];
       if (!file) return false;
       const material = this.properties.materials.find(
@@ -104,9 +138,23 @@ export function registerCanvasNodes({ editCard, select, importMedia, run }) {
       return true;
     }
     onConfigure() {
+      this.copyIfNeeded();
       this.releasePlayer();
       clearPosters(this);
       for (const w of [...(this.widgets || [])]) this.removeWidget(w);
+      if (this.properties.copySource) {
+        const widget = this.addWidget(
+          "text",
+          "复制状态",
+          "正在创建独立副本…",
+          () => {},
+          {
+            serialize: false,
+          },
+        );
+        widget.disabled = true;
+        return;
+      }
       const card = this.properties.card;
       if (!card) return;
       const materials = new Map(this.properties.materials.map((m) => [m.id, m]));
@@ -139,12 +187,16 @@ export function registerCanvasNodes({ editCard, select, importMedia, run }) {
         );
       }
       button(this, "编辑工作流", () => editCard(this));
+      button(this, "执行全部桩节点", () => run(this));
       this.setSize(this.computeSize());
     }
     releasePlayer() {
       releasePlayer(this);
     }
     onRemoved() {
+      const registered = instances.get(this.graph);
+      if (registered?.get(this.properties.instance) === this)
+        registered.delete(this.properties.instance);
       this.releasePlayer();
       for (const w of this.widgets || []) w.onRemove?.();
       clearPosters(this);

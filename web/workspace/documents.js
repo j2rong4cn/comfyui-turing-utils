@@ -8,23 +8,17 @@ import {
 } from "../lib/workflow_metadata.js";
 import { settleMaterials } from "./material_selection.js";
 import { settleProjectWrites } from "./project_state.js";
+import {
+  documentPath,
+  fileReference,
+  migrateDocumentPointers,
+  readDocumentSession,
+  writeDocumentSession,
+} from "./document_session.js";
+
+export { documentPath, fileReference } from "./document_session.js";
 
 const documents = new WeakMap();
-
-export function fileReference(state) {
-  return state?.extra?.turing_project || state?.extra?.turing_editor;
-}
-export function documentPath(reference) {
-  if (reference.id)
-    return `workflows/canvas/projects/${reference.directory}/cards/${reference.id}/workflow.json`;
-  if (reference.directory) {
-    const title = reference.directory.replaceAll("/", " › ");
-    return `workflows/canvas/projects/${reference.directory}/Canvas - ${title}.json`;
-  }
-  return reference.name
-    ? `workflows/canvas/library/${reference.name}`
-    : `workflows/canvas/new/${reference.new}.json`;
-}
 
 export function fileTab(reference) {
   return app.extensionManager.workflow.openWorkflows.find((tab) => {
@@ -94,31 +88,28 @@ export function installDocumentStorage({ save, load, saveAs }) {
   const sessionKey = () => `turing.documents:${api.apiURL("/")}:${api.user}`;
   let restoring = true;
   let restored = false;
-  let lastReferences;
+  let writable = true;
   const persistReferences = () => {
-    if (restoring || !manager.setting.get("Comfy.Workflow.Persist")) return;
+    if (restoring || !writable || !manager.setting.get("Comfy.Workflow.Persist"))
+      return;
     // Only file identities belong here. Native persistence owns tab order,
     // active selection and unsaved graph drafts under the workflows/ namespace.
     const references = store.openWorkflows
-      .map((tab) => documents.get(tab))
-      .filter(Boolean)
-      .map(({ directory, id, name, new: fresh, source }) => ({
-        directory,
-        id,
-        name,
-        new: fresh,
-        source,
-      }));
-    const value = JSON.stringify(references);
-    if (value === lastReferences) return;
+      .filter((tab) => documents.has(tab))
+      .map((tab) => {
+        const { directory, id, name, new: fresh, source } = documents.get(tab);
+        return {
+          path: tab.path,
+          reference: { directory, id, name, new: fresh, source },
+        };
+      });
     try {
-      sessionStorage.setItem(sessionKey(), value);
-      lastReferences = value;
+      writeDocumentSession(sessionKey(), references);
     } catch (error) {
       report(error);
     }
   };
-  const bindTab = (tab, reference) => {
+  const bindTab = (tab, reference, legacyDraft) => {
     if (documents.has(tab)) {
       documents.set(tab, reference);
       return;
@@ -140,6 +131,7 @@ export function installDocumentStorage({ save, load, saveAs }) {
       }
       const task =
         reference.directory && !reference.id ? null : await promptForTab(this);
+      const previousPath = documentPath(reference);
       // graphToPrompt compresses widget input slots and removes localized
       // labels. Compare two native editor snapshots, not API-normalized JSON.
       const submitted =
@@ -149,7 +141,9 @@ export function installDocumentStorage({ save, load, saveAs }) {
         );
       const result = await save(reference, task);
       if (result === false) throw Error("已取消保存，修改仍保留在标签页");
-      if (this.path !== documentPath(reference))
+      // Only first Save/Save As changes file identity. Ordinary Save must not
+      // rename an existing logical tab key and strand its native draft/pointers.
+      if (previousPath !== documentPath(reference))
         await store.renameWorkflow(this, documentPath(reference));
       const current =
         this === store.activeWorkflow ? app.rootGraph.serialize() : this.activeState;
@@ -183,7 +177,14 @@ export function installDocumentStorage({ save, load, saveAs }) {
       this.size = -1;
       this.lastModified = 0;
       try {
-        return await nativeLoad.call(this, { force });
+        await nativeLoad.call(this, { force });
+        if (legacyDraft && !force) {
+          this.changeTracker.activeState = legacyDraft;
+          this.content = JSON.stringify(legacyDraft);
+          this.isModified = true;
+        }
+        legacyDraft = undefined;
+        return this;
       } finally {
         this.size = this.content.length;
       }
@@ -204,26 +205,67 @@ export function installDocumentStorage({ save, load, saveAs }) {
     const reference = fileReference(app.rootGraph);
     if (!tab || !reference) return;
     bindTab(tab, reference);
+    if (restored) restoring = false;
     persistReferences();
   };
   const restoreReferences = () => {
     try {
-      const references = manager.setting.get("Comfy.Workflow.Persist")
-        ? JSON.parse(sessionStorage.getItem(sessionKey()) || "[]")
-        : [];
-      for (const reference of references) {
-        const path = documentPath(reference);
-        if (store.getWorkflowByPath(path)) continue;
+      if (!manager.setting.get("Comfy.Workflow.Persist")) return;
+      const { tabs, migration } = readDocumentSession(sessionKey(), api.clientId);
+      for (const { path, reference, draft } of tabs) {
+        // A real userdata file wins a namespace collision. Never replace its
+        // load/save methods merely because it has a workflows/canvas/ path.
+        const existing = store.getWorkflowByPath(path);
+        if (existing) {
+          if (!documents.has(existing)) {
+            writable = false;
+            report(Error(`画布标签路径与普通工作流冲突，未接管该文件：${path}`));
+          }
+          continue;
+        }
         store.createNewTemporary(path.slice("workflows/".length));
-        bindTab(store.getWorkflowByPath(path), reference);
+        // Pinia exposes the lookup's reactive descriptor, not necessarily the
+        // same object returned by createNewTemporary. Bind the public lookup.
+        bindTab(store.getWorkflowByPath(path), reference, draft);
       }
+      migrateDocumentPointers(migration);
     } catch (error) {
+      writable = false;
       report(error);
-    } finally {
-      restoring = false;
     }
   };
-  store.$onAction(({ after }) => after(persistReferences));
+  // Observe public Pinia actions rather than replace store implementations.
+  // Startup's lexical sync and explicit refresh both finish before native tab
+  // restoration resumes. Reattach only our descriptors, never native tab order.
+  store.$onAction(({ name, after, onError }) => {
+    if (name === "loadWorkflows" || name === "syncWorkflows") {
+      const managed = store.workflows.filter((tab) => documents.has(tab));
+      const reattach = () => {
+        for (const tab of managed) store.attachWorkflow(tab);
+      };
+      onError(reattach);
+      after(() => {
+        reattach();
+        if (name === "loadWorkflows" && !restored) {
+          restored = true;
+          restoreReferences();
+        }
+      });
+    } else if (
+      [
+        "openWorkflow",
+        "openWorkflowsInBackground",
+        "closeWorkflow",
+        "renameWorkflow",
+        "saveWorkflow",
+      ].includes(name)
+    ) {
+      after(() => {
+        if (restored && name === "openWorkflow") restoring = false;
+        persistReferences();
+      });
+    }
+  });
   const commands = manager.command.commands;
   for (const id of ["Comfy.SaveWorkflow", "Comfy.SaveWorkflowAs"]) {
     const command = commands.find((c) => c.id === id);
@@ -245,23 +287,5 @@ export function installDocumentStorage({ save, load, saveAs }) {
     if (documents.has(tab)) throw Error("卡片副本请使用另存为；画布需要复制整个项目");
     return duplicate.call(this, tab, ...args);
   };
-  // Startup loadWorkflows calls its lexical syncWorkflows, not the exported
-  // method. Adapt both public entry points so native restoration can resolve
-  // managed descriptors, and list refresh cannot remove them.
-  for (const name of ["syncWorkflows", "loadWorkflows"]) {
-    const original = store[name];
-    store[name] = async function (...args) {
-      const managed = store.workflows.filter((tab) => documents.has(tab));
-      try {
-        return await original.apply(this, args);
-      } finally {
-        for (const tab of managed) store.attachWorkflow(tab);
-        if (name === "loadWorkflows" && !restored) {
-          restored = true;
-          restoreReferences();
-        }
-      }
-    };
-  }
   return bind;
 }

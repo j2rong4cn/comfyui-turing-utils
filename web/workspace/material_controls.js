@@ -96,6 +96,8 @@ export function controls(node, m, { select, importMedia, run }) {
         ).items,
       selected: () => m.selection.asset,
       select: action((asset) => select(node, m, { asset })),
+      kind: m.kind,
+      preview: (asset) => (m.kind === "audio" ? "" : url(directory, asset, true)),
     }).catch(report);
     if (m.allowUpload !== false)
       button(node, "choose file to upload", () =>

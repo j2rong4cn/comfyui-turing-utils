@@ -35,10 +35,15 @@ import {
   saveProjectLayout,
   setProjectStatus,
 } from "./workspace/project_state.js";
-import { installLocalExecution, runMaterial } from "./workspace/execution.js";
+import {
+  installLocalExecution,
+  runCardMaterials,
+  runMaterial,
+} from "./workspace/execution.js";
 
 let templates = [];
 let bindDocument;
+const copies = new Map();
 export { request } from "./workspace/api.js";
 export { saveProject } from "./workspace/project_state.js";
 export async function openTab(workflow, name) {
@@ -170,6 +175,88 @@ export async function addCard(spec, position) {
   });
   await saveProject(directory);
   return result;
+}
+async function copyCard(node) {
+  const state = { ...node.graph.extra.turing_project },
+    directory = state.directory;
+  const pending = copies.get(`${directory}:${node.properties.instance}`);
+  if (pending) return pending; // Switching native tabs may reconstruct this placeholder.
+  const source = node.properties.copySource || {
+      directory: node.properties.directory,
+      id: node.properties.instance,
+    },
+    identity = crypto.randomUUID().replaceAll("-", "");
+  // This marker also survives a native draft/clipboard round trip. Never expose
+  // the source's controls while the backend is allocating the independent copy.
+  // Native nodes may expose Vue proxies, which structuredClone cannot copy.
+  // These properties are JSON descriptors, not model or media runtime objects.
+  node.properties = JSON.parse(JSON.stringify(node.properties));
+  node.properties.instance = identity;
+  node.properties.copySource = source;
+  node.onConfigure();
+  const target = () => {
+    if (project()?.directory === directory)
+      return app.rootGraph._nodes.find((n) => n.properties.instance === identity);
+    return fileTab({ directory })?.activeState?.nodes.find(
+      (n) => n.properties.instance === identity,
+    );
+  };
+  try {
+    if (source.directory !== directory)
+      throw Error("暂不支持跨项目粘贴卡片；请在目标画布从卡片库添加节点");
+    const task = enqueueSave(state, async (revision) => {
+      const copied = await request("card/copy", {
+        directory,
+        revision,
+        source: source.id,
+        id: identity,
+      });
+      const current = target();
+      if (current) {
+        // Native paste owns geometry and links, including links between a group
+        // of pasted nodes. Only replace descriptors containing instance IDs.
+        const inputs = current.inputs,
+          outputs = current.outputs;
+        configureCard(current, copied.document.cards[0], copied.document, directory);
+        current.inputs = inputs;
+        current.outputs = outputs;
+        delete current.properties.copySource;
+        current.copyPending = false;
+        current.onConfigure?.();
+        current.graph?.change();
+      }
+      setProjectStatus(directory, "已复制", copied.statistics);
+      return copied;
+    });
+    copies.set(`${directory}:${identity}`, task);
+    await task;
+  } catch (error) {
+    const current = target();
+    if (current?.graph) current.graph.remove(current);
+    else if (current) {
+      const workflow = fileTab({ directory }).activeState;
+      const links = new Set(
+        workflow.links
+          .filter((link) => link[1] === current.id || link[3] === current.id)
+          .map((link) => link[0]),
+      );
+      workflow.nodes = workflow.nodes.filter((n) => n !== current);
+      workflow.links = workflow.links.filter((link) => !links.has(link[0]));
+      for (const n of workflow.nodes) {
+        for (const input of n.inputs || [])
+          if (links.has(input.link)) input.link = null;
+        for (const output of n.outputs || [])
+          if (output.links) output.links = output.links.filter((id) => !links.has(id));
+      }
+    }
+    throw error;
+  } finally {
+    copies.delete(`${directory}:${identity}`);
+    node.copyPending = false;
+    // Even a failed copy only removes its own placeholder; existing cards and
+    // successful siblings remain valid and saveable.
+    await saveProjectLayout(directory);
+  }
 }
 async function editCard(node) {
   await saveProject();
@@ -359,6 +446,14 @@ async function importMedia(node, m, file) {
 async function run(node, m) {
   const state = { ...project() },
     trims = Object.assign({}, ...app.graph._nodes.map((n) => n.trims || {}));
+  if (!m)
+    return runCardMaterials(state, node.properties.instance, trims, (target) =>
+      refreshMaterial(
+        node,
+        node.properties.materials.find((material) => material.id === target),
+        state.directory,
+      ),
+    );
   await saveProject(state.directory);
   await runMaterial(state, m.id, trims, () =>
     refreshMaterial(node, m, state.directory),
@@ -367,7 +462,7 @@ async function run(node, m) {
 app.registerExtension({
   name: "TuringUtils.MaterialWorkspace",
   registerCustomNodes() {
-    registerCanvasNodes({ editCard, select, importMedia, run });
+    registerCanvasNodes({ editCard, select, importMedia, run, copyCard });
   },
   commands: [
     {
@@ -533,6 +628,9 @@ app.registerExtension({
   },
   afterLoadGraph() {
     bindDocument?.();
+    if (project())
+      for (const node of app.rootGraph._nodes)
+        if (node.type === CARD) node.copyIfNeeded();
     if (editor()?.id) restoreEditor(app.rootGraph, editor());
   },
 });

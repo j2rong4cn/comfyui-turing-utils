@@ -14,12 +14,38 @@ import {
   settleProjectWrites,
 } from "./project_state.js";
 
+const cardRuns = new Map();
+
+export function runCardMaterials(state, instance, trims, onSuccess) {
+  const key = `${state.directory}:${instance}`;
+  if (cardRuns.has(key)) return cardRuns.get(key);
+  const running = (async () => {
+    await saveProject(state.directory);
+    const plan = await enqueueSave(state, (revision) =>
+      request("card/plan", { directory: state.directory, id: instance, revision }),
+    );
+    const executed = new Set();
+    for (const target of plan.targets)
+      await runMaterial(
+        state,
+        target,
+        trims,
+        () => onSuccess(target),
+        new Set(),
+        executed,
+      );
+  })().finally(() => cardRuns.delete(key));
+  cardRuns.set(key, running);
+  return running;
+}
+
 export async function runMaterial(
   state,
   target,
   trims,
   onSuccess,
   ancestors = new Set(),
+  executed = new Set(),
 ) {
   await settleMaterials(state.directory);
   await settleProjectWrites(state.directory);
@@ -39,6 +65,8 @@ export async function runMaterial(
     });
     if (!compiled.dependency) break;
     const dependency = compiled.dependency;
+    if (executed.has(dependency))
+      throw Error(`上游素材在本次执行后仍为空，已停止后续执行：${dependency}`);
     await runMaterial(
       state,
       dependency,
@@ -53,6 +81,7 @@ export async function runMaterial(
           throw Error(`上游素材生成后仍为空，已停止执行：${dependency}`);
       },
       path,
+      executed,
     );
   }
   let resolve, reject;
@@ -73,6 +102,9 @@ export async function runMaterial(
         prompt_id: compiled.run_id,
         client_id: api.clientId,
         partial_execution_targets: [target],
+        // Native history records the exact seeds/cache counters used by this
+        // task, not a future seed or the template's saved placeholder value.
+        extra_data: { turing_value_controls: compiled.controls },
       }),
     });
     if (!r.ok) throw Error(JSON.stringify(await r.json()));
@@ -81,7 +113,8 @@ export async function runMaterial(
     setProjectStatus(state.directory, "执行失败");
     throw error;
   }
-  return completed;
+  await completed;
+  executed.add(target);
 }
 export function installLocalExecution() {
   const queue = app.queuePrompt;

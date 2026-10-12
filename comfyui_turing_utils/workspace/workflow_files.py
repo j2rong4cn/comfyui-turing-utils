@@ -113,6 +113,37 @@ def add_instance(root, workflow, title):
         return identity
 
 
+def copy_instance(root, source, identity, revision):
+    """Copy mutable instance state; immutable project media remain shared."""
+    with LOCK:
+        path = Path(root) / "canvas.json"
+        canvas = load_json(path)
+        if canvas["revision"] != revision:
+            raise ValueError("Canvas changed; reload before copying a card")
+        original = next((c for c in canvas["cards"] if c["id"] == source), None)
+        if original is None:
+            raise ValueError("The source card no longer belongs to this Canvas")
+        destination = card_path(root, identity)
+        if destination.exists() or any(c["id"] == identity for c in canvas["cards"]):
+            raise ValueError("The copied card needs a new instance ID")
+        workflow = project_copy(load_json(card_path(root, source)))
+        _, interface = unpack(workflow)
+        instance = copy.deepcopy(original)
+        instance["id"] = identity
+        canvas["cards"].append(instance)
+        for stub in interface["stubs"]:
+            selected = canvas["selections"].get(f"{source}:{stub}")
+            if selected is not None:
+                canvas["selections"][f"{identity}:{stub}"] = {
+                    **copy.deepcopy(selected),
+                    "revision": 1,
+                }
+        atomic_json(destination, workflow)
+        canvas["revision"] += 1
+        atomic_json(path, canvas)
+        return identity
+
+
 def read_instance(root, identity):
     path = card_path(root, identity)
     workflow = load_json(path)
