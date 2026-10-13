@@ -1,6 +1,5 @@
 """Compile a local material task from one project snapshot."""
 
-import math
 import uuid
 
 from .compiler import MissingMaterial, compile_segment, is_link, material_order
@@ -31,28 +30,15 @@ def plan_card(project, identity, revision, *, snapshot=None):
     return {"revision": revision, "targets": targets}
 
 
-def compile_task(
-    project, target, revision, trims=None, *, snapshot=None, allow_missing=False
-):
+def compile_task(project, target, revision, *, snapshot=None, allow_missing=False):
     document = snapshot or project.document(
         card_ids={target.split(":", 1)[0]}, execution=True
     )
     if document["revision"] != revision:
         raise Conflict("Workflow changed; reload before running")
     selections = {key: dict(value) for key, value in document["selections"].items()}
-    for node, trim in (trims or {}).items():
-        start, end = float(trim.get("start", 0)), float(trim.get("end", 0))
-        if (
-            not math.isfinite(start)
-            or not math.isfinite(end)
-            or start < 0
-            or end < 0
-            or (end and end <= start)
-        ):
-            raise ValueError("Invalid trim interval")
-        if node in selections:
-            selections[node].update(start=start, end=end)
-    selection_revision = selections.get(target, {}).get("revision", 0)
+    selected = selections.get(target, {})
+    selection_revision = selected.get("content_revision", selected.get("revision", 0))
     run_id = str(uuid.uuid4())
     try:
         prompt = compile_segment(
@@ -79,4 +65,9 @@ def compile_task(
         "controls": {},
         "control_specs": document["controls"],
         "control_parameters": document.get("control_parameters", {}),
+        "parameters": dict(
+            document["prompt"]
+            .get(target.split(":", 1)[0] + ":parameters", {})
+            .get("inputs", {})
+        ),
     }

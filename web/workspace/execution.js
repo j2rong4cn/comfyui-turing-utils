@@ -13,9 +13,10 @@ import {
   setProjectStatus,
   settleProjectWrites,
   restoreSavedValues,
+  CARD,
 } from "./project_state.js";
 
-async function start(state, spec, trims) {
+async function start(state, spec) {
   await settleMaterials(state.directory);
   await settleProjectWrites(state.directory);
   const operation = await enqueueSave(state, async (revision) => {
@@ -25,7 +26,6 @@ async function start(state, spec, trims) {
         directory: state.directory,
         revision,
         ...spec,
-        trims,
         id: crypto.randomUUID(),
         client_id: api.clientId,
       })),
@@ -35,18 +35,18 @@ async function start(state, spec, trims) {
   return watchTask(state.directory, operation.id);
 }
 
-export async function runCardMaterials(state, instance, trims) {
+export async function runCardMaterials(state, instance) {
   await saveProject(state.directory);
-  return start(state, { card: instance }, trims);
+  return start(state, { card: instance });
 }
 
-export function runMaterial(state, target, trims) {
-  return start(state, { target }, trims);
+export function runMaterial(state, target) {
+  return start(state, { target });
 }
 
-export async function runSelectedCards(state, cards, trims = {}) {
+export async function runSelectedCards(state, cards) {
   await saveProject(state.directory);
-  return start(state, { cards }, trims);
+  return start(state, { cards });
 }
 
 function watchTask(directory, id) {
@@ -64,6 +64,24 @@ function watchTask(directory, id) {
         throw error;
       }
       restoreSavedValues(directory, status);
+      job.status = status;
+      if (project()?.directory === directory)
+        for (const node of app.rootGraph._nodes.filter((n) => n.type === CARD)) {
+          if (
+            !status.targets.some((target) =>
+              target.startsWith(node.properties.instance + ":"),
+            )
+          )
+            continue;
+          const widget = node.widgets.find((w) => w.name === "执行状态");
+          if (widget)
+            widget.value = status.cancel_requested
+              ? "当前步骤完成后停止"
+              : `${status.status} · ${status.completed.length}/${status.targets.length}${status.error ? " · " + status.error : ""}`;
+          const stop = node.widgets.find((w) => w.name === "停止后续步骤");
+          if (stop) stop.disabled = !["queued", "running"].includes(status.status);
+          node.graph.setDirtyCanvas(true, true);
+        }
       for (const [target, selection] of Object.entries(status.selections || {})) {
         if (synced.has(target)) continue;
         materialChanged(directory, target, selection);
@@ -74,11 +92,8 @@ function watchTask(directory, id) {
         `任务 ${status.status} · ${status.completed.length}/${status.targets.length}`,
       );
       if (!["queued", "running"].includes(status.status)) {
-        // Saved materials are already durable. Save the visible layout once,
-        // not once per publication; presentation errors never re-run inference.
-        if (synced.size) await saveProject(directory).catch(report);
         if (status.status === "selection_changed") report(Error(status.error));
-        else if (status.status !== "success")
+        else if (!["success", "cancelled"].includes(status.status))
           throw Error(status.error || "任务未完成，已保存素材保留");
         return status;
       }
@@ -87,6 +102,17 @@ function watchTask(directory, id) {
   })().finally(() => jobs.delete(id));
   jobs.set(id, job);
   return job.promise;
+}
+
+export async function stopCard(node) {
+  for (const [id, job] of jobs)
+    if (
+      job.directory === node.properties.directory &&
+      job.status?.targets.some((target) =>
+        target.startsWith(node.properties.instance + ":"),
+      )
+    )
+      await request("task/cancel", { directory: job.directory, id });
 }
 
 export async function restoreTasks(directory) {

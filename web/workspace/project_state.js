@@ -27,9 +27,19 @@ export function restoreSavedValues(directory, saved) {
     saved.parameters?.[editing.id]
   ) {
     const parameters = saved.parameters[editing.id];
-    const restore = (graph) => {
+    const restore = (graph, prefix = "") => {
       for (const node of graph._nodes) {
-        if (node.subgraph) restore(node.subgraph);
+        const key = prefix ? `${prefix}:${node.id}` : String(node.id);
+        if (node.subgraph) restore(node.subgraph, key);
+        for (const [name, value] of Object.entries(saved.inputs?.[key] || {})) {
+          const widget = node.widgets?.find((w) => w.name === name);
+          if (
+            widget &&
+            JSON.stringify(widget.value) ===
+              JSON.stringify(editing.base?.inputs?.[key]?.[name])
+          )
+            setWidgetValue(widget, value);
+        }
         if (node.type !== INPUTS) continue;
         const ports = entries(node);
         for (const port of ports) {
@@ -45,6 +55,16 @@ export function restoreSavedValues(directory, saved) {
           );
           if (widget?.setParameterValue) widget.setParameterValue(port.default);
           else setWidgetValue(widget, port.default);
+          const mode = saved.control_modes?.[editing.id]?.[port.id];
+          if (
+            mode &&
+            JSON.stringify(port.control) ===
+              JSON.stringify(editing.base?.controls?.[port.id])
+          ) {
+            port.control = mode;
+            const control = widget?.linkedWidgets?.[0];
+            if (control) setWidgetValue(control, mode.mode);
+          }
         }
         node.widgets.find((w) => w.name === "ports").value = JSON.stringify(ports);
       }
@@ -84,7 +104,7 @@ export function restoreSavedValues(directory, saved) {
       // Don't replace that draft. Native undo/tab snapshots have matching values.
       if (
         widget &&
-        JSON.stringify(widget.value) !==
+        JSON.stringify(widget.getParameterValue?.() ?? widget.value) !==
           JSON.stringify(node.properties.values[field.input])
       )
         continue;
@@ -97,6 +117,7 @@ export function restoreSavedValues(directory, saved) {
         field.control = mode;
       }
     }
+    node.updateResultState?.();
     node.graph?.setDirtyCanvas(true, true);
   }
 }

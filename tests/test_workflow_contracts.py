@@ -42,4 +42,18 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
                     "output_node": getattr(node, "OUTPUT_NODE", False),
                 }
             )
+    # Approved Canvas changes keep every old serialized input valid. Preserve
+    # the original snapshot: rebuilding it would hide unrelated regressions.
+    codec = actual["TuringMaterialVideo"]["inputs"]["required"]["codec"]
+    old_codec = expected["TuringMaterialVideo"]["inputs"]["required"]["codec"]
+    assert codec[0][0] == "h264" and codec[1] == {"default": "h264"}
+    assert set(codec[0]) == set(old_codec[0])
+    actual["TuringMaterialVideo"]["inputs"]["required"]["codec"] = old_codec
+    for kind in ("Image", "Video", "Audio", "Text"):
+        contract = actual[f"_TuringMaterialWrite{kind}"]
+        assert contract["input_order"]["optional"].pop() == "configuration"
+        assert contract["inputs"]["optional"].pop("configuration") == [
+            "STRING",
+            {"default": ""},
+        ]
     assert actual == expected

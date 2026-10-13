@@ -12,7 +12,9 @@ def select_material(project, identity, stub, content, revision):
     if source is None:
         raise ValueError("Save the workflow before selecting a new material")
     kind = MATERIALS[data["prompt"][source]["class_type"]]
-    if kind == "text":
+    if set(content) <= {"start", "end"} and content and kind in {"video", "audio"}:
+        pass
+    elif kind == "text":
         if set(content) != {"text"} or not isinstance(content["text"], str):
             raise ValueError("Text material needs a string")
     elif set(content) != {"asset"} or (
@@ -21,4 +23,4 @@ def select_material(project, identity, stub, content, revision):
         raise ValueError("Material kind does not match this node")
     target = f"{identity}:{stub}"
     project.select(target, content, revision)
-    return project.selections()[target]
+    return project.selection(target)

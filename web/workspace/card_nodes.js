@@ -6,9 +6,12 @@ import {
   url,
   releasePlayer,
   clearPosters,
+  updateResultState,
 } from "./material_controls.js";
 import { request, report, action } from "./api.js";
 import { valueControlWidget } from "../lib/value_controls.js";
+import { stopCard } from "./execution.js";
+import { refreshCanvasInstances } from "./sidebar.js";
 import {
   ROOT,
   CARD,
@@ -31,7 +34,7 @@ export function registerCanvasNodes({
       super("Canvas Project");
       this.flags = { pinned: true };
       this.clonable = false;
-      button(this, "保存项目", saveProject);
+      button(this, "保存画布", saveProject);
       button(this, "撤销未保存修改", () => restoreProject(this.properties.directory));
     }
     onConfigure() {
@@ -71,7 +74,6 @@ export function registerCanvasNodes({
                 },
                 `settings:${key}`,
               );
-              await saveProject(this.properties.directory);
             },
             { min: 0.01, step: 10, precision: 2, multiline: false },
           );
@@ -112,6 +114,7 @@ export function registerCanvasNodes({
     }
     onAdded() {
       this.copyIfNeeded();
+      refreshCanvasInstances();
     }
     copyIfNeeded() {
       if (
@@ -136,14 +139,7 @@ export function registerCanvasNodes({
       if (this.copyPending) return true;
       const file = event.dataTransfer?.files?.[0];
       if (!file) return false;
-      const material = this.properties.materials.find(
-        (m) => m.allowUpload !== false && file.type.startsWith(m.kind + "/"),
-      );
-      if (!material) {
-        report(Error("没有允许上传此类型文件的素材桩"));
-        return true;
-      }
-      action(() => importMedia(this, material, file))();
+      report(Error("请将文件拖入对应素材的预览区域"));
       return true;
     }
     onConfigure() {
@@ -200,6 +196,7 @@ export function registerCanvasNodes({
               `input:${f.node}:${f.input}`,
             );
             this.properties.values[f.input] = value;
+            this.updateResultState();
           },
           { ...f.options, label: f.label },
         );
@@ -232,11 +229,22 @@ export function registerCanvasNodes({
         }
       }
       button(this, "编辑工作流", () => editCard(this));
+      const status = this.addWidget("text", "执行状态", "就绪", () => {}, {
+        serialize: false,
+      });
+      status.disabled = true;
       button(this, "执行全部桩节点", () => run(this));
+      const stop = button(this, "停止后续步骤", () => stopCard(this));
+      stop.disabled = true;
+      this.updateResultState();
       this.setSize(this.computeSize());
+      refreshCanvasInstances();
     }
     releasePlayer() {
       releasePlayer(this);
+    }
+    updateResultState() {
+      updateResultState(this);
     }
     onRemoved() {
       const registered = instances.get(this.graph);
@@ -245,6 +253,7 @@ export function registerCanvasNodes({
       this.releasePlayer();
       for (const w of this.widgets || []) w.onRemove?.();
       clearPosters(this);
+      refreshCanvasInstances();
     }
   }
   LiteGraph.registerNodeType(ROOT, ProjectNode);

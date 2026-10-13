@@ -660,7 +660,7 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(reopened.selections()["upgrade"]["text"], "kept")
         self.assertEqual(reopened.run(run)["status"], "prepared")
         with reopened.connect() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertIn(
                 "run_status",
                 {row["name"] for row in db.execute("PRAGMA index_list(runs)")},
@@ -718,7 +718,7 @@ class WorkspaceTest(unittest.TestCase):
             workflow_files, "load_json", wraps=workflow_files.load_json
         ) as load:
             project_workflow(self.project)
-        self.assertEqual(load.call_count, 1)
+        self.assertEqual(load.call_count, 2)
 
     def test_task_compilation_reads_only_target_card(self):
         from comfyui_turing_utils.workspace.tasks import compile_task
@@ -827,6 +827,7 @@ class WorkspaceTest(unittest.TestCase):
             ],
         )
         identity = "a" * 32
+        original = workflow_files.card_path(self.project.root, source).read_bytes()
         workflow_files.copy_instance(self.project.root, source, identity, revision)
         copied = workflow_files.read_instance(self.project.root, identity)
         self.assertEqual(copied["parameters"], {"steps": 8})
@@ -870,6 +871,27 @@ class WorkspaceTest(unittest.TestCase):
             self.assertEqual((self.project.root / "canvas.json").read_bytes(), before)
         self.assertFalse(workflow_files.card_path(self.project.root, "b" * 32).exists())
 
+    def test_card_copy_resets_crop_and_content_revisions_only(self):
+        workflow, prompt = material_template(("video",))
+        source = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, prompt), "source"
+        )
+        stub = prompt["3"]["inputs"]["stub_id"]
+        asset, path = self.project.reserve("video", ".mp4", "selected")
+        path.write_bytes(b"media placeholder")
+        self.project.register(asset, "video", {"duration": 5})
+        self.project.select(f"{source}:{stub}", {"asset": asset})
+        self.project.select(f"{source}:{stub}", {"start": 1, "end": 3})
+        identity = "b" * 32
+        workflow_files.copy_instance(
+            self.project.root, source, identity, self.project.document()["revision"]
+        )
+        selected = self.project.selection(f"{identity}:{stub}")
+        self.assertEqual(
+            selected, {"asset": asset, "start": 1, "end": 3, "revision": 1}
+        )
+        self.assertEqual(self.project.selection(f"{source}:{stub}")["revision"], 2)
+
     def test_open_does_not_initialize_invalid_project(self):
         root = Path(self.tmp.name) / "invalid"
         root.mkdir()
@@ -879,6 +901,152 @@ class WorkspaceTest(unittest.TestCase):
             Project("invalid")
         self.assertFalse((root / "workspace.sqlite3").exists())
         self.assertEqual(path.read_text(), '{"format":2}')
+
+    def test_v3_migration_preserves_values_and_original_files(self):
+        workflow, graph = material_template(("text",))
+        ports = json.loads(graph["1"]["inputs"]["ports"])
+        ports.append(
+            dict(
+                id="steps",
+                slot=1,
+                name="Steps",
+                kind="parameter",
+                type="INT",
+                default=6,
+            )
+        )
+        graph["1"]["inputs"]["ports"] = json.dumps(ports)
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "A"
+        )
+        path = workflow_files.card_path(self.project.root, identity)
+        original_workflow = workflow_files.load_json(path)
+        canvas = workflow_files.load_json(self.project.root / "canvas.json")
+        canvas.pop("root")
+        canvas.update(
+            format=3,
+            settings={"name": "Migrated", "max_megapixels": 2.0},
+            selections={
+                identity + ":" + graph["3"]["inputs"]["stub_id"]: {
+                    "text": "selected",
+                    "revision": 7,
+                }
+            },
+        )
+        canvas["cards"][0]["parameters"] = {"steps": 9}
+        workflow_files.atomic_json(self.project.root / "canvas.json", canvas)
+        reopened = Project("test")
+        saved = workflow_files.load_json(self.project.root / "canvas.json")
+        self.assertEqual(saved["format"], 4)
+        self.assertNotIn("selections", saved)
+        self.assertNotIn("parameters", saved["cards"][0])
+        self.assertEqual(
+            workflow_files.read_instance(reopened.root, identity)["parameters"],
+            {"steps": 9},
+        )
+        self.assertEqual(reopened.settings()["name"], "Migrated")
+        self.assertEqual(
+            workflow_files.load_json(self.project.root / ".canvas-v3.json"), canvas
+        )
+        self.assertEqual(
+            workflow_files.load_json(
+                self.project.root / ".canvas-v3" / "cards" / identity / "workflow.json"
+            ),
+            original_workflow,
+        )
+        before = path.read_bytes()
+        Project("test")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_editor_save_merges_new_selection_without_reverting_it(self):
+        workflow, graph = material_template(("text",))
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "A"
+        )
+        target = identity + ":" + graph["3"]["inputs"]["stub_id"]
+        self.project.select(target, {"text": "before"})
+        opened = workflow_files.read_instance(self.project.root, identity)
+        self.project.select(target, {"text": "newly published"})
+        data = opened["workflow"]["extra"]["turing_card"]
+        workflow_files.save_instance(
+            self.project.root,
+            identity,
+            opened["workflow"],
+            data["prompt"],
+            opened["revision"],
+            base=opened["base"],
+        )
+        self.assertEqual(self.project.selection(target)["text"], "newly published")
+        saved = workflow_files.read_instance(self.project.root, identity)["workflow"]
+        self.assertEqual(
+            saved["extra"]["turing_card"]["prompt"]["3"]["inputs"]["text"],
+            "newly published",
+        )
+        self.assertEqual(
+            next(n for n in saved["nodes"] if n["id"] == 3)["widgets_values_named"][
+                "text"
+            ],
+            "newly published",
+        )
+
+    def test_batch_images_publish_first_and_keep_every_original(self):
+        workflow, graph = material_template(("image",))
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "Images"
+        )
+        target = identity + ":" + graph["3"]["inputs"]["stub_id"]
+        run = self.project.begin_run(target, 0)
+        images = torch.stack(
+            [torch.full((8, 12, 4), value) for value in (0.2, 0.6, 0.9)]
+        )
+        result = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+            "test", target, run, 0, "batch", images
+        )
+        history = self.project.history("image", limit=0)
+        self.assertEqual(len(history), 3)
+        first = result["result"][0]
+        self.assertEqual(history[0]["id"], first)
+        self.assertEqual(self.project.selection(target)["asset"], first)
+        value = read_selected("image", "test", first)[0]
+        self.assertEqual(tuple(value.shape), (1, 8, 12, 4))
+        self.assertAlmostEqual(float(value[0, 0, 0, 0]), 0.2, places=2)
+        self.project.select(target, {"asset": history[2]["id"]})
+        reader = INTERNAL_NODES["_TuringMaterialReadImage"]()
+        self.assertGreater(
+            float(reader.read(directory="test", target=target)[0][0, 0, 0, 0]), 0.85
+        )
+
+    def test_trim_persists_and_does_not_block_a_new_publication(self):
+        workflow, graph = material_template(("audio",))
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "Audio"
+        )
+        target = identity + ":" + graph["3"]["inputs"]["stub_id"]
+        audio = {"waveform": torch.zeros(1, 2, 44100), "sample_rate": 44100}
+        writer = INTERNAL_NODES["_TuringMaterialWriteAudio"]()
+        run = self.project.begin_run(target, 0)
+        writer.write("test", target, run, 0, "audio", audio)
+        source = self.project.selection(target)
+        original = self.project.path(source["asset"]).read_bytes()
+        run = self.project.begin_run(target, 1)
+        select_material(
+            self.project,
+            identity,
+            graph["3"]["inputs"]["stub_id"],
+            {"start": 0.25, "end": 0.5},
+            source["revision"],
+        )
+        reader = INTERNAL_NODES["_TuringMaterialReadAudio"]()
+        value = reader.read(directory="test", target=target, start=0, end=0)[0]
+        self.assertEqual(value["waveform"].shape[-1], 11025)
+        self.assertEqual(self.project.path(source["asset"]).read_bytes(), original)
+        self.assertTrue(
+            writer.write("test", target, run, 1, "audio", audio)["ui"]["material"][0][
+                "selected"
+            ]
+        )
+        selected = Project("test").selection(target)
+        self.assertEqual((selected["start"], selected["end"]), (0.25, 0.5))
 
     def test_starter_and_basic_templates(self):
         workflow, prompt = material_template()
@@ -1095,7 +1263,7 @@ class WorkspaceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "serializable"):
             parse_ports(json.dumps(changed))
 
-    def test_card_parameters_are_persisted_in_canvas_not_workflow(self):
+    def test_card_parameters_are_persisted_in_private_workflow_not_canvas(self):
         workflow, graph = material_template(("text",))
         ports = json.loads(graph["1"]["inputs"]["ports"])
         parameters = [
@@ -1145,8 +1313,8 @@ class WorkspaceTest(unittest.TestCase):
             ],
         )
         canvas = workflow_files.load_json(self.project.root / "canvas.json")
-        self.assertEqual(canvas["cards"][0]["parameters"], values)
-        self.assertEqual(
+        self.assertNotIn("parameters", canvas["cards"][0])
+        self.assertNotEqual(
             workflow_files.card_path(self.project.root, a).read_bytes(), before
         )
         self.assertEqual(
@@ -1166,9 +1334,7 @@ class WorkspaceTest(unittest.TestCase):
         native = project_workflow(self.project)["workflow"]
         save_layout(self.project, native, document["revision"])
         self.assertEqual(
-            workflow_files.load_json(self.project.root / "canvas.json")["cards"][0][
-                "parameters"
-            ],
+            workflow_files.read_instance(self.project.root, a)["parameters"],
             values,
         )
         reopened = workflow_files.read_instance(self.project.root, a)
@@ -1196,7 +1362,13 @@ class WorkspaceTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "changed"):
             workflow_files.save_instance(
-                self.project.root, a, workflow, graph, reopened["revision"]
+                self.project.root,
+                a,
+                workflow,
+                graph,
+                reopened["revision"],
+                base=reopened["base"],
+                parameters={"steps": 10},
             )
         revision = self.project.document()["revision"]
         with self.assertRaisesRegex(ValueError, "parameter type"):
@@ -1351,7 +1523,7 @@ class WorkspaceTest(unittest.TestCase):
         )
         stats = self.project.statistics()
         self.assertEqual(stats["materials"]["image"], 1)
-        self.assertEqual(stats["materials"]["text"], 1)
+        self.assertEqual(stats["materials"]["text"], 0)
         self.assertGreater(stats["bytes"], 0)
         self.assertEqual(
             INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
@@ -1406,7 +1578,8 @@ class WorkspaceTest(unittest.TestCase):
             "test", "video", run, 0, "video", images, audio=audio, fps=29.97
         )["result"][0]
         self.project.save_settings(
-            {"name": "Scene", "max_megapixels": 3000 / (1024 * 1024)}, 0
+            {"name": "Scene", "max_megapixels": 3000 / (1024 * 1024)},
+            self.project.document()["revision"],
         )
         value = read_selected("video", "test", asset)[0]
         components = value.get_components()
@@ -1457,7 +1630,79 @@ class WorkspaceTest(unittest.TestCase):
         )
         self.mapping.start()
         self.addCleanup(self.mapping.stop)
-        self.project.select("1", {"text": "hello"})
+        # Compiler unit tests use small logical node IDs. Bind them to real
+        # private card files without adding a legacy-ID path to production.
+        aliases = {}
+        select, selection, selections, begin_run = (
+            Project.select,
+            Project.selection,
+            Project.selections,
+            Project.begin_run,
+        )
+        document = Project.document
+
+        def boundary(project, target, kind="text"):
+            if ":" in target and len(target.split(":", 1)[0]) == 32:
+                return target
+            if target not in aliases:
+                workflow, graph = material_template((kind,))
+                identity = workflow_files.add_instance(
+                    project.root, workflow_files.pack(workflow, graph), target
+                )
+                aliases[target] = identity + ":" + graph["3"]["inputs"]["stub_id"]
+            return aliases[target]
+
+        def select_boundary(project, target, content, expected=None):
+            kind = (
+                project.asset(content["asset"])["kind"]
+                if content.get("asset")
+                else "text"
+            )
+            return select(project, boundary(project, target, kind), content, expected)
+
+        def all_selections(project, *args, **kwargs):
+            result = selections(project, *args, **kwargs)
+            return {
+                **result,
+                **{name: result[key] for name, key in aliases.items() if key in result},
+            }
+
+        def one_selection(project, target):
+            return selection(project, aliases.get(target, target))
+
+        def boundary_document(project, *args, **kwargs):
+            result = document(project, *args, **kwargs)
+            selected = result["selections"]
+            selected.update(
+                {
+                    name: selected[key]
+                    for name, key in aliases.items()
+                    if key in selected
+                }
+            )
+            return result
+
+        def begin_boundary(project, target, revision, run_id=None):
+            kind = {
+                "audio": "audio",
+                "video": "video",
+                "image": "image",
+                "rgba": "image",
+                "reference": "image",
+            }.get(target, "text")
+            boundary(project, target, kind)
+            return begin_run(project, target, revision, run_id)
+
+        for name, method in [
+            ("select", select_boundary),
+            ("selection", one_selection),
+            ("selections", all_selections),
+            ("begin_run", begin_boundary),
+            ("document", boundary_document),
+        ]:
+            patch = mock.patch.object(Project, name, method)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.prompt = {
             "0": {"class_type": "WorkspaceTest", "inputs": {"text": "must not run"}},
             "1": {"class_type": "TuringMaterialText", "inputs": {"text": ["0", 0]}},
@@ -1466,6 +1711,8 @@ class WorkspaceTest(unittest.TestCase):
         }
 
     def compile(self):
+        if "1" not in self.project.selections():
+            self.project.select("1", {"text": "hello"})
         return compile_segment(
             self.prompt,
             "3",
@@ -1506,6 +1753,7 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(compiled["model"]["class_type"], "UNETLoader")
 
     def test_invalid_trim_preserves_selection(self):
+        self.project.select("1", {"text": "hello"})
         with self.assertRaises(ValueError):
             self.project.select("1", {"text": "hello", "start": 3, "end": 2})
         self.assertEqual(self.project.document()["selections"]["1"]["revision"], 1)
@@ -1813,7 +2061,7 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(
             document["prompt"][b + ":node:compute"]["inputs"]["text"], "hello"
         )
-        self.assertEqual(package["extra"]["turing_card"]["overrides"], {})
+        self.assertEqual(package["extra"]["turing_card"]["state"], {})
         native = project_workflow(self.project)["workflow"]
         source = next(
             n for n in native["nodes"] if n["properties"].get("instance") == a
@@ -1929,7 +2177,7 @@ class WorkspaceTest(unittest.TestCase):
         external = Path(self.tmp.name) / "outside-project"
         external.mkdir()
         parent = self.project.root / "cards"
-        parent.mkdir()
+        parent.mkdir(exist_ok=True)
         (parent / identity).symlink_to(external, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "inside"):
             workflow_files.card_path(self.project.root, identity)

@@ -16,26 +16,26 @@ try {
     if (event.type() === "error") console.log("BROWSER ERROR", event.text());
     if (
       event.type() === "error" &&
-      event.text().includes("Error calling extension 'TuringUtils")
+      (event.text().includes("Error calling extension 'TuringUtils") ||
+        event.text().includes("/extensions/comfyui-turing-utils"))
     )
       errors.push(event.text());
   });
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18188");
-  await page.waitForFunction(() => window.LiteGraph?.registered_node_types.TuringCanvasInputs);
+  await page.waitForFunction(
+    () => window.LiteGraph?.registered_node_types.TuringCanvasInputs,
+  );
   await selectRenderer(page);
   await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
-    const workspace = await import(
-      "/extensions/comfyui-turing-utils/material_workspace.js"
-    );
-    const { entries, syncPorts } = await import(
-      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
-    );
-    const { DYNAMIC_COMBO, dynamicDefinition } = await import(
-      "/extensions/comfyui-turing-utils/lib/dynamic_parameter.js"
-    );
+    const workspace =
+      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const { entries, syncPorts } =
+      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
+    const { DYNAMIC_COMBO, dynamicDefinition } =
+      await import("/extensions/comfyui-turing-utils/lib/dynamic_parameter.js");
     const check = (condition, message) => {
       if (!condition) throw Error(message);
     };

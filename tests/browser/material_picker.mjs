@@ -44,7 +44,7 @@ try {
       assets.push(await importAsset(directory, "image", new File([blob], name)));
     }
     const material = card.properties.materials[0];
-    const widget = card.widgets.find((widget) => widget.name === material.id);
+    const widget = card.widgets.find((widget) => widget._materialId === material.id);
     await widget.refreshMaterialList();
     await widget.callback(assets[0].split("/").at(-1));
     app.canvas.centerOnNode(card);
@@ -105,7 +105,7 @@ try {
     await workspace.openProject(directory);
     const card = app.graph._nodes.find((node) => node.type === "TuringCanvasCard");
     const widget = card.widgets.find(
-      (widget) => widget.name === card.properties.materials[0].id,
+      (widget) => widget._materialId === card.properties.materials[0].id,
     );
     await widget.refreshMaterialList();
     if (widget.value !== assets[1].split("/").at(-1))
@@ -218,7 +218,7 @@ try {
         (node) => node.properties.instance === added.id,
       );
       const widget = node.widgets.find(
-        (widget) => widget.name === node.properties.materials[0].id,
+        (widget) => widget._materialId === node.properties.materials[0].id,
       );
       await widget.refreshMaterialList();
       await widget.callback(asset.split("/").at(-1));

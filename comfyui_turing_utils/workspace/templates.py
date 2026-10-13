@@ -34,7 +34,7 @@ def material_template(kinds=("image", "video", "audio", "text")):
             ),
         }
         if kind == "video":
-            values.update(fps=30.0, bit_depth="auto", color_space="sRGB", codec="none")
+            values.update(fps=30.0, bit_depth="auto", color_space="sRGB", codec="h264")
         # Python API inputs and frontend widget order are different contracts.
         # Remote combos add a native presentation-only toggle after file/audio;
         # it belongs to workflow positional values, never the execution prompt.

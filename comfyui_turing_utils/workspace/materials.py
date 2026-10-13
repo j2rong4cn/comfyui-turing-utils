@@ -4,6 +4,7 @@ import math
 import hashlib
 import shutil
 import uuid
+import tempfile
 from pathlib import Path
 import numpy as np
 import av
@@ -31,7 +32,39 @@ def material_path(file):
     return inside(root, relative)
 
 
-def save_media(kind, value, path, codec="none"):
+def save_images(value, path):
+    if len(value) == 0:
+        raise ValueError("Image material is empty")
+    saved = []
+    temporary_root = Path(folder_paths.base_path) / ".cache" / "tmp"
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="material-images-", dir=temporary_root
+    ) as directory:
+        saver = nodes.SaveImage()
+        saver.output_dir = directory
+        result = saver.save_images(value, "image")
+        for index, item in enumerate(result["ui"]["images"], 1):
+            destination = (
+                path
+                if len(value) == 1
+                else path.with_name(f"{path.stem}_{index:05d}{path.suffix}")
+            )
+            if destination.exists():
+                raise ValueError("Material destination already exists")
+            shutil.move(str(Path(directory) / item["filename"]), destination)
+            metadata = {
+                "width": value.shape[2],
+                "height": value.shape[1],
+                "bytes": destination.stat().st_size,
+            }
+            if len(value) > 1:
+                metadata.update(batch=path.stem, batch_index=index)
+            saved.append((destination, metadata))
+    return saved
+
+
+def save_media(kind, value, path, codec="h264"):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.stem + ".partial" + path.suffix)
     try:
@@ -40,16 +73,12 @@ def save_media(kind, value, path, codec="none"):
                 raise ValueError(
                     "Image material expects one image; use video material for a sequence"
                 )
-            saver = nodes.SaveImage()
-            saver.output_dir = str(path.parent)
-            result = saver.save_images(value, temporary.stem)
-            (path.parent / result["ui"]["images"][0]["filename"]).replace(temporary)
-            metadata = {"width": value.shape[2], "height": value.shape[1]}
+            return save_images(value, path)[0][1]
         elif kind == "video":
             value.save_to(
                 str(temporary),
                 format=Types.VideoContainer.MP4,
-                codec=Types.VideoCodec.AUTO
+                codec=Types.VideoCodec.H264
                 if codec == "none"
                 else Types.VideoCodec(codec),
                 crf=19,
@@ -163,6 +192,23 @@ def read_selected(kind, directory, asset, start=0, end=0, max_megapixels=None):
     )
 
 
+def export_selected(project, node, directory):
+    selected = project.selection(node)
+    asset = project.asset(selected["asset"])
+    kind = asset["kind"]
+    value = read_selected(
+        kind,
+        project.directory,
+        asset["id"],
+        selected.get("start", 0),
+        selected.get("end", 0),
+    )[0]
+    suffix = {"image": ".png", "video": ".mp4", "audio": ".wav"}[kind]
+    path = Path(directory) / (Path(asset["name"]).stem + "-output" + suffix)
+    save_media(kind, value, path)
+    return path
+
+
 def material_files(kind):
     if kind not in {"image", "video", "audio"}:
         raise ValueError("Unknown material kind")
@@ -245,5 +291,11 @@ def resolve_material(kind, file="", **kwargs):
     extension = {"image": ".png", "video": ".mp4", "audio": ".wav"}[kind]
     relative = f"materials/{kind}/{kind}_{uuid.uuid4().hex[:12]}{extension}"
     path = inside(folder_paths.get_output_directory(), relative)
-    save_media(kind, value, path, codec=kwargs.get("codec", "none"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "image":
+        saved = save_images(value, path)
+        path = saved[0][0]
+        value = value[:1].clone()
+    else:
+        save_media(kind, value, path, codec=kwargs.get("codec", "h264"))
     return value, path

@@ -10,7 +10,7 @@ import json
 from . import workflow_files
 
 
-def finish_run(project, run_id, asset=None, text=None):
+def finish_run(project, run_id, asset=None, text=None, configuration=None):
     with workflow_files.LOCK:
         with project.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -23,6 +23,8 @@ def finish_run(project, run_id, asset=None, text=None):
                 content = json.loads(run["payload"])
             else:
                 content = {"text": text} if text is not None else {"asset": asset}
+                if configuration is not None:
+                    content["generated_parameters"] = configuration
                 if text is not None and not isinstance(text, str):
                     raise ValueError("Text must be an inline string")
                 if text is None:
@@ -33,10 +35,10 @@ def finish_run(project, run_id, asset=None, text=None):
                 )
 
         # The intent is durable before entering the second persistence boundary.
-        current = project.selections().get(run["target"], {})
-        revision = current.get("revision", 0)
+        current = project.selection(run["target"])
+        revision = current.get("content_revision", current.get("revision", 0))
         if revision == run["revision"]:
-            project.select(run["target"], content, revision)
+            project.select(run["target"], content, current.get("revision", 0))
             selected = True
         else:
             selected = revision == run["revision"] + 1 and all(

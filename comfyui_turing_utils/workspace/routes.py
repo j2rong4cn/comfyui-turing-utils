@@ -5,17 +5,19 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import tempfile
 
 import av
 import folder_paths
 from aiohttp import web
+from aiohttp.helpers import content_disposition_header
 from server import PromptServer
 
 from .compiler import MATERIALS
 from .execution import MaterialTasks
 from .directories import list_directory, remove_empty_directory
-from .materials import material_files, material_path
-from .previews import PreviewStore
+from .materials import export_selected, material_files, material_path
+from .previews import PreviewBusy, PreviewStore
 from ..media.files import probe
 from .store import Conflict, Project, inside
 from . import workflow_files
@@ -33,6 +35,7 @@ def install_routes():
     previews = PreviewStore(
         Path(folder_paths.base_path) / ".cache" / "material-previews"
     )
+    exports = asyncio.Lock()
 
     def endpoint(method, path):
         def decorate(fn):
@@ -41,6 +44,12 @@ def install_routes():
                     return await fn(request)
                 except Conflict as error:
                     return web.json_response({"error": str(error)}, status=409)
+                except PreviewBusy as error:
+                    return web.json_response(
+                        {"error": str(error)}, status=503, headers={"Retry-After": "1"}
+                    )
+                except ConnectionResetError:
+                    raise
                 except (
                     ValueError,
                     KeyError,
@@ -324,6 +333,7 @@ def install_routes():
                 data["prompt"],
                 data["revision"],
                 parameters=data.get("parameters"),
+                base=data.get("base"),
             )
         )
         return web.json_response({"revision": revision})
@@ -388,7 +398,7 @@ def install_routes():
             with workflow_files.LOCK:
                 canvas = workflow_files.load_json(project.root / "canvas.json")
                 return {
-                    "items": canvas["selections"],
+                    "items": project.selections(canvas),
                     "settings": project.settings(canvas),
                     **workflow_files.parameter_state(project.root, canvas),
                 }
@@ -400,7 +410,16 @@ def install_routes():
         data = await request.json()
         return web.json_response(
             await asyncio.to_thread(
-                lambda: Project(data["directory"]).selections().get(data["node"], {})
+                lambda: Project(data["directory"]).selection(data["node"])
+            )
+        )
+
+    @endpoint("post", "/material/info")
+    async def material_info(request):
+        data = await request.json()
+        return web.json_response(
+            await asyncio.to_thread(
+                lambda: Project(data["directory"]).material_information(data["node"])
             )
         )
 
@@ -414,7 +433,6 @@ def install_routes():
                 target=data.get("target"),
                 card=data.get("card"),
                 cards=data.get("cards"),
-                trims=data.get("trims"),
                 identity=data.get("id"),
                 client_id=data.get("client_id"),
             )
@@ -424,6 +442,11 @@ def install_routes():
     async def task_status(request):
         data = await request.json()
         return web.json_response(await tasks.status(data["directory"], data["id"]))
+
+    @endpoint("post", "/task/cancel")
+    async def cancel_task(request):
+        data = await request.json()
+        return web.json_response(await tasks.cancel(data["directory"], data["id"]))
 
     @endpoint("post", "/task/list")
     async def task_list(request):
@@ -474,6 +497,50 @@ def install_routes():
             return {"asset": asset}
 
         return web.json_response(await asyncio.to_thread(perform))
+
+    @endpoint("get", "/export")
+    async def export_material(request):
+        if exports.locked():
+            raise PreviewBusy("Another material export is running")
+        async with exports:
+            project = await asyncio.to_thread(Project, request.query["directory"])
+            temporary_root = Path(folder_paths.base_path) / ".cache" / "tmp"
+            temporary_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix="material-export-", dir=temporary_root
+            ) as directory:
+                task = asyncio.create_task(
+                    asyncio.to_thread(
+                        export_selected, project, request.query["node"], directory
+                    )
+                )
+                try:
+                    path = await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    # A thread cannot be cancelled mid-encode. Wait before
+                    # removing its exclusively owned temporary directory.
+                    await task
+                    raise
+                response = web.StreamResponse(
+                    headers={
+                        "Content-Disposition": content_disposition_header(
+                            "attachment", filename=path.name
+                        ),
+                        "Content-Type": {
+                            ".png": "image/png",
+                            ".mp4": "video/mp4",
+                            ".wav": "audio/wav",
+                        }[path.suffix],
+                        "Content-Length": str(path.stat().st_size),
+                        "X-Content-Type-Options": "nosniff",
+                    }
+                )
+                await response.prepare(request)
+                with path.open("rb") as source:
+                    while chunk := await asyncio.to_thread(source.read, 256 * 1024):
+                        await response.write(chunk)
+                await response.write_eof()
+                return response
 
     @endpoint("get", "/asset")
     async def asset(request):

@@ -10,10 +10,15 @@ from .parameters import (
     parameter_default,
     parameter_options,
     validate_parameter,
+    DYNAMIC_BINDINGS,
+    dynamic_paths,
+    expand_dynamic,
+    branch_parameters,
 )
 from .protocol import MATERIAL_TYPES
 from .workflow_files import card_path, load_json, unpack
 from .value_controls import control_definition, workflow_controls
+from . import workflow_state
 
 
 def material_options(workflow, interface, identities):
@@ -42,9 +47,16 @@ def material_options(workflow, interface, identities):
 def document(root, canvas=None, card_ids=None, *, execution=False):
     if canvas is None:
         canvas = load_json(Path(root) / "canvas.json")
-    if canvas.get("format") != 3:
+    if canvas.get("format") != 4:
         raise ValueError("Unsupported Canvas project format")
-    prompt, cards, connections, controls, control_parameters = {}, [], {}, {}, {}
+    prompt, cards, connections, controls, control_parameters, selections = (
+        {},
+        [],
+        {},
+        {},
+        {},
+        {},
+    )
     for connection in canvas.get("connections", []):
         connections.setdefault(connection["target"], {})[connection["port"]] = (
             connection
@@ -55,14 +67,20 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         try:
             workflow = load_json(card_path(root, instance["id"]))
             data, interface = unpack(workflow)
+            selections.update(
+                {
+                    f"{instance['id']}:{stub}": selected
+                    for stub, selected in workflow_state.state(workflow)
+                    .get("selections", {})
+                    .items()
+                }
+            )
             overrides = {
                 **{
                     p["id"]: parameter_default(p)
                     for p in interface["inputs"]
                     if p["kind"] == "parameter"
                 },
-                **data.get("overrides", {}),
-                **instance.get("parameters", {}),
             }
             for port in interface["inputs"]:
                 if is_parameter(port) and port["id"] in overrides:
@@ -107,6 +125,16 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         parameter_ports = {}
         for node_id, node in data["prompt"].items():
             inputs = dict(node["inputs"])
+            for name, link in node.get("_meta", {}).get(DYNAMIC_BINDINGS, {}).items():
+                port = next(p for p in interface["inputs"] if p["slot"] == link[1])
+                value = overrides[port["id"]]
+                inputs.update(expand_dynamic(port, value, name))
+                for path in dynamic_paths(port, value, active=True).values():
+                    field = name + "." + ".".join(path[2::3])
+                    parameter_ports.setdefault(identities[node_id], {})[field] = {
+                        "port": port["id"],
+                        "path": path,
+                    }
             for name, value in inputs.items():
                 if is_link(value) and value[0] == interface["input_node"]:
                     port = next(p for p in interface["inputs"] if p["slot"] == value[1])
@@ -123,13 +151,51 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         for key, fields in parameter_ports.items():
             for name, port_id in fields.items():
                 control = local_controls.get(key, {}).get(name)
+                if isinstance(port_id, dict):
+                    group_value = overrides[port_id["port"]]
+                    path = ".".join(
+                        part for part in port_id["path"] if part != "branches"
+                    )
+                    mode = group_value.get("controls", {}).get(path)
+                    if mode and not control:
+                        child = next(
+                            p for p in interface["inputs"] if p["id"] == port_id["port"]
+                        )
+                        parts = port_id["path"]
+                        for i in range(0, len(parts), 3):
+                            option = next(
+                                o
+                                for o in parameter_options(child)["options"]
+                                if o["key"] == parts[i + 1]
+                            )
+                            child = branch_parameters(option)[parts[i + 2]]
+                        options = parameter_options(child)
+                        control = control_definition(
+                            child["type"],
+                            {
+                                **options,
+                                "step": options.get("step2", options.get("step", 1)),
+                            },
+                            mode,
+                        )
+                        local_controls.setdefault(key, {})[name] = control
+                    if control:
+                        local_controls[key][name].update(mode or {})
+                    if control:
+                        control_parameters.setdefault(key, {})[name] = port_id
+                    continue
                 if control:
                     form_controls.setdefault(port_id, {"mode": control["mode"]})
         for port in interface["inputs"]:
             if is_parameter(port) and port.get("control"):
                 form_controls[port["id"]] = port["control"]
         for port_id, control in form_controls.items():
-            control = {**control, **instance.get("control_modes", {}).get(port_id, {})}
+            control = {
+                **control,
+                **workflow_state.state(workflow)
+                .get("control_modes", {})
+                .get(port_id, {}),
+            }
             form_controls[port_id] = control
             port = next(p for p in interface["inputs"] if p["id"] == port_id)
             options = parameter_options(port)
@@ -246,7 +312,8 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         "prompt": prompt,
         "workflow": {},
         "cards": cards,
-        "format": 3,
+        "selections": selections,
+        "format": 4,
         **(
             {"controls": controls, "control_parameters": control_parameters}
             if execution

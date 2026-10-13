@@ -18,11 +18,16 @@ from ..media.files import has_alpha
 RENDER_VERSION = 2
 
 
+class PreviewBusy(ValueError):
+    pass
+
+
 class PreviewStore:
-    def __init__(self, directory: Path, concurrency: int = 2):
+    def __init__(self, directory: Path, concurrency: int = 2, waiting: int = 8):
         self.directory = directory
         self.slots = asyncio.Semaphore(concurrency)
         self.pending: dict[str, asyncio.Task] = {}
+        self.limit = concurrency + waiting
 
     async def get(self, project_root, asset_id, path, kind, start=0):
         if kind not in {"image", "video"}:
@@ -39,6 +44,8 @@ class PreviewStore:
 
         task = self.pending.get(digest)
         if task is None:
+            if len(self.pending) >= self.limit:
+                raise PreviewBusy("Poster queue is full; try again when visible")
             task = asyncio.create_task(self._render_limited(path, kind, start, preview))
             self.pending[digest] = task
 

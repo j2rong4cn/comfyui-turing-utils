@@ -272,8 +272,10 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                         ],
                         editor_revision,
                     )
-                canvas = workflow_files.load_json(self.project.root / "canvas.json")
-                instance = next(c for c in canvas["cards"] if c["id"] == identity)
+                workflow = workflow_files.load_json(
+                    workflow_files.card_path(self.project.root, identity)
+                )
+                instance = workflow["extra"]["turing_card"]["state"]
                 self.assertEqual(
                     next(iter(instance["value_controls"].values()))["value"], 3
                 )
@@ -650,7 +652,9 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                         execution.PromptExecutor.execute_async._turing_material_continuations
                     )
 
-    async def test_card_targets_share_frozen_graph_and_trims_do_not_mutate_it(self):
+    async def test_card_targets_share_frozen_graph_and_compilation_does_not_mutate_it(
+        self,
+    ):
         def graph(prompt):
             for index in range(3, 13):
                 prompt[str(index)]["inputs"]["text"] = ["compute", 0]
@@ -669,10 +673,43 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
             self.project,
             targets[0],
             snapshot["revision"],
-            {targets[0]: {"start": 1, "end": 2}},
             snapshot=snapshot,
         )
         self.assertEqual(snapshot, before)
+
+    async def test_stop_remaining_steps_keeps_current_material_and_other_cards(self):
+        def graph(prompt):
+            prompt["3"]["inputs"]["text"] = ["compute", 0]
+            prompt["4"]["inputs"]["text"] = ["compute", 0]
+
+        card, targets = self.card(graph, count=2)
+        other, other_targets = self.card()
+        started, gate = asyncio.Event(), asyncio.Event()
+        original = self.tasks._material
+
+        async def waiting(*args, **kwargs):
+            started.set()
+            await gate.wait()
+            return await original(*args, **kwargs)
+
+        with mock.patch.object(self.tasks, "_material", side_effect=waiting):
+            operation = await self.tasks.start(
+                "project", self.project.document()["revision"], card=card
+            )
+            await started.wait()
+            stopped = await self.tasks.cancel("project", operation["id"])
+            self.assertTrue(stopped["cancel_requested"])
+            gate.set()
+            result = await self.finished(operation)
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["completed"], [targets[0]])
+        self.assertTrue(self.project.selection(targets[0]).get("text"))
+        self.assertFalse(self.project.selection(targets[1]).get("text"))
+        next_task = await self.tasks.start(
+            "project", self.project.document()["revision"], card=other
+        )
+        self.assertEqual((await self.finished(next_task))["status"], "success")
+        self.assertTrue(self.project.selection(other_targets[0]).get("text"))
 
     async def test_retry_rejects_hook_changes_without_replaying_or_leaking(self):
         def graph(prompt):

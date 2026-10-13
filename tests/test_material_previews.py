@@ -49,6 +49,30 @@ class MaterialPreviewsTest(unittest.IsolatedAsyncioTestCase):
                 await self.store.get(self.root, "audio", self.source, "audio")
             render.assert_not_called()
 
+    async def test_queue_limit_still_allows_joining_an_existing_poster(self):
+        self.store = previews.PreviewStore(
+            self.root / "posters", concurrency=1, waiting=0
+        )
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def render(*args):
+            started.set()
+            await finish.wait()
+
+        with mock.patch.object(self.store, "_render_limited", side_effect=render):
+            first = asyncio.create_task(
+                self.store.get(self.root, "one", self.source, "image")
+            )
+            await started.wait()
+            joined = asyncio.create_task(
+                self.store.get(self.root, "one", self.source, "image")
+            )
+            with self.assertRaises(previews.PreviewBusy):
+                await self.store.get(self.root, "two", self.source, "image")
+            self.assertEqual(len(self.store.pending), 1)
+            finish.set()
+            await asyncio.gather(first, joined)
+
     async def test_rgba_poster_composites_alpha_without_changing_material(self):
         Image.new("RGBA", (1280, 720), (25, 51, 76, 64)).save(self.source)
         original = self.source.read_bytes()

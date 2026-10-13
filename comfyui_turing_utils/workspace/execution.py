@@ -35,7 +35,6 @@ class MaterialTasks:
         target=None,
         card=None,
         cards=None,
-        trims=None,
         identity=None,
         client_id=None,
     ):
@@ -72,7 +71,7 @@ class MaterialTasks:
             record = {"targets": targets}
             self.active[(directory, identity)] = record
             record["task"] = asyncio.create_task(
-                self._operation(project, identity, snapshots, trims or {}, client_id)
+                self._operation(project, identity, snapshots, client_id)
             )
             return project.operation(identity)
 
@@ -103,7 +102,7 @@ class MaterialTasks:
         # One expansion per selected card, not once per material boundary.
         return targets, dict.fromkeys(targets, document)
 
-    async def _operation(self, project, identity, snapshots, trims, client_id):
+    async def _operation(self, project, identity, snapshots, client_id):
         completed = []
         status, error = "interrupted", "Canvas task interrupted"
         try:
@@ -112,10 +111,14 @@ class MaterialTasks:
                     "UPDATE operations SET status='running' WHERE id=?", (identity,)
                 )
             for target, snapshot in snapshots.items():
+                if self.active[(project.directory, identity)].get("cancel_requested"):
+                    status, error = (
+                        "cancelled",
+                        "Remaining steps were cancelled; saved materials were retained",
+                    )
+                    break
                 snapshot = {**snapshot, "completed_materials": list(completed)}
-                run = await self._material(
-                    project, target, trims, client_id, set(), snapshot
-                )
+                run = await self._material(project, target, client_id, set(), snapshot)
                 completed.append(target)
                 with project.connect() as db:
                     db.execute(
@@ -144,9 +147,7 @@ class MaterialTasks:
                 )
             self.active.pop((project.directory, identity), None)
 
-    async def _material(
-        self, project, target, trims, client_id, ancestors, snapshot=None
-    ):
+    async def _material(self, project, target, client_id, ancestors, snapshot=None):
         key = (project.directory, target)
         if target in ancestors:
             raise ValueError("Material dependency cycle: " + target)
@@ -154,9 +155,7 @@ class MaterialTasks:
         if pending:
             return await asyncio.shield(pending)
         task = asyncio.create_task(
-            self._execute(
-                project, target, trims, client_id, ancestors | {target}, snapshot
-            )
+            self._execute(project, target, client_id, ancestors | {target}, snapshot)
         )
         self.materials[key] = task
         try:
@@ -165,7 +164,7 @@ class MaterialTasks:
             if self.materials.get(key) is task:
                 self.materials.pop(key, None)
 
-    async def _execute(self, project, target, trims, client_id, ancestors, snapshot):
+    async def _execute(self, project, target, client_id, ancestors, snapshot):
         snapshot = snapshot or await asyncio.to_thread(
             project.document, card_ids={target.split(":", 1)[0]}, execution=True
         )
@@ -174,7 +173,6 @@ class MaterialTasks:
             project,
             target,
             snapshot["revision"],
-            trims,
             snapshot=snapshot,
             allow_missing=True,
         )
@@ -227,7 +225,7 @@ class MaterialTasks:
                         {
                             "directory": project.directory,
                             "target": target,
-                            "selection": project.selections().get(target, {}),
+                            "selection": project.selection(target),
                         },
                     )
                     return run
@@ -246,11 +244,9 @@ class MaterialTasks:
                 if pending:
                     await self._wait(project.directory, target, dependency, pending)
                 else:
-                    selection = project.selections().get(dependency, {})
+                    selection = project.selection(dependency)
                     if not (selection.get("text") or selection.get("asset")):
-                        await self._material(
-                            project, dependency, trims, client_id, ancestors
-                        )
+                        await self._material(project, dependency, client_id, ancestors)
                 generated.add(dependency)
                 for reader in reads:
                     if reader["target"] == dependency:
@@ -302,6 +298,20 @@ class MaterialTasks:
                     prepared["control_specs"],
                     prepared["control_parameters"],
                 )
+            )
+            parameters = copy.deepcopy(prepared["parameters"])
+            for key, fields in prepared["controls"].items():
+                for name, value in fields.items():
+                    binding = prepared["control_parameters"].get(key, {}).get(name)
+                    if isinstance(binding, str):
+                        parameters[binding] = value
+                    elif binding:
+                        parent = parameters[binding["port"]]
+                        for part in binding["path"][:-1]:
+                            parent = parent[part]
+                        parent[binding["path"][-1]] = value
+            prepared["prompt"][prepared["target"]]["inputs"]["configuration"] = (
+                json.dumps(parameters, ensure_ascii=False) if parameters else ""
             )
         native_id = str(uuid.uuid4())
         data = self.server.trigger_on_prompt(
@@ -365,7 +375,6 @@ class MaterialTasks:
                     (identity,),
                 )
             record = project.operation(identity)
-        selections = project.selections()
         return {
             **record,
             **workflow_files.parameter_state(
@@ -373,9 +382,18 @@ class MaterialTasks:
                 card_ids={target.split(":", 1)[0] for target in record["targets"]},
             ),
             "selections": {
-                target: selections.get(target, {}) for target in record["completed"]
+                target: project.selection(target) for target in record["completed"]
             },
+            "cancel_requested": self.active.get((directory, identity), {}).get(
+                "cancel_requested", False
+            ),
         }
+
+    async def cancel(self, directory, identity):
+        record = self.active.get((directory, identity))
+        if record:
+            record["cancel_requested"] = True
+        return await self.status(directory, identity)
 
     async def list(self, directory):
         project = await asyncio.to_thread(Project, directory)

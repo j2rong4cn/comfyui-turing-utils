@@ -55,17 +55,16 @@ try {
       (w) => w.type === "customtext" || w.inputEl?.tagName === "TEXTAREA",
     );
     const material = card.properties.materials[0];
-    card.trims = { [material.id]: { start: 0.2, end: 0.8 } };
     const widgets = card.widgets;
-    const trims = card.trims;
+    const selection = material.selection;
     await m.addCard({ kind: "text" }, [900, 230]);
     if (
       app.graph.getNodeById(card.id) !== card ||
       card.widgets !== widgets ||
-      card.trims !== trims ||
+      material.selection !== selection ||
       !card.widgets.includes(w)
     )
-      throw Error("Adding a card rebuilt existing nodes or session state");
+      throw Error("Adding a card rebuilt existing nodes or material controls");
     await m.request("select", {
       directory,
       node: material.id,
@@ -145,9 +144,8 @@ try {
     }
     if (!success) throw Error("Local execution did not publish text");
     await m.openTab(task.workflow, `linked-${Date.now()}.json`);
-    const { addPort } = await import(
-      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
-    );
+    const { addPort } =
+      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
     const endpoint = app.graph._nodes.find((n) => n.type === "TuringCanvasInputs");
     if (!endpoint.inputs.some((s) => s._append))
       throw Error("Missing dynamic source input");
@@ -200,7 +198,9 @@ try {
       n.properties.materials?.some((m) => m.kind === "image"),
     );
     const image = imageNode.properties.materials.find((m) => m.kind === "image");
-    await imageNode.widgets.find((w) => w.name === image.id).refreshMaterialList();
+    await imageNode.widgets
+      .find((w) => w._materialId === image.id)
+      .refreshMaterialList();
     const { api } = await import("/scripts/api.js");
     const fetchApi = api.fetchApi;
     let historyReads = 0;
@@ -266,9 +266,8 @@ try {
   const interactions = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const m = await import("/extensions/comfyui-turing-utils/material_workspace.js");
-    const { addPort, entries } = await import(
-      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
-    );
+    const { addPort, entries } =
+      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
     const starter = await (await fetch("/turing/workspace/new-template")).json();
     await m.openTab(starter, `port-test-${Date.now()}.json`);
     window.wireStarter();
@@ -390,12 +389,10 @@ try {
   console.log(JSON.stringify(interactions));
   const pickerDirectory = `picker-smoke-${Date.now()}`;
   await page.evaluate(async (directory) => {
-    const { request } = await import(
-      "/extensions/comfyui-turing-utils/material_workspace.js"
-    );
-    const { DirectoryPicker } = await import(
-      "/extensions/comfyui-turing-utils/lib/directory_picker.js"
-    );
+    const { request } =
+      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const { DirectoryPicker } =
+      await import("/extensions/comfyui-turing-utils/lib/directory_picker.js");
     await request("directory/create", { directory });
     window.pickerResult = new DirectoryPicker(
       request,
@@ -418,12 +415,10 @@ try {
   assert.equal(await page.evaluate(() => window.pickerResult), pickerDirectory);
   console.log(JSON.stringify({ directoryColumns: true, emptyFolderSelection: true }));
   await page.evaluate(async (directory) => {
-    const { request } = await import(
-      "/extensions/comfyui-turing-utils/material_workspace.js"
-    );
-    const { DirectoryPicker } = await import(
-      "/extensions/comfyui-turing-utils/lib/directory_picker.js"
-    );
+    const { request } =
+      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const { DirectoryPicker } =
+      await import("/extensions/comfyui-turing-utils/lib/directory_picker.js");
     window.folderPromptReleasedModal = false;
     window.pickerResult = new DirectoryPicker(
       request,
@@ -464,7 +459,7 @@ try {
     );
     media.pos = [710, 270];
     const text = media.properties.materials.find((m) => m.kind === "text");
-    await media.widgets.find((w) => w.name === text.id).callback("autosaved");
+    await media.widgets.find((w) => w._materialId === text.id).callback("autosaved");
     let data = await m.request("project/open", { directory });
     if (
       data.workflow.nodes.find(
@@ -584,7 +579,7 @@ try {
         const node = app.graph._nodes.find(
           (n) => n.properties?.instance === card.properties.instance,
         );
-        const file = node.widgets.find((w) => w.name === material.id);
+        const file = node.widgets.find((w) => w._materialId === material.id);
         await file.refreshMaterialList();
         if (!file.options.values.includes(asset.split("/").at(-1)))
           throw Error("History dropdown did not use filenames");
@@ -596,7 +591,7 @@ try {
         if (ranged.status !== 206 || (await ranged.arrayBuffer()).byteLength !== 128)
           throw Error("Media streaming does not support byte ranges");
         if (node.player) throw Error("Player created before request");
-        await node.widgets.find((w) => w.name === "video · 预览").callback();
+        await node.widgets.find((w) => w.name === "video · 播放").callback();
         if (!node.player || node.player.preload !== "none")
           throw Error("Player not lazy");
         const player = node.player;

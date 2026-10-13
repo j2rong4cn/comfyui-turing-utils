@@ -128,7 +128,8 @@ def validate_parameter(port, value):
         options = {o["key"]: o for o in parameter_options(port)["options"]}
         if (
             not isinstance(value, dict)
-            or set(value) != {"selected", "branches"}
+            or set(value) - {"selected", "branches", "controls"}
+            or not {"selected", "branches"} <= set(value)
             or not isinstance(value["selected"], str)
             or value["selected"] not in options
             or not isinstance(value["branches"], dict)
@@ -143,6 +144,18 @@ def validate_parameter(port, value):
                 )
             for name, child in fields.items():
                 validate_parameter(child, branch[name])
+        controls = value.get("controls", {})
+        if not isinstance(controls, dict):
+            raise ValueError("Invalid DynamicCombo controls")
+        paths = dynamic_paths(port, value)
+        for path, control in controls.items():
+            if (
+                path not in paths
+                or not isinstance(control, dict)
+                or set(control) != {"mode"}
+                or control["mode"] not in VALUE_CONTROL_MODES
+            ):
+                raise ValueError("Invalid DynamicCombo value-control mode")
         return value
     valid = {
         "INT": type(value) is int,
@@ -171,4 +184,21 @@ def expand_dynamic(port, value, name):
             result.update(expand_dynamic(child, child_value, path))
         else:
             result[path] = child_value
+    return result
+
+
+def dynamic_paths(port, value, *, active=False, prefix=()):
+    result = {}
+    for option in parameter_options(port)["options"]:
+        if active and option["key"] != value["selected"]:
+            continue
+        for name, child in branch_parameters(option).items():
+            path = (*prefix, "branches", option["key"], name)
+            child_value = value["branches"][option["key"]][name]
+            if child["type"] == DYNAMIC_COMBO:
+                result.update(
+                    dynamic_paths(child, child_value, active=active, prefix=path)
+                )
+            elif child["type"] in {"INT", "FLOAT", "COMBO"}:
+                result[".".join(part for part in path if part != "branches")] = path
     return result

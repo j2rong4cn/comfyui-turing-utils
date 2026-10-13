@@ -1,5 +1,6 @@
 import { app } from "../../../scripts/app.js";
 import { ComfyWidgets } from "../../../scripts/widgets.js";
+import { linkedControl } from "./value_controls.js";
 
 export const DYNAMIC_COMBO = "COMFY_DYNAMICCOMBO_V3";
 const SCALARS = new Set(["INT", "FLOAT", "BOOLEAN", "STRING", "COMBO"]);
@@ -71,14 +72,15 @@ export function dynamicSpec(node, name) {
   }
   return spec?.[0] === DYNAMIC_COMBO ? spec : null;
 }
-function visit(spec, value, name, fn) {
+function visit(spec, value, name, fn, branchPath = "") {
   fn(name, spec, value);
   const option = spec[1].options.find((o) => o.key === value.selected);
   for (const [key, child] of fields(option)) {
     const path = `${name}.${key}`;
     const v = value.branches[value.selected][key];
-    if (child[0] === DYNAMIC_COMBO) visit(child, v, path, fn);
-    else fn(path, child, v, value.branches[value.selected], key);
+    const controlPath = [branchPath, value.selected, key].filter(Boolean).join(".");
+    if (child[0] === DYNAMIC_COMBO) visit(child, v, path, fn, controlPath);
+    else fn(path, child, v, value.branches[value.selected], key, controlPath);
   }
 }
 export function applyDynamicWidgets(node, name, options, value) {
@@ -93,11 +95,14 @@ export function dynamicDefinition(node, widget) {
   const spec = dynamicSpec(node, widget.name);
   if (!spec || !editable(spec)) return null;
   const value = defaultValue(spec);
-  visit(spec, value, widget.name, (path, child, v, branch, key) => {
+  visit(spec, value, widget.name, (path, child, v, branch, key, controlPath) => {
     const current = node.widgets.find((w) => w.name === path)?.value;
     if (current === undefined) return;
     if (child[0] === DYNAMIC_COMBO) v.selected = current;
     else branch[key] = current;
+    const control = linkedControl(node.widgets.find((w) => w.name === path));
+    if (controlPath && control)
+      (value.controls ||= {})[controlPath] = { mode: control.mode };
   });
   return { type: DYNAMIC_COMBO, kind: "parameter", options: spec[1], default: value };
 }
@@ -118,7 +123,7 @@ export function dynamicParameterWidget(node, name, value, callback, options) {
     // A card form has no computational sockets. Only its material ports are wired.
     for (let i = node.inputs.length - 1; i >= 0; i--)
       if (owned(node.inputs[i])) node.removeInput(i);
-    visit(spec, state, name, (path, child, v, branch, key) => {
+    visit(spec, state, name, (path, child, v, branch, key, controlPath) => {
       const widget = node.widgets.find((w) => w.name === path);
       widget.options = { ...widget.options, serialize: false };
       widget.serialize = false;
@@ -128,6 +133,19 @@ export function dynamicParameterWidget(node, name, value, callback, options) {
       if (!("_nativeParameterCallback" in widget))
         widget._nativeParameterCallback = widget.callback;
       const nativeCallback = widget._nativeParameterCallback;
+      const control = widget.linkedWidgets?.find(
+        (w) => typeof w.beforeQueued === "function",
+      );
+      if (control && controlPath) {
+        const saved = state.controls?.[controlPath];
+        if (saved) control.value = saved.mode;
+        control.serialize = false;
+        control.options = { ...control.options, serialize: false };
+        control.callback = (mode) => {
+          (state.controls ||= {})[controlPath] = { mode };
+          return callback(JSON.parse(JSON.stringify(state)));
+        };
+      }
       widget.callback = function (next, ...args) {
         nativeCallback?.call(this, next, ...args);
         if (child[0] === DYNAMIC_COMBO) v.selected = next;
@@ -146,6 +164,7 @@ export function dynamicParameterWidget(node, name, value, callback, options) {
     sync();
   };
   root.setParameterValue(value);
+  root.getParameterValue = () => JSON.parse(JSON.stringify(state));
   return root;
 }
 

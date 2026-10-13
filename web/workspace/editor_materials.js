@@ -2,7 +2,15 @@
 import { bindMaterialCombo } from "../lib/material_combo.js";
 import { setWidgetValue } from "../lib/parameter_widget.js";
 import { action, report, request } from "./api.js";
-import { button, url } from "./material_controls.js";
+import {
+  button,
+  field,
+  poster,
+  url,
+  playPreview,
+  releasePlayer,
+  clearPosters,
+} from "./material_controls.js";
 import {
   chooseUpload,
   importAsset,
@@ -26,13 +34,21 @@ export function installProjectMaterials(graph, editing, run) {
     const state = {
       selection: editing.selections[target] || {},
     };
+    const material = {
+      id: target,
+      kind,
+      selection: state.selection,
+      allowUpload: true,
+    };
     node.projectMaterial = state;
     const canonical = () =>
       state.selection.asset
         ? `${editing.directory}/${state.selection.asset} [output]`
         : "";
     const update = (selection) => {
+      if (state.selection.asset !== selection.asset) releasePlayer(node);
       state.selection = selection;
+      material.selection = selection;
       editing.selections[target] = selection;
       if (kind === "text") setWidgetValue(widget, selection.text || "");
       else {
@@ -40,34 +56,21 @@ export function installProjectMaterials(graph, editing, run) {
         // Use the native preview contract without decoding/uploading another copy.
         node.onExecuted({
           material_file: [canonical()],
-          ...(kind === "image" && selection.asset
-            ? {
-                images: [
-                  {
-                    filename: selection.asset.split("/").at(-1),
-                    subfolder: `${editing.directory}/${selection.asset.split("/").slice(0, -1).join("/")}`,
-                    type: "output",
-                  },
-                ],
-              }
-            : {}),
         });
         widget.value = selection.asset?.split("/").at(-1) || "";
-        if (kind === "audio") {
-          const audio = node.widgets.find((w) => w.name === "audioUI")?.element;
-          if (audio) {
-            audio.pause();
-            audio.preload = "none";
-            audio.src = selection.asset ? url(editing.directory, selection.asset) : "";
-          }
-        }
+        node.posters?.get(target)?.preview.refresh();
+        node.range?.refresh();
+      }
+      for (const name of ["start", "end"]) {
+        const trim = node.widgets.find((w) => w.name === `trim:${name}`);
+        if (trim) setWidgetValue(trim, selection[name] || 0);
       }
       node.graph?.setDirtyCanvas(true, true);
     };
     const persistSelection = async (content) => {
       if (
         (kind === "text" && content.text === (state.selection.text || "")) ||
-        (kind !== "text" && content.asset === state.selection.asset)
+        ("asset" in content && content.asset === state.selection.asset)
       )
         return;
       const selection = await request("editor/select", {
@@ -96,6 +99,8 @@ export function installProjectMaterials(graph, editing, run) {
     const removed = node.onRemoved;
     node.onRemoved = function (...args) {
       materialChanges.removeEventListener("select", listener);
+      releasePlayer(node);
+      clearPosters(node);
       widget.onRemove?.();
       return removed?.apply(this, args);
     };
@@ -140,6 +145,34 @@ export function installProjectMaterials(graph, editing, run) {
         upload(file);
         return true;
       };
+      poster(node, material, editing.directory, (_node, _material, file) =>
+        upload(file),
+      );
+      if (["video", "audio"].includes(kind))
+        button(node, "播放", () =>
+          playPreview(node, material, editing.directory, select),
+        );
+      const audioUI = node.widgets.find((w) => w.name === "audioUI");
+      if (audioUI) {
+        audioUI.element.removeAttribute("src");
+        audioUI.element.hidden = true;
+        audioUI.hidden = true;
+        audioUI.options.hidden = true;
+        audioUI.computeSize = () => [0, -4];
+      }
+      if (["video", "audio"].includes(kind))
+        for (const [name, label] of [
+          ["start", "起点（秒）"],
+          ["end", "终点（秒，0 为末尾）"],
+        ])
+          field(
+            node,
+            `trim:${name}`,
+            "FLOAT",
+            state.selection[name] || 0,
+            (value) => select({ [name]: value }),
+            { label, min: 0, precision: 2 },
+          );
     }
     update(state.selection);
     button(node, "执行到这里", () => run(node, target));

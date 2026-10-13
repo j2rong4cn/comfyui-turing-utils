@@ -6,6 +6,10 @@ import { DYNAMIC_COMBO, dynamicParameterWidget } from "./dynamic_parameter.js";
 // Updating a view must not become a second user edit or write back stale values.
 export function setWidgetValue(widget, value) {
   if (!widget || widget.value === value) return;
+  if (widget.setParameterValue) {
+    widget.setParameterValue(value);
+    return;
+  }
   const callback = widget.callback;
   widget.callback = undefined;
   try {

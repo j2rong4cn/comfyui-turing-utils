@@ -123,22 +123,34 @@ export function bindMaterialCombo(
   widget,
   { key, list, selected, select, kind, preview },
 ) {
-  let entry = lists.get(key);
-  if (!entry)
-    lists.set(
-      key,
-      (entry = {
-        items: [],
-        byName: new Map(),
-        listeners: new Set(),
-        load: null,
-        reload: false,
-        loaded: false,
-        more: false,
-        query: "",
-        list,
-      }),
-    );
+  let entry,
+    query = "",
+    cacheKey;
+  function attach() {
+    if (entry) {
+      entry.listeners.delete(update);
+      if (!entry.listeners.size) lists.delete(cacheKey);
+    }
+    cacheKey = JSON.stringify([key, query]);
+    entry = lists.get(cacheKey);
+    if (!entry)
+      lists.set(
+        cacheKey,
+        (entry = {
+          key,
+          items: [],
+          byName: new Map(),
+          listeners: new Set(),
+          load: null,
+          reload: false,
+          loaded: false,
+          more: false,
+          query,
+          list,
+        }),
+      );
+    entry.listeners.add(update);
+  }
   if (preview)
     mediaComboPreview(
       node,
@@ -159,28 +171,29 @@ export function bindMaterialCombo(
     widget.options.values.push(SEARCH);
     node.graph?.setDirtyCanvas(true, true);
   };
-  entry.listeners.add(update);
+  attach();
   const remove = widget.onRemove;
   widget.onRemove = () => {
     entry.listeners.delete(update);
-    if (!entry.listeners.size) lists.delete(key);
+    if (!entry.listeners.size) lists.delete(cacheKey);
     remove?.call(widget);
   };
   widget.callback = async (name) => {
     if (name === MORE || name === SEARCH) {
       if (name === SEARCH) {
-        const query = await app.extensionManager.dialog.prompt({
+        const nextQuery = await app.extensionManager.dialog.prompt({
           title: "查找历史文件",
           message: "文件名关键词；留空显示全部",
-          defaultValue: entry.query,
+          defaultValue: query,
         });
-        if (query === null || query === undefined) {
+        if (nextQuery === null || nextQuery === undefined) {
           update();
           return;
         }
-        entry.query = query;
+        query = nextQuery;
+        attach();
       }
-      await refreshMaterialList(key, name === MORE);
+      await refreshEntry(entry, name === MORE);
       update();
       return;
     }
@@ -197,12 +210,18 @@ export function bindMaterialCombo(
   };
   update();
   widget.refreshMaterialList = () => refreshMaterialList(key);
-  return entry.loaded ? Promise.resolve() : refreshMaterialList(key);
+  return entry.loaded ? Promise.resolve() : refreshEntry(entry);
 }
 
 export async function refreshMaterialList(key, append = false) {
-  const entry = lists.get(key);
-  if (!entry) return;
+  return Promise.all(
+    [...lists.values()]
+      .filter((entry) => entry.key === key)
+      .map((entry) => refreshEntry(entry, append)),
+  );
+}
+
+async function refreshEntry(entry, append = false) {
   if (entry.load) {
     // A publication or search while loading needs one follow-up first page.
     // Many views share this entry; don't issue one reload for each listener.

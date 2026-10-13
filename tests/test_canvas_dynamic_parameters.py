@@ -49,10 +49,15 @@ class DynamicText(io.ComfyNode):
                                     options=[
                                         io.DynamicCombo.Option(
                                             "decimal",
-                                            [io.Boolean.Input("positive", default=True)],
+                                            [
+                                                io.Boolean.Input(
+                                                    "positive", default=True
+                                                )
+                                            ],
                                         ),
                                         io.DynamicCombo.Option(
-                                            "hex", [io.String.Input("prefix", default="0x")]
+                                            "hex",
+                                            [io.String.Input("prefix", default="0x")],
                                         ),
                                     ],
                                 ),
@@ -96,8 +101,12 @@ class DynamicParametersTest(unittest.TestCase):
         self.project = Project.create("dynamic")
         spec = DynamicText.INPUT_TYPES()["required"]["mode"]
         self.port = dict(
-            id="mode", slot=1, name="Mode", type=DYNAMIC_COMBO,
-            kind="parameter", options=spec[1],
+            id="mode",
+            slot=1,
+            name="Mode",
+            type=DYNAMIC_COMBO,
+            kind="parameter",
+            options=spec[1],
         )
         self.port["default"] = parameter_default(self.port)
         self.workflow, self.prompt = material_template(("text",))
@@ -124,27 +133,74 @@ class DynamicParametersTest(unittest.TestCase):
         nested["selected"] = "hex"
         nested["branches"]["hex"]["prefix"] = "HEX:"
         flat = expand_dynamic(self.port, state, "mode")
-        self.assertEqual(flat, {
-            "mode": "number", "mode.count": 3,
-            "mode.format": "hex", "mode.format.prefix": "HEX:",
-        })
+        self.assertEqual(
+            flat,
+            {
+                "mode": "number",
+                "mode.count": 3,
+                "mode.format": "hex",
+                "mode.format.prefix": "HEX:",
+            },
+        )
         state["selected"] = "empty"
         self.assertEqual(expand_dynamic(self.port, state, "mode"), {"mode": "empty"})
 
+    def test_branch_value_control_updates_the_private_form(self):
+        state = copy.deepcopy(self.port["default"])
+        state["selected"] = "number"
+        state["controls"] = {"number.count": {"mode": "increment"}}
+        spec = self.port["options"]["options"][1]["inputs"]["required"]["count"][1]
+        spec.update(min=0, max=100, step=1)
+        self.port["default"] = state
+        self.prompt["1"]["inputs"]["ports"] = json.dumps(
+            [json.loads(self.prompt["1"]["inputs"]["ports"])[0], self.port]
+        )
+        identity = workflow_files.add_instance(
+            self.project.root,
+            workflow_files.pack(self.workflow, self.prompt),
+            "Dynamic",
+        )
+        with mock.patch.dict(
+            nodes.NODE_CLASS_MAPPINGS, {"CanvasDynamicTextTest": DynamicText}
+        ):
+            for expected in (4, 5):
+                document = self.project.document(execution=True)
+                key = identity + ":node:compute"
+                prompt = {key: copy.deepcopy(document["prompt"][key])}
+                used, updates = workflow_files.prepare_controls(
+                    self.project.root,
+                    prompt,
+                    document["controls"],
+                    document["control_parameters"],
+                )
+                self.assertEqual(used[key]["mode.count"], expected)
+                workflow_files.commit_controls(self.project.root, updates)
+                saved = workflow_files.read_instance(self.project.root, identity)[
+                    "parameters"
+                ]["mode"]
+                self.assertEqual(saved["branches"]["number"]["count"], expected)
+                self.assertEqual(saved["controls"], state["controls"])
+
     def test_definition_and_all_branches_are_validated(self):
         for spec in (
-            ["MODEL", {}], ["FLOAT", {"forceInput": True}],
+            ["MODEL", {}],
+            ["FLOAT", {"forceInput": True}],
             ["COMFY_AUTOGROW_V3", {}],
         ):
             port = copy.deepcopy(self.port)
             port["options"]["options"][2]["inputs"]["required"]["bad"] = spec
-            with self.subTest(spec=spec), self.assertRaisesRegex(ValueError, "editable"):
+            with (
+                self.subTest(spec=spec),
+                self.assertRaisesRegex(ValueError, "editable"),
+            ):
                 parse_ports(json.dumps([dict(port, slot=0)]))
         for mutate in (
             lambda v: v.update(selected="unknown"),
             lambda v: v["branches"].pop("empty"),
             lambda v: v["branches"]["number"].update(count=True),
-            lambda v: v["branches"]["number"]["format"]["branches"]["hex"].update(prefix=3),
+            lambda v: v["branches"]["number"]["format"]["branches"]["hex"].update(
+                prefix=3
+            ),
             lambda v: v["branches"]["empty"].update(extra=0),
         ):
             state = copy.deepcopy(self.port["default"])
@@ -153,7 +209,8 @@ class DynamicParametersTest(unittest.TestCase):
                 validate_parameter(self.port, state)
         port = copy.deepcopy(self.port)
         port["options"]["options"][2]["inputs"]["required"]["file"] = [
-            "COMBO", {"options": []},
+            "COMBO",
+            {"options": []},
         ]
         port.pop("default")
         self.assertIsNone(parameter_default(port)["branches"]["empty"]["file"])
@@ -169,28 +226,42 @@ class DynamicParametersTest(unittest.TestCase):
         state["branches"]["number"]["format"]["selected"] = "hex"
         canvas = workflow_files.load_json(self.project.root / "canvas.json")
         workflow_files.patch(
-            self.project.root, canvas["revision"],
+            self.project.root,
+            canvas["revision"],
             [dict(type="input", id=a + ":parameters", name="mode", value=state)],
         )
         display = projection.document(self.project.root)
         self.assertEqual(display["cards"][0]["fields"][0]["type"], DYNAMIC_COMBO)
         self.assertEqual(display["cards"][0]["ports"], [])
         result = projection.document(self.project.root, execution=True)
-        self.assertEqual(result["prompt"][a + ":node:compute"]["inputs"], {
-            "mode": "number", "mode.count": 31, "mode.format": "hex", "mode.format.prefix": "0x",
-        })
+        self.assertEqual(
+            result["prompt"][a + ":node:compute"]["inputs"],
+            {
+                "mode": "number",
+                "mode.count": 31,
+                "mode.format": "hex",
+                "mode.format.prefix": "0x",
+            },
+        )
         self.assertEqual(
             result["prompt"][b + ":node:compute"]["inputs"],
             {"mode": "plain", "mode.text": "plain"},
         )
-        self.assertNotIn(DYNAMIC_BINDINGS, result["prompt"][a + ":node:compute"]["_meta"])
+        self.assertNotIn(
+            DYNAMIC_BINDINGS, result["prompt"][a + ":node:compute"]["_meta"]
+        )
         opened = workflow_files.read_instance(self.project.root, a)
         workflow_files.save_instance(
-            self.project.root, a, self.workflow, self.prompt, opened["revision"],
+            self.project.root,
+            a,
+            self.workflow,
+            self.prompt,
+            opened["revision"],
             parameters={"mode": state},
         )
         self.assertEqual(
-            workflow_files.read_instance(self.project.root, a)["parameters"]["mode"], state
+            workflow_files.read_instance(self.project.root, a)["parameters"]["mode"],
+            state,
         )
         self.assertEqual(packed["extra"]["turing_card"]["prompt"], self.prompt)
 
@@ -204,8 +275,16 @@ class DynamicParametersTest(unittest.TestCase):
         invalid["branches"]["number"]["count"] = "bad"
         with self.assertRaises(ValueError):
             workflow_files.patch(
-                self.project.root, json.loads(previous)["revision"],
-                [dict(type="input", id=identity + ":parameters", name="mode", value=invalid)],
+                self.project.root,
+                json.loads(previous)["revision"],
+                [
+                    dict(
+                        type="input",
+                        id=identity + ":parameters",
+                        name="mode",
+                        value=invalid,
+                    )
+                ],
             )
         self.assertEqual(path.read_bytes(), previous)
 
@@ -237,7 +316,9 @@ class DynamicParametersTest(unittest.TestCase):
         mapping = {"CanvasDynamicTextTest": DynamicText}
         with mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, mapping):
             for selected, expected in (
-                ("plain", "plain"), ("number", "0x1f"), ("empty", "empty"),
+                ("plain", "plain"),
+                ("number", "0x1f"),
+                ("empty", "empty"),
             ):
                 state = copy.deepcopy(self.port["default"])
                 state["selected"] = selected

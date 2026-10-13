@@ -1,6 +1,7 @@
 """Material boundaries and private execution adapters using normal ComfyUI nodes."""
 
 from pathlib import Path
+import json
 import folder_paths
 from comfy_api.latest import Types
 from comfy_execution.graph import ExecutionBlocker
@@ -14,6 +15,7 @@ from .materials import (
     material_path,
     read_selected,
     save_media,
+    save_images,
 )
 
 
@@ -64,7 +66,21 @@ class Material:
                 fps=("FLOAT", {"default": 30.0, "min": 1.0, "max": 120.0, "step": 1.0}),
                 bit_depth=(["auto", 8, 10],),
                 color_space=(["sRGB", "HDR", "HDR PQ"],),
-                codec=(["none", *Types.VideoCodec.as_input()],),
+                codec=(
+                    [
+                        "h264",
+                        *[
+                            value
+                            for value in Types.VideoCodec.as_input()
+                            if value != "h264"
+                        ],
+                        "none",
+                    ],
+                    {
+                        "default": "h264",
+                        "tooltip": "Save encoding; legacy none values save as H264.",
+                    },
+                ),
             )
         return {"required": inputs, "optional": optional}
 
@@ -153,12 +169,9 @@ class Read:
     ):
         if target:
             project = Project(directory)
-            selected = (
-                {}
-                if source_state == "waiting"
-                else project.selections().get(target, {})
-            )
+            selected = {} if source_state == "waiting" else project.selection(target)
             text, asset = selected.get("text", ""), selected.get("asset", "")
+            start, end = selected.get("start", 0), selected.get("end", 0)
             if not (text if self.KIND == "text" else asset):
                 # Resolve only when this branch actually executes. Successful
                 # reads are retained by the logical task's continuation, while
@@ -195,6 +208,7 @@ class Write:
                 "bit_depth": (["auto", 8, 10],),
                 "color_space": (["sRGB", "HDR", "HDR PQ"],),
                 "codec": (["none", *Types.VideoCodec.as_input()],),
+                "configuration": ("STRING", {"default": ""}),
             },
         }
 
@@ -210,7 +224,8 @@ class Write:
         fps=30,
         bit_depth="auto",
         color_space="sRGB",
-        codec="none",
+        codec="h264",
+        configuration="",
     ):
         project = Project(directory)
         run = project.run(run_id)
@@ -218,8 +233,13 @@ class Write:
             raise ValueError("Execution destination mismatch")
         if run["status"] == "success":
             return {"ui": {"material": [run]}, "result": (run["asset"] or "",)}
+        parameters = json.loads(configuration) if configuration else None
         if self.KIND == "text":
-            selected = project.finish_run(run_id, text=value)
+            selected = project.finish_run(
+                run_id,
+                text=value,
+                configuration=parameters,
+            )
             return {
                 "ui": {
                     "material": [
@@ -233,8 +253,39 @@ class Write:
             asset, path = project.reserve(self.KIND, extension, prefix)
             if self.KIND == "video":
                 value = create_video(value, fps, audio, bit_depth, color_space, codec)
-            metadata = save_media(self.KIND, value, path, codec)
-            project.register(asset, self.KIND, metadata)
+            if self.KIND == "image":
+                path.parent.mkdir(parents=True, exist_ok=True)
+                saved = save_images(value, path)
+                project.register_many(
+                    "image",
+                    [
+                        (
+                            image_path.relative_to(project.root).as_posix(),
+                            {
+                                **metadata,
+                                **(
+                                    {"parameters": parameters}
+                                    if parameters is not None
+                                    else {}
+                                ),
+                            },
+                        )
+                        for image_path, metadata in saved
+                    ],
+                )
+                asset = saved[0][0].relative_to(project.root).as_posix()
+            else:
+                metadata = save_media(self.KIND, value, path, codec)
+                project.register(
+                    asset,
+                    self.KIND,
+                    {
+                        **metadata,
+                        **(
+                            {"parameters": parameters} if parameters is not None else {}
+                        ),
+                    },
+                )
         selected = project.finish_run(run_id, asset)
         return {
             "ui": {

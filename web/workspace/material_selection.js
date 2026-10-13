@@ -78,9 +78,37 @@ export async function importAsset(directory, kind, file) {
 export function chooseUpload(kind, upload) {
   const input = document.createElement("input");
   input.type = "file";
-  input.accept = kind + "/*";
+  input.accept = kind === "audio" ? "audio/*,video/*" : kind + "/*";
   input.onchange = () => {
     if (input.files[0]) upload(input.files[0]);
   };
   input.click();
+}
+
+export function acceptsFile(kind, file) {
+  if (file.type)
+    return (
+      file.type.startsWith(kind + "/") ||
+      (kind === "audio" && file.type.startsWith("video/"))
+    );
+  const extensions = {
+    image: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif"],
+    video: ["mp4", "webm", "mov", "mkv", "avi", "m4v"],
+    audio: [
+      "wav",
+      "mp3",
+      "flac",
+      "ogg",
+      "m4a",
+      "aac",
+      "opus",
+      "mp4",
+      "webm",
+      "mov",
+      "mkv",
+      "avi",
+      "m4v",
+    ],
+  };
+  return extensions[kind]?.includes(file.name.split(".").at(-1).toLowerCase()) || false;
 }

@@ -21,12 +21,10 @@ try {
   await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
-    const workspace = await import(
-      "/extensions/comfyui-turing-utils/material_workspace.js"
-    );
-    const { entries, syncPorts } = await import(
-      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
-    );
+    const workspace =
+      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const { entries, syncPorts } =
+      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
     const check = (value, message) => {
       if (!value) throw Error(message);
     };
@@ -68,7 +66,7 @@ try {
     const added = await workspace.addCard({ name });
     let card = app.graph._nodes.find((n) => n.properties.instance === added.id);
     const text = card.properties.materials.find((m) => m.kind === "text");
-    const widget = card.widgets.find((w) => w.name === text.id);
+    const widget = card.widgets.find((w) => w._materialId === text.id);
     check(
       widget.label === "说明文本",
       "Text label shows stable ID instead of port name",

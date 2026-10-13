@@ -16,6 +16,7 @@ import {
 } from "./workspace/documents.js";
 import { installProjectMaterials } from "./workspace/editor_materials.js";
 import { registerCanvasNodes } from "./workspace/card_nodes.js";
+import { installSidebar, rememberCanvas } from "./workspace/sidebar.js";
 import {
   importAsset,
   materialChanged,
@@ -25,7 +26,7 @@ import {
   selectionChanged,
 } from "./workspace/material_selection.js";
 import { request, report, action, prompt } from "./workspace/api.js";
-import { url, stopActivePreview } from "./workspace/material_controls.js";
+import { materialWidget, stopActivePreview } from "./workspace/material_controls.js";
 import {
   ROOT,
   CARD,
@@ -36,6 +37,7 @@ import {
   saveProject,
   saveProjectLayout,
   setProjectStatus,
+  restoreSavedValues,
   discardProjectFailures,
 } from "./workspace/project_state.js";
 import {
@@ -152,6 +154,7 @@ export async function openProject(directory, create = false) {
     prepare(await request(create ? "project/create" : "project/open", { directory })),
     `Canvas - ${directory}.json`,
   );
+  rememberCanvas(directory);
 }
 export async function addCard(spec, position) {
   const state = { ...project() },
@@ -334,9 +337,20 @@ async function saveCard(editing = editor(), task) {
     workflow,
     prompt: output,
     parameters,
+    base: editing.base,
   });
   editing.revision = result.revision;
-  if (editing.id) editing.parameters = parameters;
+  if (editing.id) {
+    const current = await request("card/open", editing);
+    restoreSavedValues(editing.directory, {
+      parameters: { [editing.id]: current.parameters },
+      control_modes: { [editing.id]: current.base.controls },
+      inputs: current.base.inputs,
+    });
+    editing.parameters = current.parameters;
+    editing.base = current.base;
+    editing.revision = current.revision;
+  }
   if (result.name) editing.name = result.name;
   delete editing.new;
   delete editing.source;
@@ -376,8 +390,8 @@ async function saveTemplate() {
   // Save As creates an independent library file/tab, never rebinds a project copy.
   await openTab(await loadDocument(reference), reference.name);
 }
-async function editTemplate() {
-  const name = await directoryPicker(false, { mode: "cards" });
+async function editTemplate(name) {
+  name ||= await directoryPicker(false, { mode: "cards" });
   if (!name) return;
   await openTab(await loadDocument({ name }), name);
 }
@@ -414,6 +428,7 @@ async function loadDocument(reference) {
           parameters: data.parameters,
           selections: data.selections,
           control_modes: data.control_modes,
+          base: data.base,
         }
       : {}),
   };
@@ -425,7 +440,7 @@ async function refreshMaterial(node, m, directory) {
     m.id,
     await request("selection", { directory, node: m.id }),
   );
-  const w = node.widgets.find((w) => w.name === m.id);
+  const w = materialWidget(node, m.id);
   await w?.refreshMaterialList?.();
 }
 function select(node, m, content) {
@@ -436,7 +451,7 @@ function select(node, m, content) {
 async function persistSelection(node, m, content) {
   if (
     (m.kind === "text" && content.text === (m.selection.text || "")) ||
-    (m.kind !== "text" && content.asset === m.selection.asset)
+    ("asset" in content && content.asset === m.selection.asset)
   )
     return;
   const directory = node.properties.directory;
@@ -447,9 +462,6 @@ async function persistSelection(node, m, content) {
     revision: m.selection.revision || 0,
   });
   await refreshMaterial(node, m, directory);
-  // Already inside the material mutation queue: waiting on that same queue
-  // here would deadlock. Only the public Save/Run boundaries flush it.
-  await saveProjectLayout(directory);
 }
 async function importMedia(node, m, file) {
   if (m.allowUpload === false) throw Error("这个素材桩已关闭卡片上传");
@@ -459,11 +471,10 @@ async function importMedia(node, m, file) {
   });
 }
 async function run(node, m) {
-  const state = { ...project() },
-    trims = Object.assign({}, ...app.graph._nodes.map((n) => n.trims || {}));
-  if (!m) return runCardMaterials(state, node.properties.instance, trims);
+  const state = { ...project() };
+  if (!m) return runCardMaterials(state, node.properties.instance);
   await saveProject(state.directory);
-  await runMaterial(state, m.id, trims);
+  await runMaterial(state, m.id);
 }
 
 async function restoreProject(directory) {
@@ -559,6 +570,7 @@ app.registerExtension({
     },
   ],
   setup() {
+    installSidebar({ openCanvas: openProject, editTemplate, editCard, addCard });
     bindDocument = installDocumentStorage({
       save: (reference, task) =>
         reference.directory && !reference.id
@@ -591,10 +603,17 @@ app.registerExtension({
       for (const node of app.rootGraph._nodes) {
         const m = node.properties.materials?.find((m) => m.id === target);
         if (!m || !selectionChanged(m.selection, selection)) continue;
+        if (m.selection.asset !== selection.asset) node.releasePlayer?.();
         m.selection = selection;
-        node.releasePlayer?.();
-        const widget = node.widgets.find((w) => w.name === target);
-        if (widget)
+        node.range?.refresh();
+        for (const key of ["start", "end"])
+          setWidgetValue(
+            node.widgets.find((w) => w.name === `trim:${target}:${key}`),
+            selection[key] || 0,
+          );
+        const widget = materialWidget(node, target);
+        if (widget?.textUndo) widget.textUndo.receive(selection.text || "");
+        else if (widget)
           setWidgetValue(
             widget,
             m.kind === "text"
@@ -604,9 +623,9 @@ app.registerExtension({
         widget?.refreshMaterialList?.().catch(report);
         const poster = node.posters?.get(target);
         if (poster) {
-          if (selection.asset) poster.src = url(directory, selection.asset, true);
-          else poster.removeAttribute("src");
+          poster.preview.refresh();
         }
+        node.updateResultState?.();
         node.graph.setDirtyCanvas(true, true);
       }
     });
@@ -641,7 +660,7 @@ app.registerExtension({
             ],
           },
         },
-        { content: "保存项目", callback: action(saveProject) },
+        { content: "保存画布", callback: action(saveProject) },
         {
           content: "执行选中卡片",
           callback: action(() =>
@@ -650,7 +669,6 @@ app.registerExtension({
               Object.values(this.selected_nodes || {})
                 .filter((n) => n.type === CARD)
                 .map((n) => n.properties.instance),
-              Object.assign({}, ...app.rootGraph._nodes.map((n) => n.trims || {})),
             ),
           ),
         },
