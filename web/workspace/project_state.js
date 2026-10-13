@@ -197,6 +197,22 @@ export async function saveProject(directory = project()?.directory) {
 // Selection commits already run inside their own write queue. This lower-level
 // layout save must not wait on that same material queue.
 export async function saveProjectLayout(directory) {
+  await writeProjectLayout(directory);
+}
+
+export async function removeProjectCard(directory, identity) {
+  await settleMaterials(directory);
+  await settleProjectWrites(directory);
+  return writeProjectLayout(directory, (current) => {
+    if (
+      !current.nodes.some((n) => n.type === CARD && n.properties.instance === identity)
+    )
+      throw Error("卡片已被移除，请重新打开画布");
+    current.nodes = current.nodes.filter((n) => n.properties.instance !== identity);
+  });
+}
+
+async function writeProjectLayout(directory, edit) {
   if (!directory) throw Error("当前不是画布");
   const state = projectState(directory);
   if (!state) return; // A closed project already saved before task submission.
@@ -207,6 +223,7 @@ export async function saveProjectLayout(directory) {
       // changed the native graph while this autosave was waiting.
       const current = snapshot(directory);
       if (!current) return { revision };
+      edit?.(current);
       // A native paste is visible before its asynchronous instance copy is
       // committed. Earlier queued autosaves must not submit that placeholder.
       current.nodes = current.nodes.filter((n) => !n.properties.copySource);
@@ -241,6 +258,7 @@ export async function saveProjectLayout(directory) {
       });
     });
     setProjectStatus(directory, "已保存", result.statistics);
+    return result;
   } catch (error) {
     setProjectStatus(directory, "保存失败");
     throw error;

@@ -201,6 +201,10 @@ def save_layout(project, workflow, revision):
                     broken.add(identity)
             if source in broken or target in broken:
                 connections.append(copy.deepcopy(connection))
+        if cards.keys() - layout.keys() and any(
+            task["status"] in {"queued", "running"} for task in project.operations()
+        ):
+            raise ValueError("Finish this Canvas's running tasks before deleting cards")
         canvas["cards"] = [c for c in canvas["cards"] if c["id"] in layout]
         canvas["layout"], canvas["connections"] = layout, connections
         canvas["view"] = copy.deepcopy(workflow.get("extra", {}).get("ds", {}))

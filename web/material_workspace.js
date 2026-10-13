@@ -36,6 +36,7 @@ import {
   enqueueSave,
   saveProject,
   saveProjectLayout,
+  removeProjectCard,
   setProjectStatus,
   restoreSavedValues,
   discardProjectFailures,
@@ -48,7 +49,6 @@ import {
   runSelectedCards,
 } from "./workspace/execution.js";
 
-let templates = [];
 let bindDocument;
 const copies = new Map();
 export { request } from "./workspace/api.js";
@@ -149,7 +149,6 @@ function prepare({ workflow, document, statistics }) {
 export async function openProject(directory, create = false) {
   if (!create && directory.endsWith("/canvas.json"))
     directory = directory.slice(0, -12);
-  templates = (await request("templates")).items;
   await openTab(
     prepare(await request(create ? "project/create" : "project/open", { directory })),
     `Canvas - ${directory}.json`,
@@ -277,6 +276,36 @@ async function editCard(node) {
     id = node.properties.instance;
   await openTab(await loadDocument({ directory, id }), `${id}.json`);
 }
+async function deleteCard(node) {
+  if (node.copyPending) throw Error("请等待卡片复制完成后再删除");
+  const { directory, instance } = node.properties;
+  const confirmed = await app.extensionManager.dialog.confirm({
+    title: "删除卡片",
+    message: `从画布删除“${node.title}”及其连线？已保存的素材和工作流文件会保留。`,
+  });
+  if (!confirmed) return;
+  // Persist first: a conflict or running task must leave the visible card intact.
+  await removeProjectCard(directory, instance);
+  if (project()?.directory === directory) {
+    const current = app.rootGraph._nodes.find(
+      (n) => n.properties.instance === instance,
+    );
+    if (current) app.rootGraph.remove(current);
+  } else {
+    const tab = app.extensionManager.workflow.openWorkflows.find(
+      (w) => w.activeState?.extra?.turing_project?.directory === directory,
+    );
+    if (tab) {
+      tab.activeState.nodes = tab.activeState.nodes.filter(
+        (n) => n.properties.instance !== instance,
+      );
+      const ids = new Set(tab.activeState.nodes.map((n) => n.id));
+      tab.activeState.links = tab.activeState.links.filter(
+        (link) => ids.has(link[1]) && ids.has(link[3]),
+      );
+    }
+  }
+}
 function restoreEditor(graph, editing) {
   const overrides = editing.parameters || {};
   const restore = (graph) => {
@@ -367,7 +396,6 @@ async function saveCard(editing = editor(), task) {
     // do not require reloading the tab to replace the instance-wide file list.
     if (editor() === editing) installEditorMaterials(app.rootGraph, editing);
   }
-  templates = (await request("templates")).items;
   app.extensionManager.toast.add({
     severity: "success",
     summary: "已保存卡片文件",
@@ -386,7 +414,6 @@ async function saveTemplate() {
     prompt: output,
     revision: editor()?.name === name ? editor().revision : undefined,
   });
-  templates = (await request("templates")).items;
   // Save As creates an independent library file/tab, never rebinds a project copy.
   await openTab(await loadDocument(reference), reference.name);
 }
@@ -495,6 +522,7 @@ app.registerExtension({
   registerCustomNodes() {
     registerCanvasNodes({
       editCard,
+      deleteCard,
       select,
       importMedia,
       run,
@@ -641,23 +669,37 @@ app.registerExtension({
         {
           content: "添加节点…",
           has_submenu: true,
-          submenu: {
-            options: [
-              ...[
-                ["图片", "image"],
-                ["视频", "video"],
-                ["音频", "audio"],
-                ["文本", "text"],
-              ].map(([label, kind]) => ({
-                content: label,
-                callback: action(() => addCard({ kind }, Array.from(this.graph_mouse))),
-              })),
-              null,
-              ...templates.map((name) => ({
-                content: name,
-                callback: action(() => addCard({ name }, Array.from(this.graph_mouse))),
-              })),
-            ],
+          callback: (_value, _options, event, parentMenu) => {
+            const directory = project().directory;
+            const position = Array.from(this.graph_mouse);
+            // Restored tabs do not run openProject. Read the library on demand
+            // rather than keeping an empty or stale module-level menu cache.
+            request("templates")
+              .then(({ items }) => {
+                if (!parentMenu.root.isConnected || project()?.directory !== directory)
+                  return;
+                new LiteGraph.ContextMenu(
+                  [
+                    ...[
+                      ["图片", "image"],
+                      ["视频", "video"],
+                      ["音频", "audio"],
+                      ["文本", "text"],
+                    ].map(([label, kind]) => ({
+                      content: label,
+                      callback: action(() => addCard({ kind }, position)),
+                    })),
+                    null,
+                    ...items.map((name) => ({
+                      content: name,
+                      callback: action(() => addCard({ name }, position)),
+                    })),
+                  ],
+                  { event, parentMenu },
+                );
+              })
+              .catch(report);
+            return true;
           },
         },
         { content: "保存画布", callback: action(saveProject) },

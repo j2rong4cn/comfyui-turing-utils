@@ -786,6 +786,16 @@ class WorkspaceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             save_layout(self.project, bad, result["revision"])
         graph["nodes"] = graph["nodes"][:1]
+        before_delete = (self.project.root / "canvas.json").read_bytes()
+        for status in ("queued", "running"):
+            with mock.patch.object(
+                self.project, "operations", return_value=[{"status": status}]
+            ):
+                with self.assertRaisesRegex(ValueError, "running tasks"):
+                    save_layout(self.project, graph, result["revision"])
+            self.assertEqual(
+                (self.project.root / "canvas.json").read_bytes(), before_delete
+            )
         save_layout(self.project, graph, result["revision"])
         self.assertTrue(workflow_files.card_path(self.project.root, identity).is_file())
 

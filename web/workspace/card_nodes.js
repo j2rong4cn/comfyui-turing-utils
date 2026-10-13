@@ -22,6 +22,7 @@ import {
 
 export function registerCanvasNodes({
   editCard,
+  deleteCard,
   select,
   importMedia,
   run,
@@ -99,6 +100,16 @@ export function registerCanvasNodes({
   class CardNode extends LiteGraph.LGraphNode {
     constructor() {
       super("Canvas Card");
+      this.removable = false;
+    }
+    getExtraMenuOptions() {
+      return [
+        {
+          content: "删除卡片…",
+          disabled: this.copyPending,
+          callback: action(() => deleteCard(this)),
+        },
+      ];
     }
     clone() {
       const node = super.clone();
@@ -168,6 +179,7 @@ export function registerCanvasNodes({
         });
         error.disabled = true;
         button(this, "编辑工作流", () => editCard(this));
+        button(this, "删除卡片…", () => deleteCard(this));
         this.setSize(this.computeSize());
         return;
       }
@@ -229,6 +241,7 @@ export function registerCanvasNodes({
         }
       }
       button(this, "编辑工作流", () => editCard(this));
+      button(this, "删除卡片…", () => deleteCard(this));
       const status = this.addWidget("text", "执行状态", "就绪", () => {}, {
         serialize: false,
       });
