@@ -73,13 +73,32 @@ function watchTask(directory, id) {
             )
           )
             continue;
-          const widget = node.widgets.find((w) => w.name === "执行状态");
-          if (widget)
-            widget.value = status.cancel_requested
-              ? "当前步骤完成后停止"
-              : `${status.status} · ${status.completed.length}/${status.targets.length}${status.error ? " · " + status.error : ""}`;
-          const stop = node.widgets.find((w) => w.name === "停止后续步骤");
-          if (stop) stop.disabled = !["queued", "running"].includes(status.status);
+          const targets = status.targets.filter((target) =>
+            target.startsWith(node.properties.instance + ":"),
+          );
+          const completed = targets.filter((target) =>
+            status.completed.includes(target),
+          ).length;
+          const active = ["queued", "running"].includes(status.status);
+          const label =
+            status.status === "queued"
+              ? "排队中"
+              : active
+                ? `执行中 ${completed}/${targets.length}`
+                : status.status === "success"
+                  ? ""
+                  : {
+                      failed: "执行失败",
+                      interrupted: "已中断",
+                      cancelled: "已取消",
+                      selection_changed: "保留手选结果",
+                    }[status.status] || "执行已停止";
+          node.title = `${node.properties.card.title}${label ? ` · ${label}` : ""}`;
+          for (const widget of node.widgets) {
+            if (!targets.includes(widget._executionTarget)) continue;
+            widget.label = `${widget._executionLabel}${active && !status.completed.includes(widget._executionTarget) ? ` · ${label}` : ""}`;
+            widget.options.tooltip = status.error || label;
+          }
           node.graph.setDirtyCanvas(true, true);
         }
       for (const [target, selection] of Object.entries(status.selections || {})) {
@@ -102,17 +121,6 @@ function watchTask(directory, id) {
   })().finally(() => jobs.delete(id));
   jobs.set(id, job);
   return job.promise;
-}
-
-export async function stopCard(node) {
-  for (const [id, job] of jobs)
-    if (
-      job.directory === node.properties.directory &&
-      job.status?.targets.some((target) =>
-        target.startsWith(node.properties.instance + ":"),
-      )
-    )
-      await request("task/cancel", { directory: job.directory, id });
 }
 
 export async function restoreTasks(directory) {

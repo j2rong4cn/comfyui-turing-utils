@@ -121,6 +121,23 @@ export function installEndpoint(node) {
     if (index < 0) return [];
     return [
       { content: "重命名", callback: (_, __, event) => rename(id, event) },
+      ...(node.type === INPUTS && ports[index].kind === "parameter"
+        ? [
+            {
+              content: `${ports[index].canvas_hidden ? "✓ " : ""}隐藏参数`,
+              callback: () =>
+                commit(() => {
+                  const ps = entries(node);
+                  const port = ps.find((p) => p.id === id);
+                  port.canvas_hidden = !port.canvas_hidden;
+                  // Presentation metadata only: retain native slots and links.
+                  node.widgets.find((w) => w.name === "ports").value =
+                    JSON.stringify(ps);
+                  node.graph?.setDirtyCanvas(true, true);
+                }),
+            },
+          ]
+        : []),
       ...[-1, 1].map((delta) => ({
         content: delta < 0 ? "上移" : "下移",
         disabled: index + delta < 0 || index + delta >= ports.length,

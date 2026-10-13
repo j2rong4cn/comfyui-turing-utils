@@ -7,7 +7,7 @@ import {
   normalizeAutogrowLayouts,
 } from "../lib/workflow_metadata.js";
 import { settleMaterials } from "./material_selection.js";
-import { settleProjectWrites } from "./project_state.js";
+import { settleProjectWrites, saveProject } from "./project_state.js";
 import { captureValueControls } from "../lib/value_controls.js";
 import {
   documentPath,
@@ -280,6 +280,7 @@ export function installDocumentStorage({ save, load, saveAs }) {
       if (!reference) return original(...args);
       if (id === "Comfy.SaveWorkflowAs") return saveAs(reference);
       await store.saveWorkflow(tab);
+      if (reference.directory && reference.id) await saveProject(reference.directory);
     };
   }
   // Native duplicate uses store.saveAs rather than tab.saveAs. Do not allow it

@@ -73,7 +73,11 @@ def parse_ports(value, *, endpoint=INPUTS):
                 raise ValueError("Parameter options must be an object")
             validate_definition(port)
             validate_parameter(port, parameter_default(port))
-        elif "default" in port:
+        if "canvas_hidden" in port and (
+            port["kind"] != "parameter" or type(port["canvas_hidden"]) is not bool
+        ):
+            raise ValueError("Only editable parameters may be hidden on a card")
+        if port["kind"] != "parameter" and "default" in port:
             if port["type"] != "STRING" or not isinstance(port["default"], str):
                 raise ValueError("Only text materials may have an inline default")
         identities.add(port["id"])

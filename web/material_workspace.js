@@ -404,7 +404,10 @@ async function saveCard(editing = editor(), task) {
 }
 async function saveTemplate() {
   if (project()) throw Error("请在卡片工作流中保存模板");
-  const name = await prompt("卡片文件名", editor()?.name || "我的卡片.json");
+  const name = await prompt(
+    "新卡片文件名",
+    editor()?.name ? editor().name.replace(/\.json$/, " 副本.json") : "我的卡片.json",
+  );
   if (!name) return;
   const { workflow, output } = await snapshotCard();
   delete workflow.extra?.turing_editor;
@@ -412,7 +415,8 @@ async function saveTemplate() {
     name,
     workflow,
     prompt: output,
-    revision: editor()?.name === name ? editor().revision : undefined,
+    create_only: true,
+    export_instance: !!editor()?.id,
   });
   // Save As creates an independent library file/tab, never rebinds a project copy.
   await openTab(await loadDocument(reference), reference.name);
@@ -425,11 +429,31 @@ async function editTemplate(name) {
 
 async function saveCurrentCard() {
   if (project()) throw Error("请在卡片工作流中保存卡片");
-  if (editor()) return app.extensionManager.command.execute("Comfy.SaveWorkflow");
   return saveTemplate();
 }
+export async function deleteTemplate(name) {
+  name ||= await directoryPicker(false, {
+    mode: "cards",
+    title: "删除卡片模板 · 选择文件",
+  });
+  if (!name) return;
+  const tab = fileTab({ name });
+  if (tab?.isModified) throw Error("模板有未保存修改，请先保存或关闭编辑页");
+  const confirmed = await app.extensionManager.dialog.confirm({
+    title: "删除卡片模板",
+    message: `从卡片库删除“${name}”？已放入画布的副本不受影响。文件会移入 .trash，可恢复。`,
+  });
+  if (!confirmed) return;
+  const source = await request("template/open", { name });
+  await request("template/delete", { name, revision: source.revision });
+  if (tab) await app.extensionManager.workflow.closeWorkflow(tab);
+  api.dispatchCustomEvent("turing_card_library_changed", {});
+}
 async function copyTemplate() {
-  const name = await directoryPicker(false, { mode: "cards" });
+  const name = await directoryPicker(false, {
+    mode: "cards",
+    title: "复制卡片 · 选择模板",
+  });
   if (!name) return;
   const reference = { new: crypto.randomUUID(), source: name };
   await openTab(await loadDocument(reference), name.replace(/\.json$/, " 副本.json"));
@@ -522,6 +546,10 @@ app.registerExtension({
   registerCustomNodes() {
     registerCanvasNodes({
       editCard,
+      exportCard: async (node) => {
+        await editCard(node);
+        await saveTemplate();
+      },
       deleteCard,
       select,
       importMedia,
@@ -551,7 +579,7 @@ app.registerExtension({
       id: "Turing.MaterialWorkspace.SaveProject",
       label: "保存画布",
       function: action(async () => {
-        if (!project()) throw Error("请先打开画布");
+        if (!project() && !editor()?.id) throw Error("请先打开画布或画布内卡片");
         await app.extensionManager.command.execute("Comfy.SaveWorkflow");
       }),
     },
@@ -582,6 +610,11 @@ app.registerExtension({
       label: "保存卡片",
       function: action(saveCurrentCard),
     },
+    {
+      id: "Turing.MaterialWorkspace.DeleteTemplate",
+      label: "删除卡片模板…",
+      function: action(() => deleteTemplate()),
+    },
   ],
   menuCommands: [
     {
@@ -594,11 +627,18 @@ app.registerExtension({
         "Edit",
         "Copy",
         "SaveTemplate",
+        "DeleteTemplate",
       ].map((n) => "Turing.MaterialWorkspace." + n),
     },
   ],
   setup() {
-    installSidebar({ openCanvas: openProject, editTemplate, editCard, addCard });
+    installSidebar({
+      openCanvas: openProject,
+      editTemplate,
+      editCard,
+      addCard,
+      deleteTemplate,
+    });
     bindDocument = installDocumentStorage({
       save: (reference, task) =>
         reference.directory && !reference.id

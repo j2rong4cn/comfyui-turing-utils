@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+import uuid
 
 import av
 import folder_paths
@@ -21,7 +22,7 @@ from .previews import PreviewBusy, PreviewStore
 from ..media.files import probe
 from .store import Conflict, Project, inside
 from . import workflow_files
-from .templates import material_template, new_card_template
+from .templates import material_template, new_card_template, export_card
 from .native import project_workflow, save_layout
 from .editor import select_material
 
@@ -105,7 +106,14 @@ def install_routes():
                 data["settings"], data["revision"]
             )
         )
-        return web.json_response({"revision": revision})
+        return web.json_response(
+            {
+                "revision": revision,
+                "settings": await asyncio.to_thread(
+                    lambda: Project(data["directory"]).settings()
+                ),
+            }
+        )
 
     @endpoint("post", "/directory/create")
     async def create_directory(request):
@@ -204,6 +212,8 @@ def install_routes():
         def save_file():
             with workflow_files.LOCK:
                 if path.exists():
+                    if data.get("create_only"):
+                        raise Conflict("Template name already exists; choose a new name")
                     if (
                         data.get("revision")
                         != hashlib.sha256(path.read_bytes()).hexdigest()
@@ -212,12 +222,37 @@ def install_routes():
                             "Template exists or changed; open it before replacing it"
                         )
                 workflow_files.atomic_json(
-                    path, workflow_files.pack(data["workflow"], data["prompt"])
+                    path,
+                    export_card(
+                        data["workflow"], data["prompt"],
+                        project=data.get("export_instance", False),
+                    )
+                    if data.get("create_only")
+                    else workflow_files.pack(data["workflow"], data["prompt"]),
                 )
                 return hashlib.sha256(path.read_bytes()).hexdigest()
 
         revision = await asyncio.to_thread(save_file)
         return web.json_response({"name": path.name, "revision": revision})
+
+    @endpoint("post", "/template/delete")
+    async def delete_template(request):
+        data = await request.json()
+        path = template_path(request, data["name"])
+        if (library(request) / data["name"]).is_symlink():
+            raise ValueError("Cannot delete a card template through a symbolic link")
+
+        def remove():
+            with workflow_files.LOCK:
+                if hashlib.sha256(path.read_bytes()).hexdigest() != data["revision"]:
+                    raise Conflict("Template changed; reopen before deleting it")
+                trash = inside(library(request), ".trash")
+                trash.mkdir(exist_ok=True)
+                destination = trash / f"{path.stem}.{uuid.uuid4().hex[:12]}.json"
+                path.replace(destination)
+                return {"name": path.name, "recoverable": True}
+
+        return web.json_response(await asyncio.to_thread(remove))
 
     @endpoint("post", "/card/add")
     async def add_card(request):
@@ -371,10 +406,17 @@ def install_routes():
     @endpoint("post", "/patch")
     async def patch(request):
         data = await request.json()
-        revision = await asyncio.to_thread(
-            lambda: Project(data["directory"]).patch(data["revision"], data["changes"])
-        )
-        return web.json_response({"revision": revision})
+
+        def update():
+            project = Project(data["directory"])
+            with workflow_files.LOCK:
+                project.patch(data["revision"], data["changes"])
+                return workflow_files.parameter_state(
+                    project.root,
+                    card_ids={change["id"].split(":", 1)[0] for change in data["changes"]},
+                )
+
+        return web.json_response(await asyncio.to_thread(update))
 
     @endpoint("post", "/select")
     async def select(request):

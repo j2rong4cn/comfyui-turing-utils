@@ -214,6 +214,9 @@ def compile_segment(
             class_type = "_TuringMaterialWrite" + kind.title()
         else:
             class_type = node["class_type"]
+            if class_type == "TuringUtilsMultimodalPromptChat":
+                class_type = "_TuringCanvasChat"
+                inputs["directory"] = directory
         compiled[key] = {
             "class_type": class_type,
             "inputs": inputs,

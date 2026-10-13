@@ -1,12 +1,13 @@
 import { addValueControlWidgets } from "../../../scripts/widgets.js";
 
-const MODES = new Set([
+export const VALUE_CONTROL_MODES = [
   "fixed",
   "increment",
   "decrement",
   "randomize",
   "increment-wrap",
-]);
+];
+const MODES = new Set(VALUE_CONTROL_MODES);
 
 export function linkedControl(widget) {
   const linked = widget?.linkedWidgets || [];

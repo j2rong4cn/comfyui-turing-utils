@@ -3,11 +3,13 @@
 from pathlib import Path
 import json
 import folder_paths
-from comfy_api.latest import Types
+from comfy_api.latest import Types, io
 from comfy_execution.graph import ExecutionBlocker
 from .store import Project
 from .endpoints import ENDPOINT_NODES, POSITION
 from ..nodes import INTERNAL_NODE_NOTE
+from ..nodes.multimodal_chat import MultimodalPromptChat
+from .chat import resolve_chat, chat_settings
 from .protocol import MATERIAL_TYPES
 from .materials import (
     create_video,
@@ -305,7 +307,29 @@ class Write:
 PUBLIC_NODES = {}
 
 
-INTERNAL_NODES = {}
+class CanvasChat(MultimodalPromptChat):
+    @classmethod
+    def define_schema(cls):
+        schema = MultimodalPromptChat.define_schema()
+        schema.node_id = "_TuringCanvasChat"
+        schema.display_name = "Canvas Chat (Internal)"
+        schema.category = ""
+        schema.description = INTERNAL_NODE_NOTE
+        schema.is_dev_only = True
+        schema.search_aliases = []
+        schema.inputs.append(io.String.Input("directory"))
+        return schema
+
+    @classmethod
+    async def execute(cls, directory, **inputs):
+        # Only a project reference enters native queue/history. Global secrets
+        # stay in the private project file and are read at the request boundary.
+        settings = Project(directory).settings(private=True)
+        inputs.update(resolve_chat(inputs, chat_settings(settings.get("chat", {}))))
+        return await MultimodalPromptChat.execute(**inputs)
+
+
+INTERNAL_NODES = {"_TuringCanvasChat": CanvasChat}
 
 
 for _kind, _returns in MATERIAL_TYPES.items():

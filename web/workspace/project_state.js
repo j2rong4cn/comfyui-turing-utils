@@ -112,8 +112,8 @@ export function restoreSavedValues(directory, saved) {
       if (widget) setWidgetValue(widget, parameters[field.input]);
       const mode = saved.control_modes?.[node.properties.instance]?.[field.input];
       const control = widget?.linkedWidgets?.[0];
-      if (mode && control && control.value === field.control?.mode) {
-        setWidgetValue(control, mode.mode);
+      if (mode && (!control || control.value === field.control?.mode)) {
+        if (control) setWidgetValue(control, mode.mode);
         field.control = mode;
       }
     }

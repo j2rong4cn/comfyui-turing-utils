@@ -4,10 +4,8 @@ import { setWidgetValue } from "../lib/parameter_widget.js";
 import { action, report, request } from "./api.js";
 import {
   button,
-  field,
   poster,
   url,
-  playPreview,
   releasePlayer,
   clearPosters,
 } from "./material_controls.js";
@@ -60,10 +58,6 @@ export function installProjectMaterials(graph, editing, run) {
         widget.value = selection.asset?.split("/").at(-1) || "";
         node.posters?.get(target)?.preview.refresh();
         node.range?.refresh();
-      }
-      for (const name of ["start", "end"]) {
-        const trim = node.widgets.find((w) => w.name === `trim:${name}`);
-        if (trim) setWidgetValue(trim, selection[name] || 0);
       }
       node.graph?.setDirtyCanvas(true, true);
     };
@@ -145,13 +139,10 @@ export function installProjectMaterials(graph, editing, run) {
         upload(file);
         return true;
       };
+      node.selectMaterial = (_material, content) => select(content);
       poster(node, material, editing.directory, (_node, _material, file) =>
         upload(file),
       );
-      if (["video", "audio"].includes(kind))
-        button(node, "播放", () =>
-          playPreview(node, material, editing.directory, select),
-        );
       const audioUI = node.widgets.find((w) => w.name === "audioUI");
       if (audioUI) {
         audioUI.element.removeAttribute("src");
@@ -160,19 +151,6 @@ export function installProjectMaterials(graph, editing, run) {
         audioUI.options.hidden = true;
         audioUI.computeSize = () => [0, -4];
       }
-      if (["video", "audio"].includes(kind))
-        for (const [name, label] of [
-          ["start", "起点（秒）"],
-          ["end", "终点（秒，0 为末尾）"],
-        ])
-          field(
-            node,
-            `trim:${name}`,
-            "FLOAT",
-            state.selection[name] || 0,
-            (value) => select({ [name]: value }),
-            { label, min: 0, precision: 2 },
-          );
     }
     update(state.selection);
     button(node, "执行到这里", () => run(node, target));

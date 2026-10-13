@@ -16,8 +16,9 @@ try {
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
-    const workspace =
-      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const workspace = await import(
+      "/extensions/comfyui-turing-utils/material_workspace.js"
+    );
     const check = (ok, message) => {
       if (!ok) throw Error(message);
     };
@@ -102,9 +103,11 @@ try {
       return { card, targets: ids.map((id) => `${added.id}:${id}`) };
     }
     const runAll = (card) => {
-      const button = card.widgets.at(-1);
-      check(button.name === "执行全部桩节点", "Run-all button is not at the bottom");
-      return button.callback().then(syncSubmitted);
+      const action = card
+        .getExtraMenuOptions()
+        .find((o) => o.content === "执行全部桩节点");
+      check(action, "Run-all action is missing from the context menu");
+      return action.callback().then(syncSubmitted);
     };
     try {
       const { card, targets } = await createChain("generated");

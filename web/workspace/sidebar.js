@@ -41,7 +41,13 @@ export function rememberCanvas(directory) {
   refresh?.();
 }
 
-export function installSidebar({ openCanvas, editTemplate, editCard, addCard }) {
+export function installSidebar({
+  openCanvas,
+  editTemplate,
+  editCard,
+  addCard,
+  deleteTemplate,
+}) {
   let container,
     generation = 0,
     unsubscribe;
@@ -123,7 +129,13 @@ export function installSidebar({ openCanvas, editTemplate, editCard, addCard }) 
         row.oncontextmenu = (event) => {
           event.preventDefault();
           new LiteGraph.ContextMenu(
-            [{ content: "编辑卡片模板", callback: action(() => editTemplate(name)) }],
+            [
+              { content: "编辑卡片模板", callback: action(() => editTemplate(name)) },
+              {
+                content: "删除卡片模板…",
+                callback: action(() => deleteTemplate(name)),
+              },
+            ],
             { event },
           );
         };
@@ -162,4 +174,5 @@ export function installSidebar({ openCanvas, editTemplate, editCard, addCard }) 
       frame = null;
     },
   });
+  api.addEventListener("turing_card_library_changed", () => refresh?.());
 }

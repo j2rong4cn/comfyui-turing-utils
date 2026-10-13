@@ -1,27 +1,20 @@
 /** Native Canvas presentation nodes; persistence and execution stay in services. */
 import {
   field,
-  button,
   controls,
-  url,
   releasePlayer,
   clearPosters,
   updateResultState,
 } from "./material_controls.js";
 import { request, report, action } from "./api.js";
 import { valueControlWidget } from "../lib/value_controls.js";
-import { stopCard } from "./execution.js";
+import { hiddenParameters, projectChat, saveParameters } from "./parameters.js";
 import { refreshCanvasInstances } from "./sidebar.js";
-import {
-  ROOT,
-  CARD,
-  enqueueSave,
-  saveProject,
-  setProjectStatus,
-} from "./project_state.js";
+import { ROOT, CARD, enqueueSave, setProjectStatus } from "./project_state.js";
 
 export function registerCanvasNodes({
   editCard,
+  exportCard,
   deleteCard,
   select,
   importMedia,
@@ -35,8 +28,16 @@ export function registerCanvasNodes({
       super("Canvas Project");
       this.flags = { pinned: true };
       this.clonable = false;
-      button(this, "保存画布", saveProject);
-      button(this, "撤销未保存修改", () => restoreProject(this.properties.directory));
+      this.widgets = [];
+    }
+    getExtraMenuOptions() {
+      return [
+        { content: "Chat API 设置…", callback: action(() => projectChat(this)) },
+        {
+          content: "撤销未保存修改",
+          callback: action(() => restoreProject(this.properties.directory)),
+        },
+      ];
     }
     onConfigure() {
       this.flags.pinned = true;
@@ -70,7 +71,7 @@ export function registerCanvasNodes({
                     revision,
                     settings: next,
                   });
-                  this.properties.settings = next;
+                  this.properties.settings = result.settings;
                   return result;
                 },
                 `settings:${key}`,
@@ -104,6 +105,24 @@ export function registerCanvasNodes({
     }
     getExtraMenuOptions() {
       return [
+        {
+          content: "执行全部桩节点",
+          disabled: this.copyPending || !!this.properties.card?.error,
+          callback: action(() => run(this)),
+        },
+        ...(this.properties.card?.fields.some((f) => f.hidden)
+          ? [{ content: "隐藏参数…", callback: action(() => hiddenParameters(this)) }]
+          : []),
+        {
+          content: "编辑工作流",
+          disabled: this.copyPending,
+          callback: action(() => editCard(this)),
+        },
+        {
+          content: "保存为新卡片模板…",
+          disabled: this.copyPending,
+          callback: action(() => exportCard(this)),
+        },
         {
           content: "删除卡片…",
           disabled: this.copyPending,
@@ -178,8 +197,6 @@ export function registerCanvasNodes({
           serialize: false,
         });
         error.disabled = true;
-        button(this, "编辑工作流", () => editCard(this));
-        button(this, "删除卡片…", () => deleteCard(this));
         this.setSize(this.computeSize());
         return;
       }
@@ -190,23 +207,16 @@ export function registerCanvasNodes({
           continue;
         }
         const f = item.field;
+        if (f.hidden) continue;
         const widget = field(
           this,
           f.input,
           f.type,
           this.properties.values[f.input],
           async (value) => {
-            const state = this.graph.extra.turing_project;
-            await enqueueSave(
-              state,
-              (revision) =>
-                request("patch", {
-                  ...state,
-                  revision,
-                  changes: [{ type: "input", id: f.node, name: f.input, value }],
-                }),
-              `input:${f.node}:${f.input}`,
-            );
+            await saveParameters(this, [
+              { type: "input", id: f.node, name: f.input, value },
+            ]);
             this.properties.values[f.input] = value;
             this.updateResultState();
           },
@@ -218,17 +228,9 @@ export function registerCanvasNodes({
             widget,
             f.control,
             action(async (value) => {
-              const state = this.graph.extra.turing_project;
-              await enqueueSave(
-                state,
-                (revision) =>
-                  request("patch", {
-                    ...state,
-                    revision,
-                    changes: [{ type: "control", id: f.node, name: f.input, value }],
-                  }),
-                `control:${f.node}:${f.input}`,
-              );
+              await saveParameters(this, [
+                { type: "control", id: f.node, name: f.input, value },
+              ]);
               f.control = value;
             }),
           );
@@ -240,15 +242,6 @@ export function registerCanvasNodes({
           widget.label = `${f.label} · 已连接`;
         }
       }
-      button(this, "编辑工作流", () => editCard(this));
-      button(this, "删除卡片…", () => deleteCard(this));
-      const status = this.addWidget("text", "执行状态", "就绪", () => {}, {
-        serialize: false,
-      });
-      status.disabled = true;
-      button(this, "执行全部桩节点", () => run(this));
-      const stop = button(this, "停止后续步骤", () => stopCard(this));
-      stop.disabled = true;
       this.updateResultState();
       this.setSize(this.computeSize());
       refreshCanvasInstances();

@@ -16,11 +16,13 @@ export class DirectoryPicker {
     dialog.style.cssText =
       "width:min(900px,92vw);max-height:80vh;padding:16px;background:var(--comfy-menu-bg,#222);color:var(--input-text,#eee);border:1px solid var(--border-color,#555);border-radius:8px";
     const heading = document.createElement("h3");
-    heading.textContent = cards
-      ? "编辑卡片 · 选择工作流文件"
-      : create
-        ? "新建画布 · 选择空文件夹"
-        : "打开画布 · 选择 canvas.json";
+    heading.textContent =
+      options.title ||
+      (cards
+        ? "编辑卡片 · 选择工作流文件"
+        : create
+          ? "新建画布 · 选择空文件夹"
+          : "打开画布 · 选择 canvas.json");
     const path = document.createElement("input");
     path.type = "text";
     path.placeholder = cards ? "卡片文件名" : "output 内的相对路径";

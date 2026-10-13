@@ -1,10 +1,87 @@
 """Ordinary starter workflows, with no generation-model assumptions."""
 
+import copy
 import json
+import re
 import uuid
 
 from .endpoints import INPUTS, OUTPUTS, POSITION
 from .protocol import MATERIAL_TYPES
+from .workflow_files import pack
+
+_ENV_KEY = re.compile(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _portable_key(value):
+    return value if _ENV_KEY.fullmatch(value.strip()) else ""
+
+
+def export_card(workflow, prompt, *, project=False):
+    """Export a new library file, not project bindings, history or credentials."""
+    workflow, prompt = copy.deepcopy(workflow), copy.deepcopy(prompt)
+    workflow.setdefault("extra", {}).pop("turing_editor", None)
+    workflow["extra"].pop("turing_project", None)
+    ports = {}
+    for key, node in prompt.items():
+        if node["class_type"] == INPUTS:
+            ports[key] = json.loads(node["inputs"]["ports"])
+    for node in prompt.values():
+        inputs = node.get("inputs", {})
+        if project and node["class_type"] in {
+            "TuringMaterialImage",
+            "TuringMaterialVideo",
+            "TuringMaterialAudio",
+        }:
+            field = "audio" if node["class_type"] == "TuringMaterialAudio" else "file"
+            inputs[field] = ""
+        if node["class_type"] != "TuringUtilsMultimodalPromptChat":
+            continue
+        key = inputs.get("api_key", "")
+        if isinstance(key, str):
+            inputs["api_key"] = _portable_key(key)
+        elif isinstance(key, list) and key[0] in ports:
+            port = next(p for p in ports[key[0]] if p["slot"] == key[1])
+            value = port.get("default", "")
+            if isinstance(value, str):
+                port["default"] = _portable_key(value)
+    for key, entries in ports.items():
+        prompt[key]["inputs"]["ports"] = json.dumps(entries)
+    source_nodes = list(workflow.get("nodes", []))
+    for graph in workflow.get("definitions", {}).get("subgraphs", []):
+        source_nodes.extend(graph.get("nodes", []))
+    for node in source_nodes:
+        named = node.get("widgets_values_named", {})
+        positional = node.get("widgets_values", [])
+        if node["type"] == INPUTS:
+            # Definitions may be nested; stable port IDs identify their schema.
+            old = named.get("ports", positional[0] if positional else "[]")
+            old_ids = {p["id"] for p in json.loads(old)}
+            entries = next(
+                (p for p in ports.values() if {e["id"] for e in p} == old_ids), None
+            )
+            if entries is not None:
+                text = json.dumps(entries)
+                named["ports"] = text
+                node["widgets_values_named"] = named
+                if positional:
+                    positional[0] = text
+        if node["type"] == "TuringUtilsMultimodalPromptChat":
+            key = named.get("api_key", positional[4] if len(positional) > 4 else "")
+            if isinstance(key, str):
+                # The first five ordinary Chat widgets are prompt/system/URL/
+                # model/key. Keep this snapshot mirror aligned with its schema.
+                named["api_key"] = _portable_key(key)
+                node["widgets_values_named"] = named
+                if len(positional) > 4:
+                    positional[4] = named["api_key"]
+        if project and node["type"] in {
+            "TuringMaterialImage", "TuringMaterialVideo", "TuringMaterialAudio"
+        }:
+            named["audio" if node["type"] == "TuringMaterialAudio" else "file"] = ""
+            node["widgets_values_named"] = named
+            if len(positional) > 1:
+                positional[1] = ""
+    return pack(workflow, prompt)
 
 
 def material_template(kinds=("image", "video", "audio", "text")):

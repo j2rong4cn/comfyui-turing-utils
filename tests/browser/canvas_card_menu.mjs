@@ -14,8 +14,9 @@ try {
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18187");
   await selectRenderer(page);
   const result = await page.evaluate(async () => {
-    const workspace =
-      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const workspace = await import(
+      "/extensions/comfyui-turing-utils/material_workspace.js"
+    );
     const directory = `card-menu-${Date.now()}`;
     await workspace.request("directory/create", { directory });
     await workspace.openProject(directory, true);
@@ -49,9 +50,8 @@ try {
     menu.close();
     if (card.removable !== false)
       throw Error("Unconfirmed native deletion remains enabled");
-    const remove = card.widgets.find((w) => w.name === "删除卡片…");
-    if (!remove || !card.getExtraMenuOptions().some((o) => o.content === "删除卡片…"))
-      throw Error("Delete action not exposed");
+    const remove = card.getExtraMenuOptions().find((o) => o.content === "删除卡片…");
+    if (!remove) throw Error("Delete action not exposed");
     const confirm = app.extensionManager.dialog.confirm;
     let confirmations = 0;
     try {

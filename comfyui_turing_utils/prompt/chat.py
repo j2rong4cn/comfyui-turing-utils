@@ -12,7 +12,7 @@ import re
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 import torch
 from PIL import Image
@@ -38,6 +38,27 @@ _DYNAMIC_SUFFIX = re.compile(r"(\d+)$")
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 _RESERVED_BODY_FIELDS = {"model", "messages", "stream", "max_tokens", "temperature"}
 _H3_VIDEO_FRAME_RATE = 24.0
+
+
+class SameOriginRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        origin, destination = urlsplit(request.full_url), urlsplit(newurl)
+        if (
+            origin.scheme,
+            origin.hostname,
+            origin.port or (443 if origin.scheme == "https" else 80),
+        ) != (
+            destination.scheme,
+            destination.hostname,
+            destination.port or (443 if destination.scheme == "https" else 80),
+        ):
+            raise ValueError(
+                "Chat API cross-origin redirect refused; configure its final URL explicitly"
+            )
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
+
+
+urlopen = build_opener(SameOriginRedirect()).open
 
 
 @dataclass(frozen=True)
@@ -403,8 +424,11 @@ def request_chat_completion(
             payload = error.read(_MAX_RESPONSE_BYTES)
             retryable = error.code in (408, 429) or 500 <= error.code < 600
             if not retryable or attempt >= max_retries:
+                message = _error_text(payload)
+                if api_key:
+                    message = message.replace(api_key, "[redacted]")
                 raise RuntimeError(
-                    f"Chat API HTTP {error.code}: {_error_text(payload)}"
+                    f"Chat API HTTP {error.code}: {message}"
                 ) from error
             retry_after = error.headers.get("Retry-After")
             try:

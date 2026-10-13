@@ -147,6 +147,11 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                         )
             form_prompt[node_id] = {**node, "inputs": inputs}
         local_controls = workflow_controls(workflow, form_prompt, identities)
+        parameter_sources = {}
+        for key, node in data["prompt"].items():
+            for name, binding in parameter_ports.get(identities[key], {}).items():
+                port_id = binding["port"] if isinstance(binding, dict) else binding
+                parameter_sources.setdefault(port_id, []).append((node, name))
         form_controls = {}
         for key, fields in parameter_ports.items():
             for name, port_id in fields.items():
@@ -265,12 +270,32 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
             elif is_parameter(port):
                 value = overrides.get(port["id"], parameter_default(port))
                 parameters[port["id"]] = value
+                sources = parameter_sources.get(port["id"], [])
                 field = {
                     "node": configuration_id,
                     "input": port["id"],
                     "label": port["name"],
                     "type": port["type"],
-                    "options": parameter_options(port),
+                    "options": {
+                        **parameter_options(port),
+                        **(
+                            {"password": True, "multiline": False}
+                            if any(
+                                node["class_type"] == "TuringUtilsMultimodalPromptChat"
+                                and name == "api_key"
+                                for node, name in sources
+                            )
+                            else {}
+                        ),
+                    },
+                    "hidden": port.get("canvas_hidden", False),
+                    "group": next(
+                        (
+                            node.get("_meta", {}).get("title", node["class_type"])
+                            for node, _ in sources
+                        ),
+                        "Parameters",
+                    ),
                     **(
                         {"control": form_controls[port["id"]]}
                         if port["id"] in form_controls

@@ -12,6 +12,7 @@ import folder_paths
 from . import workflow_files, workflow_state
 from .projection import document as project_document
 from .runs import finish_run, recover_publications
+from .chat import api_origin, chat_settings, public_settings
 
 
 def inside(root, relative):
@@ -323,21 +324,23 @@ class Project:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def settings(self, canvas=None):
+    def settings(self, canvas=None, *, private=False):
         with workflow_files.LOCK:
             if canvas is None:
                 canvas = workflow_files.load_json(self.root / "canvas.json")
-            return {
+            settings = {
                 "name": self.root.name,
                 "max_megapixels": 4.0,
                 **workflow_files.load_json(
                     workflow_files.card_path(self.root, canvas["root"])
                 )["nodes"][0]["properties"]["settings"],
             }
+            return settings if private else public_settings(settings)
 
     def save_settings(self, settings, revision):
         if (
-            set(settings) != {"name", "max_megapixels"}
+            set(settings) - {"name", "max_megapixels", "chat"}
+            or not {"name", "max_megapixels"} <= set(settings)
             or not isinstance(settings["name"], str)
             or not settings["name"].strip()
         ):
@@ -349,6 +352,15 @@ class Project:
             canvas = workflow_files.load_json(self.root / "canvas.json")
             if canvas["revision"] != revision:
                 raise Conflict("Project changed; reopen before changing settings")
+            previous = self.settings(canvas, private=True).get("chat", {})
+            chat = settings.get("chat", previous)
+            normalized = chat_settings(chat)
+            if "api_key" not in chat:
+                same_origin = api_origin(normalized["base_url"]) == api_origin(
+                    previous.get("base_url", "")
+                )
+                normalized["api_key"] = previous.get("api_key", "") if same_origin else ""
+            settings = {**settings, "chat": normalized}
             canvas["revision"] += 1
             workflow_files.commit_project(
                 self.root,

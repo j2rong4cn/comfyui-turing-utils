@@ -40,6 +40,7 @@ function installDownloadMenu(
   node,
   material,
   directory = node.properties.directory,
+  importMedia,
 ) {
   element.oncontextmenu = (event) => {
     event.preventDefault();
@@ -47,6 +48,18 @@ function installDownloadMenu(
     LiteGraph.closeAllContextMenus();
     new LiteGraph.ContextMenu(
       [
+        ...(importMedia && material.allowUpload !== false
+          ? [
+              {
+                content: "choose file to upload…",
+                callback: () =>
+                  chooseUpload(
+                    material.kind,
+                    action((file) => importMedia(node, material, file)),
+                  ),
+              },
+            ]
+          : []),
         {
           content: "素材信息",
           disabled: !material.selection.asset,
@@ -134,7 +147,22 @@ export function poster(node, m, directory, importMedia) {
           release: () => img.removeAttribute("src"),
         };
   img.preview.refresh();
-  installDownloadMenu(element, node, m, directory);
+  installDownloadMenu(element, node, m, directory, importMedia);
+  if (m.kind !== "image")
+    element.onclick = (event) => {
+      if (event.target === element || event.target === img)
+        playPreview(
+          node,
+          m,
+          directory,
+          (trim) => node.selectMaterial(m, trim),
+          importMedia,
+        );
+    };
+  element.title =
+    m.kind === "image"
+      ? "拖入素材；右键上传或下载"
+      : "点击播放；拖入素材；右键上传或下载";
   element.ondragover = (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -167,19 +195,23 @@ export function poster(node, m, directory, importMedia) {
   };
   widget.onRemove = () => {
     img.preview.release();
-    element.ondragover = element.ondrop = null;
+    element.ondragover =
+      element.ondrop =
+      element.onclick =
+      element.oncontextmenu =
+        null;
   };
   return element;
 }
-export function playPreview(node, m, directory, select) {
+export function playPreview(node, m, directory, select, importMedia) {
   if (!m.selection.asset) return;
   playing?.releasePlayer();
   releasePlayer(node);
   node.releasePlayer ||= () => releasePlayer(node);
   const host = node.previewElements.get(m.id);
   const media = document.createElement(m.kind);
-  installDownloadMenu(media, node, m, directory);
-  media.controls = true;
+  installDownloadMenu(media, node, m, directory, importMedia);
+  media.controls = false;
   media.preload = "none";
   media.style.cssText = "width:100%;min-height:0;flex:1;object-fit:contain";
   node.range = mediaRange(media, () => m.selection, action(select));
@@ -198,6 +230,7 @@ export function playPreview(node, m, directory, select) {
 }
 
 export function controls(node, m, { select, importMedia, run }) {
+  node.selectMaterial = (material, content) => select(node, material, content);
   if (m.kind === "text") {
     const widget = field(
       node,
@@ -237,40 +270,12 @@ export function controls(node, m, { select, importMedia, run }) {
       kind: m.kind,
       preview: (asset) => (m.kind === "audio" ? "" : url(directory, asset, true)),
     }).catch(report);
-    if (m.allowUpload !== false)
-      button(node, "choose file to upload", () =>
-        chooseUpload(
-          m.kind,
-          action((file) => importMedia(node, m, file)),
-        ),
-      );
-    if (m.kind !== "image")
-      button(node, `${m.kind} · 播放`, () =>
-        playPreview(node, m, directory, (trim) => select(node, m, trim)),
-      );
   }
-  if (["video", "audio"].includes(m.kind)) {
-    for (const [key, label] of [
-      ["start", "起点（秒）"],
-      ["end", "终点（秒，0 为末尾）"],
-    ])
-      field(
-        node,
-        `trim:${m.id}:${key}`,
-        "FLOAT",
-        m.selection[key] || 0,
-        async (value) => {
-          await select(node, m, { [key]: value });
-        },
-        { label: `${m.name} · ${label}`, min: 0, step: 1, precision: 2 },
-      );
+  if (m.executable) {
+    const widget = button(node, `${m.kind} · 执行到这里`, () => run(node, m));
+    widget._executionTarget = m.id;
+    widget._executionLabel = widget.label;
   }
-  if (m.executable) button(node, `${m.kind} · 执行到这里`, () => run(node, m));
-  const result = node.addWidget("text", `result:${m.id}`, "", () => {}, {
-    serialize: false,
-  });
-  result.label = `${m.name} · 结果状态`;
-  result.disabled = true;
 }
 
 function comparable(value) {
@@ -286,10 +291,10 @@ function comparable(value) {
 
 export function updateResultState(node) {
   for (const material of node.properties.materials || []) {
-    const widget = node.widgets.find((w) => w.name === `result:${material.id}`);
+    const widget = materialWidget(node, material.id);
     if (!widget) continue;
     const parameters = material.selection.generated_parameters;
-    widget.value =
+    const description =
       parameters &&
       JSON.stringify(comparable(parameters)) !==
         JSON.stringify(comparable(node.properties.values))
@@ -297,6 +302,10 @@ export function updateResultState(node) {
         : material.selection.asset || material.selection.text
           ? "已选素材"
           : "暂无素材";
+    widget.options.tooltip = description;
+    const preview = node.previewElements?.get(material.id);
+    if (preview)
+      preview.title = `${description}；右键上传或下载${material.kind === "image" ? "" : "；点击播放"}`;
   }
 }
 
