@@ -35,12 +35,13 @@ export function url(directory, asset, thumbnail = false, start = 0) {
       }),
   );
 }
-function installDownloadMenu(
+function installMaterialMenu(
   element,
   node,
   material,
   directory = node.properties.directory,
   importMedia,
+  run,
 ) {
   element.oncontextmenu = (event) => {
     event.preventDefault();
@@ -48,72 +49,110 @@ function installDownloadMenu(
     LiteGraph.closeAllContextMenus();
     new LiteGraph.ContextMenu(
       [
-        ...(importMedia && material.allowUpload !== false
+        ...(run
           ? [
               {
-                content: "choose file to upload…",
-                callback: () =>
-                  chooseUpload(
-                    material.kind,
-                    action((file) => importMedia(node, material, file)),
-                  ),
+                content: "生成",
+                disabled:
+                  !material.executable ||
+                  !!node.materialStates?.get(material.id)?.active,
+                callback: action(() => run(node, material)),
               },
             ]
           : []),
-        {
-          content: "素材信息",
-          disabled: !material.selection.asset,
-          callback: action(async () => {
-            const info = await request("material/info", {
-              directory,
-              node: material.id,
-            });
-            app.extensionManager.toast.add({
-              severity: "info",
-              summary: info.name,
-              detail: [
-                info.width
-                  ? `原件 ${info.width} × ${info.height}；下游输入 ${info.output_width} × ${info.output_height}`
-                  : "",
-                info.output_duration
-                  ? `输出 ${info.output_duration.toFixed(2)} 秒`
-                  : "",
-              ]
-                .filter(Boolean)
-                .join("\n"),
-              life: 8000,
-            });
-          }),
-        },
-        {
-          content: "下载原始素材",
-          disabled: !material.selection.asset,
-          callback: () => {
-            const link = document.createElement("a");
-            link.href = url(directory, material.selection.asset);
-            link.download = material.selection.asset.split("/").at(-1);
-            link.click();
-          },
-        },
-        {
-          content: "下载当前输出",
-          disabled: !material.selection.asset,
-          callback: () => {
-            const link = document.createElement("a");
-            link.href = api.apiURL(
-              "/turing/workspace/export?" +
-                new URLSearchParams({ directory, node: material.id }),
-            );
-            link.click();
-          },
-        },
+        ...(material.kind === "text"
+          ? [
+              {
+                content: "复制文本",
+                callback: action(() =>
+                  navigator.clipboard.writeText(
+                    materialWidget(node, material.id).value || "",
+                  ),
+                ),
+              },
+              {
+                content: "下载文本",
+                callback: () => {
+                  const link = document.createElement("a");
+                  link.href = URL.createObjectURL(
+                    new Blob([materialWidget(node, material.id).value || ""], {
+                      type: "text/plain;charset=utf-8",
+                    }),
+                  );
+                  link.download = `${material.name || "text"}.txt`;
+                  link.click();
+                  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+                },
+              },
+            ]
+          : [
+              ...(importMedia && material.allowUpload !== false
+                ? [
+                    {
+                      content: "choose file to upload…",
+                      callback: () =>
+                        chooseUpload(
+                          material.kind,
+                          action((file) => importMedia(node, material, file)),
+                        ),
+                    },
+                  ]
+                : []),
+              {
+                content: "素材信息",
+                disabled: !material.selection.asset,
+                callback: action(async () => {
+                  const info = await request("material/info", {
+                    directory,
+                    node: material.id,
+                  });
+                  app.extensionManager.toast.add({
+                    severity: "info",
+                    summary: info.name,
+                    detail: [
+                      info.width
+                        ? `原件 ${info.width} × ${info.height}；下游输入 ${info.output_width} × ${info.output_height}`
+                        : "",
+                      info.output_duration
+                        ? `输出 ${info.output_duration.toFixed(2)} 秒`
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join("\n"),
+                    life: 8000,
+                  });
+                }),
+              },
+              {
+                content: "下载原始素材",
+                disabled: !material.selection.asset,
+                callback: () => {
+                  const link = document.createElement("a");
+                  link.href = url(directory, material.selection.asset);
+                  link.download = material.selection.asset.split("/").at(-1);
+                  link.click();
+                },
+              },
+              {
+                content: "下载当前输出",
+                disabled: !material.selection.asset,
+                callback: () => {
+                  const link = document.createElement("a");
+                  link.href = api.apiURL(
+                    "/turing/workspace/export?" +
+                      new URLSearchParams({ directory, node: material.id }),
+                  );
+                  link.click();
+                },
+              },
+            ]),
       ],
       { event },
     );
   };
 }
 
-export function poster(node, m, directory, importMedia) {
+export function poster(node, m, directory, importMedia, run) {
   const element = document.createElement("div");
   element.style.cssText =
     "width:100%;height:100%;min-height:54px;max-height:480px;overflow:hidden;display:flex;align-items:center;justify-content:center";
@@ -147,7 +186,7 @@ export function poster(node, m, directory, importMedia) {
           release: () => img.removeAttribute("src"),
         };
   img.preview.refresh();
-  installDownloadMenu(element, node, m, directory, importMedia);
+  installMaterialMenu(element, node, m, directory, importMedia, run);
   if (m.kind !== "image")
     element.onclick = (event) => {
       if (event.target === element || event.target === img)
@@ -157,6 +196,7 @@ export function poster(node, m, directory, importMedia) {
           directory,
           (trim) => node.selectMaterial(m, trim),
           importMedia,
+          run,
         );
     };
   element.title =
@@ -203,14 +243,14 @@ export function poster(node, m, directory, importMedia) {
   };
   return element;
 }
-export function playPreview(node, m, directory, select, importMedia) {
+export function playPreview(node, m, directory, select, importMedia, run) {
   if (!m.selection.asset) return;
   playing?.releasePlayer();
   releasePlayer(node);
   node.releasePlayer ||= () => releasePlayer(node);
   const host = node.previewElements.get(m.id);
   const media = document.createElement(m.kind);
-  installDownloadMenu(media, node, m, directory, importMedia);
+  installMaterialMenu(media, node, m, directory, importMedia, run);
   media.controls = false;
   media.preload = "none";
   media.style.cssText = "width:100%;min-height:0;flex:1;object-fit:contain";
@@ -229,21 +269,109 @@ export function playPreview(node, m, directory, select, importMedia) {
   node.visibility.observe(host);
 }
 
+function textPreview(node, m, select, run) {
+  const frame = document.createElement("div");
+  frame.style.cssText =
+    "width:100%;height:100%;min-height:96px;box-sizing:border-box;border:1px solid var(--border-color,#555);border-radius:6px;padding:8px;display:flex";
+  const input = document.createElement("textarea");
+  input.className = "comfy-multiline-input";
+  input.placeholder = m.name;
+  input.setAttribute("aria-label", m.name);
+  input.style.cssText =
+    "width:100%;height:100%;min-height:0;box-sizing:border-box;resize:none;font-size:var(--comfy-textarea-font-size,14px)";
+  input.value = m.selection.text || "";
+  // The inner textarea keeps its native editing menu; only the outer margin
+  // provides material actions. Both renderers mount this same DOM widget.
+  input.oncontextmenu = (event) => event.stopPropagation();
+  frame.append(input);
+  const widget = node.addDOMWidget(m.id, "turing-material-text", frame, {
+    serialize: false,
+    getValue: () => input.value,
+    setValue: (value) => {
+      input.value = value || "";
+    },
+  });
+  widget.label = m.name;
+  widget.inputEl = input;
+  widget._materialId = m.id;
+  widget.callback = action((text) => select(node, m, { text }));
+  input.oninput = () => widget.callback(input.value);
+  widget.computeSize = () => [160, 160];
+  node.previewElements ||= new Map();
+  node.previewElements.set(m.id, frame);
+  installMaterialMenu(frame, node, m, node.properties.directory, null, run);
+  bindTextUndo(widget, input);
+  const remove = widget.onRemove;
+  widget.onRemove = () => {
+    input.oninput = input.oncontextmenu = frame.oncontextmenu = null;
+    remove?.call(widget);
+  };
+  return widget;
+}
+
+export function generateButton(node, m, run) {
+  const widget = button(node, `generate:${m.id}`, () => run(node, m));
+  widget.label = m.generateLabel || "生成";
+  widget._executionTarget = m.id;
+  const outline = widget.getOutlineColor.bind(widget);
+  widget.getOutlineColor = () => node.materialStates?.get(m.id)?.color || outline();
+  return widget;
+}
+
+export function setMaterialExecution(node, target, state, error = "") {
+  node.materialStates ||= new Map();
+  const labels = {
+    idle: "",
+    waiting: "等待生成",
+    running: "正在生成",
+    completed: "已完成",
+    failed: "生成失败",
+    stopped: "已停止",
+  };
+  const colors = {
+    waiting: "#c9953c",
+    running: "#60a5fa",
+    completed: "#4ade80",
+    failed: "#f87171",
+    stopped: "#94a3b8",
+  };
+  const active = state === "waiting" || state === "running";
+  const previous = node.materialStates.get(target);
+  if (previous?.state === state && previous.error === error) return;
+  const color = colors[state];
+  node.materialStates.set(target, { state, error, active, color });
+  const widget = node.widgets.find((w) => w._executionTarget === target);
+  if (widget) {
+    widget.disabled = active;
+    widget.tooltip = error || labels[state];
+    widget.options = {
+      ...widget.options,
+      disabled: active,
+      title: widget.tooltip,
+      style: {
+        border: color
+          ? `1px ${state === "waiting" ? "dashed" : "solid"} ${color}`
+          : undefined,
+      },
+    };
+  }
+  const preview = node.previewElements?.get(target);
+  if (preview) {
+    preview.dataset.executionState = state;
+    preview.style.outline = color
+      ? `1px ${state === "waiting" ? "dashed" : "solid"} ${color}`
+      : "";
+    preview.style.outlineOffset = "-1px";
+  }
+  node.graph?.setDirtyCanvas(true, true);
+}
+
 export function controls(node, m, { select, importMedia, run }) {
   node.selectMaterial = (material, content) => select(node, material, content);
   if (m.kind === "text") {
-    const widget = field(
-      node,
-      m.id,
-      "STRING",
-      m.selection.text || "",
-      (value) => select(node, m, { text: value }),
-      { label: m.name },
-    );
-    widget._materialId = m.id;
-    bindTextUndo(widget);
+    textPreview(node, m, select, run);
   } else {
-    poster(node, m, node.properties.directory, importMedia);
+    poster(node, m, node.properties.directory, importMedia, run);
     const w = field(
       node,
       `material:${m.kind}:${node.properties.materials.filter((material) => material.kind === m.kind).findIndex((material) => material.id === m.id) + 1}`,
@@ -271,11 +399,7 @@ export function controls(node, m, { select, importMedia, run }) {
       preview: (asset) => (m.kind === "audio" ? "" : url(directory, asset, true)),
     }).catch(report);
   }
-  if (m.executable) {
-    const widget = button(node, `${m.kind} · 执行到这里`, () => run(node, m));
-    widget._executionTarget = m.id;
-    widget._executionLabel = widget.label;
-  }
+  if (m.executable && m.showGenerate !== false) generateButton(node, m, run);
 }
 
 function comparable(value) {
@@ -305,7 +429,10 @@ export function updateResultState(node) {
     widget.options.tooltip = description;
     const preview = node.previewElements?.get(material.id);
     if (preview)
-      preview.title = `${description}；右键上传或下载${material.kind === "image" ? "" : "；点击播放"}`;
+      preview.title =
+        material.kind === "text"
+          ? `${description}；边框右键生成、复制或下载`
+          : `${description}；右键生成、上传或下载${material.kind === "image" ? "" : "；点击播放"}`;
   }
 }
 

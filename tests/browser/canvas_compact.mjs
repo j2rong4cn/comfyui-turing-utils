@@ -25,7 +25,7 @@ try {
     const { snapshotCard } = await import(
       "/extensions/comfyui-turing-utils/workspace/documents.js"
     );
-    const { projectChat, hiddenParameters } = await import(
+    const { projectParameters, hiddenParameters } = await import(
       "/extensions/comfyui-turing-utils/workspace/parameters.js"
     );
     const command = (id) => app.extensionManager.command.execute(id);
@@ -67,6 +67,13 @@ try {
       .callback();
     check(entries(endpoint).at(-1).canvas_hidden, "Hidden toggle not saved to schema");
     check(
+      endpoint.outputs[port.slot].name === port.name &&
+        endpoint.outputs[port.slot].label === `${port.name} · 隐藏` &&
+        endpoint.widgets.find((w) => w._portId === port.id).label ===
+          `${port.name} · 隐藏`,
+      "Hidden display changed the identity or lacks a visible marker",
+    );
+    check(
       JSON.stringify(app.rootGraph.serialize().links) === links,
       "Hidden toggle changed connections",
     );
@@ -94,8 +101,9 @@ try {
       "Management rows remain on the card",
     );
     check(
-      card.getExtraMenuOptions().some((o) => o.content === "执行全部桩节点"),
-      "Run all not available in menu",
+      card.title_buttons.some((b) => b.name === "generate-all") &&
+        !card.getExtraMenuOptions().some((o) => o.content === "执行全部桩节点"),
+      "Run all did not move to the title",
     );
     let dialog = hiddenParameters(card);
     const input = dialog.querySelector(`input[aria-label="${port.name}"]`);
@@ -123,7 +131,12 @@ try {
     saved = await workspace.request("card/open", { directory, id: added.id });
     check(saved.parameters[port.id] === "hidden edit", "Cancel committed a draft");
     const root = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasProject");
-    dialog = projectChat(root);
+    check(
+      root.getExtraMenuOptions().some((o) => o.content === "隐藏参数…") &&
+        !root.getExtraMenuOptions().some((o) => o.content.includes("Chat API")),
+      "Project parameters do not share the hidden-settings entry",
+    );
+    dialog = projectParameters(root);
     for (const [name, value] of [
       ["API URL", "http://localhost:9200"],
       ["API Model", "test-model"],

@@ -66,7 +66,10 @@ export function restoreSavedValues(directory, saved) {
             if (control) setWidgetValue(control, mode.mode);
           }
         }
-        node.widgets.find((w) => w.name === "ports").value = JSON.stringify(ports);
+        setWidgetValue(
+          node.widgets.find((w) => w.name === "ports"),
+          JSON.stringify(ports),
+        );
       }
     };
     restore(app.rootGraph);
@@ -84,6 +87,7 @@ export function restoreSavedValues(directory, saved) {
     if (node.type === ROOT) {
       if (!saved.settings) continue;
       const previous = node.properties.settings;
+      if (JSON.stringify(previous) === JSON.stringify(saved.settings)) continue;
       for (const [name, key] of [
         ["项目名称", "name"],
         ["素材像素上限（MP）", "max_megapixels"],
@@ -97,6 +101,7 @@ export function restoreSavedValues(directory, saved) {
     }
     const parameters = saved.parameters?.[node.properties.instance];
     if (!parameters) continue;
+    let changed = false;
     for (const field of node.properties.card?.fields || []) {
       if (!(field.input in parameters)) continue;
       const widget = node.widgets?.find((w) => w.name === field.input);
@@ -108,17 +113,30 @@ export function restoreSavedValues(directory, saved) {
           JSON.stringify(node.properties.values[field.input])
       )
         continue;
-      node.properties.values[field.input] = parameters[field.input];
-      if (widget) setWidgetValue(widget, parameters[field.input]);
+      if (
+        JSON.stringify(node.properties.values[field.input]) !==
+        JSON.stringify(parameters[field.input])
+      ) {
+        node.properties.values[field.input] = parameters[field.input];
+        if (widget) setWidgetValue(widget, parameters[field.input]);
+        changed = true;
+      }
       const mode = saved.control_modes?.[node.properties.instance]?.[field.input];
       const control = widget?.linkedWidgets?.[0];
-      if (mode && (!control || control.value === field.control?.mode)) {
+      if (
+        mode &&
+        (!control || control.value === field.control?.mode) &&
+        JSON.stringify(mode) !== JSON.stringify(field.control)
+      ) {
         if (control) setWidgetValue(control, mode.mode);
         field.control = mode;
+        changed = true;
       }
     }
-    node.updateResultState?.();
-    node.graph?.setDirtyCanvas(true, true);
+    if (changed) {
+      node.updateResultState?.();
+      node.graph?.setDirtyCanvas(true, true);
+    }
   }
 }
 function snapshot(directory) {
@@ -200,15 +218,16 @@ export async function saveProjectLayout(directory) {
   await writeProjectLayout(directory);
 }
 
-export async function removeProjectCard(directory, identity) {
+export async function removeProjectCards(directory, identities) {
+  const removed = new Set(identities);
   await settleMaterials(directory);
   await settleProjectWrites(directory);
   return writeProjectLayout(directory, (current) => {
-    if (
-      !current.nodes.some((n) => n.type === CARD && n.properties.instance === identity)
-    )
-      throw Error("卡片已被移除，请重新打开画布");
-    current.nodes = current.nodes.filter((n) => n.properties.instance !== identity);
+    const present = current.nodes.filter(
+      (n) => n.type === CARD && removed.has(n.properties.instance),
+    );
+    if (present.length !== removed.size) throw Error("卡片已被移除，请重新打开画布");
+    current.nodes = current.nodes.filter((n) => !removed.has(n.properties.instance));
   });
 }
 
@@ -268,6 +287,7 @@ export function setProjectStatus(directory, status, statistics, root) {
   root ||=
     project()?.directory === directory && app.graph._nodes.find((n) => n.type === ROOT);
   if (!root) return;
+  let changed = false;
   if (statistics) root.properties.statistics = statistics;
   const stats = root.properties.statistics;
   const info = root.widgets.find((w) => w.name === "画布统计");
@@ -275,10 +295,19 @@ export function setProjectStatus(directory, status, statistics, root) {
     const counts = Object.entries(stats.materials)
       .map(([kind, count]) => `${kind}: ${count}`)
       .join(" · ");
-    info.value = `${stats.cards} 张卡片 · ${counts} · ${(stats.bytes / 1048576).toFixed(1)} MiB`;
+    const value = `${stats.cards} 张卡片 · ${counts} · ${(stats.bytes / 1048576).toFixed(1)} MiB`;
+    if (info.value !== value) {
+      info.value = value;
+      changed = true;
+    }
   }
   const saved = root.widgets.find((w) => w.name === "保存状态");
-  if (saved)
-    saved.value = `${status} · ${[...jobs.values()].filter((j) => j.directory === directory).length} 个任务`;
-  root.graph?.setDirtyCanvas(true, true);
+  if (saved) {
+    const value = `${status} · ${[...jobs.values()].filter((j) => j.directory === directory).length} 个任务`;
+    if (saved.value !== value) {
+      saved.value = value;
+      changed = true;
+    }
+  }
+  if (changed) root.graph?.setDirtyCanvas(true, true);
 }

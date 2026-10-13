@@ -3,6 +3,7 @@ import { api } from "../../scripts/api.js";
 import { INPUTS, entries, syncPorts } from "./lib/canvas_ports.js";
 import { DirectoryPicker } from "./lib/directory_picker.js";
 import { setWidgetValue } from "./lib/parameter_widget.js";
+import { installTitleActionDom } from "./lib/title_action.js";
 import {
   assertWorkflowLinks,
   normalizeAutogrowLayouts,
@@ -36,7 +37,7 @@ import {
   enqueueSave,
   saveProject,
   saveProjectLayout,
-  removeProjectCard,
+  removeProjectCards,
   setProjectStatus,
   restoreSavedValues,
   discardProjectFailures,
@@ -51,6 +52,7 @@ import {
 
 let bindDocument;
 const copies = new Map();
+const deletions = new Map();
 export { request } from "./workspace/api.js";
 export { saveProject } from "./workspace/project_state.js";
 export async function openTab(workflow, name) {
@@ -85,6 +87,8 @@ function configureCard(node, card, document, directory) {
     name: names.get(id) || card.material_names[id],
     kind: document.prompt[id].class_type.replace("TuringMaterial", "").toLowerCase(),
     allowUpload: card.material_options?.[id]?.allow_upload !== false,
+    showGenerate: card.material_options?.[id]?.show_generate !== false,
+    generateLabel: card.material_options?.[id]?.generate_label || "生成",
     selection: document.selections[id] || {},
     executable: ["value", "images", "text"].some((name) =>
       Array.isArray(document.prompt[id].inputs[name]),
@@ -276,34 +280,53 @@ async function editCard(node) {
     id = node.properties.instance;
   await openTab(await loadDocument({ directory, id }), `${id}.json`);
 }
-async function deleteCard(node) {
-  if (node.copyPending) throw Error("请等待卡片复制完成后再删除");
-  const { directory, instance } = node.properties;
-  const confirmed = await app.extensionManager.dialog.confirm({
-    title: "删除卡片",
-    message: `从画布删除“${node.title}”及其连线？已保存的素材和工作流文件会保留。`,
-  });
-  if (!confirmed) return;
-  // Persist first: a conflict or running task must leave the visible card intact.
-  await removeProjectCard(directory, instance);
-  if (project()?.directory === directory) {
-    const current = app.rootGraph._nodes.find(
-      (n) => n.properties.instance === instance,
-    );
-    if (current) app.rootGraph.remove(current);
-  } else {
-    const tab = app.extensionManager.workflow.openWorkflows.find(
-      (w) => w.activeState?.extra?.turing_project?.directory === directory,
-    );
-    if (tab) {
-      tab.activeState.nodes = tab.activeState.nodes.filter(
-        (n) => n.properties.instance !== instance,
-      );
-      const ids = new Set(tab.activeState.nodes.map((n) => n.id));
-      tab.activeState.links = tab.activeState.links.filter(
-        (link) => ids.has(link[1]) && ids.has(link[3]),
-      );
+async function deleteCards(nodes) {
+  if (!nodes.length) return;
+  const directory = nodes[0].properties.directory;
+  if (deletions.has(directory)) return deletions.get(directory);
+  if (nodes.some((node) => node.copyPending)) throw Error("请等待卡片复制完成后再删除");
+  const removed = new Set(nodes.map((node) => node.properties.instance));
+  const task = (async () => {
+    const title = nodes.length === 1 ? `“${nodes[0].title}”` : `${nodes.length} 张卡片`;
+    const confirmed = await app.extensionManager.dialog.confirm({
+      title: "删除卡片",
+      message: `从画布删除${title}及其连线？已保存的素材和工作流文件会保留。`,
+    });
+    if (!confirmed) return;
+    // One persisted batch for menu, toolbar and keyboard deletion. A rejected
+    // save leaves every visible card and its connections intact.
+    await removeProjectCards(directory, removed);
+    if (project()?.directory === directory) {
+      for (const node of [...app.rootGraph._nodes]) {
+        if (node.type !== CARD || !removed.has(node.properties.instance)) continue;
+        app.canvas.deselect(node);
+        app.rootGraph.remove(node);
+      }
+    } else {
+      const workflow = fileTab({ directory })?.activeState;
+      if (workflow) {
+        workflow.nodes = workflow.nodes.filter(
+          (n) => !removed.has(n.properties.instance),
+        );
+        const ids = new Set(workflow.nodes.map((n) => n.id));
+        workflow.links = workflow.links.filter(
+          (link) => ids.has(link[1]) && ids.has(link[3]),
+        );
+        const links = new Set(workflow.links.map((link) => link[0]));
+        for (const node of workflow.nodes) {
+          for (const input of node.inputs || [])
+            if (input.link != null && !links.has(input.link)) input.link = null;
+          for (const output of node.outputs || [])
+            if (output.links) output.links = output.links.filter((id) => links.has(id));
+        }
+      }
     }
+  })();
+  deletions.set(directory, task);
+  try {
+    return await task;
+  } finally {
+    deletions.delete(directory);
   }
 }
 function restoreEditor(graph, editing) {
@@ -550,7 +573,7 @@ app.registerExtension({
         await editCard(node);
         await saveTemplate();
       },
-      deleteCard,
+      deleteCard: (node) => deleteCards([node]),
       select,
       importMedia,
       run,
@@ -632,6 +655,7 @@ app.registerExtension({
     },
   ],
   setup() {
+    installTitleActionDom(app);
     installSidebar({
       openCanvas: openProject,
       editTemplate,
@@ -701,6 +725,15 @@ app.registerExtension({
       if (document.hidden) stopActivePreview();
     });
     installLocalExecution();
+    const deleteSelected = app.canvas.deleteSelected;
+    app.canvas.deleteSelected = function (...args) {
+      if (!this.graph?.extra?.turing_project) return deleteSelected.apply(this, args);
+      // All native deletion commands use this canvas boundary in both renderers.
+      // Do not intercept keys: text fields and confirmation dialogs stay native.
+      return action(() =>
+        deleteCards([...this.selectedItems].filter((node) => node.type === CARD)),
+      )();
+    };
     const menu = app.canvas.getCanvasMenuOptions;
     app.canvas.getCanvasMenuOptions = function (...args) {
       if (!project()) return menu.apply(this, args);

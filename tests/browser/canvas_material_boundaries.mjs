@@ -95,7 +95,7 @@ try {
     }
     const run = (card) =>
       card.widgets
-        .filter((w) => w.name.includes("执行到这里"))
+        .filter((w) => w._executionTarget)
         .at(-1)
         .callback();
     try {

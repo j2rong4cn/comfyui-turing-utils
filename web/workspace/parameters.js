@@ -59,10 +59,10 @@ export function hiddenParameters(node) {
   });
 }
 
-export function projectChat(node) {
+export function projectParameters(node) {
   const chat = node.properties.settings.chat || {};
   return parameterForm({
-    title: "Chat API · Canvas Project",
+    title: "隐藏参数 · Canvas Project",
     fields: [
       {
         input: "base_url",

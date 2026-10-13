@@ -39,8 +39,19 @@ def material_options(workflow, interface, identities):
         if stub is None and isinstance(values, list) and values:
             stub = values[0]
         source = interface["stubs"].get(stub) if isinstance(stub, str) else None
-        if source and node.get("properties", {}).get("canvas_allow_upload") is False:
-            options[identities[source]] = {"allow_upload": False}
+        if not source:
+            continue
+        properties = node.get("properties", {})
+        presentation = {}
+        if properties.get("canvas_allow_upload") is False:
+            presentation["allow_upload"] = False
+        if properties.get("canvas_show_generate") is False:
+            presentation["show_generate"] = False
+        label = properties.get("canvas_generate_label", "")
+        if isinstance(label, str) and label.strip():
+            presentation["generate_label"] = label.strip()
+        if presentation:
+            options[identities[source]] = presentation
     return options
 
 

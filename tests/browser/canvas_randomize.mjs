@@ -17,12 +17,15 @@ try {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
     const { addValueControlWidget } = await import("/scripts/widgets.js");
-    const { snapshotCard } =
-      await import("/extensions/comfyui-turing-utils/workspace/documents.js");
-    const { entries } =
-      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
-    const workspace =
-      await import("/extensions/comfyui-turing-utils/material_workspace.js");
+    const { snapshotCard } = await import(
+      "/extensions/comfyui-turing-utils/workspace/documents.js"
+    );
+    const { entries } = await import(
+      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
+    );
+    const workspace = await import(
+      "/extensions/comfyui-turing-utils/material_workspace.js"
+    );
     const check = (ok, message) => {
       if (!ok) throw Error(message);
     };
@@ -84,7 +87,7 @@ try {
       colorField?.linkedWidgets?.[0]?.value === "randomize",
       "Card control was not rendered",
     );
-    const button = card.widgets.find((w) => w.name.includes("执行到这里"));
+    const button = card.widgets.find((w) => w._executionTarget);
     await button.callback();
     await button.callback();
     const history = await (await api.fetchApi("/history")).json();
@@ -150,8 +153,8 @@ try {
       "Editor lost the card's control override",
     );
     const stub = app.rootGraph._nodes.find((n) => n.type === "TuringMaterialImage");
-    await stub.widgets.find((w) => w.name === "执行到这里").callback();
-    await stub.widgets.find((w) => w.name === "执行到这里").callback();
+    await stub.widgets.find((w) => w._executionTarget).callback();
+    await stub.widgets.find((w) => w._executionTarget).callback();
     check(
       editorColor.value === colors.at(-1) + 3,
       "Repeated execution in the editor did not restore its value: " +

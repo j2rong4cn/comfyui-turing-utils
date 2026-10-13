@@ -52,6 +52,10 @@ app.registerExtension({
         if (refresh) refresh.value = false;
         const upload = this.widgets.find((w) => w.name === "canvas_allow_upload");
         if (upload) upload.value = this.properties.canvas_allow_upload !== false;
+        this.widgets.find((w) => w.name === "canvas_show_generate").value =
+          this.properties.canvas_show_generate !== false;
+        this.widgets.find((w) => w.name === "canvas_generate_label").value =
+          this.properties.canvas_generate_label || "";
       };
       const kind = type.slice("TuringMaterial".length).toLowerCase();
       const id = node.widgets?.find((w) => w.name === "stub_id");
@@ -60,6 +64,28 @@ app.registerExtension({
       }
       if (kind === "text" && !node.inputs.some((s) => s.name === "text"))
         node.addInput("text", "STRING");
+      const visibility = node.addWidget(
+        "toggle",
+        "canvas_show_generate",
+        node.properties.canvas_show_generate !== false,
+        (value) => {
+          node.properties.canvas_show_generate = value;
+          node.graph?.change();
+        },
+        { serialize: false },
+      );
+      visibility.label = "在卡片显示生成按钮";
+      const generateLabel = node.addWidget(
+        "text",
+        "canvas_generate_label",
+        node.properties.canvas_generate_label || "",
+        (value) => {
+          node.properties.canvas_generate_label = value;
+          node.graph?.change();
+        },
+        { serialize: false, placeholder: "生成" },
+      );
+      generateLabel.label = "生成按钮文字（留空为生成）";
       if (kind !== "text") {
         // A card presentation option, not an execution input: keep the ordinary
         // workflow's native upload widget unchanged and persist it in properties.

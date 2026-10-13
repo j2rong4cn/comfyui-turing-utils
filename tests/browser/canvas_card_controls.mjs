@@ -21,10 +21,12 @@ try {
   await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
-    const workspace =
-      await import("/extensions/comfyui-turing-utils/material_workspace.js");
-    const { entries, syncPorts } =
-      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
+    const workspace = await import(
+      "/extensions/comfyui-turing-utils/material_workspace.js"
+    );
+    const { entries, syncPorts } = await import(
+      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
+    );
     const check = (value, message) => {
       if (!value) throw Error(message);
     };
@@ -71,9 +73,9 @@ try {
       widget.label === "说明文本",
       "Text label shows stable ID instead of port name",
     );
-    check(widget.element.placeholder === "说明文本", "Text placeholder shows UUID");
+    check(widget.inputEl.placeholder === "说明文本", "Text placeholder shows UUID");
     check(
-      widget.element.getAttribute("aria-label") === "说明文本",
+      widget.inputEl.getAttribute("aria-label") === "说明文本",
       "Accessible text name shows UUID",
     );
     check(
@@ -81,9 +83,9 @@ try {
       "Workflow upload policy was not projected",
     );
     check(
-      card.widgets.filter((w) => w.label === "choose file to upload").length === 2,
-      "Disabled image upload still has a button, or default uploads were hidden: " +
-        JSON.stringify(card.widgets.map((w) => [w.name, w.label])),
+      card.properties.materials.filter((m) => m.kind !== "text" && m.allowUpload)
+        .length === 2,
+      "Upload policy is not reflected in the media previews",
     );
     let imports = 0;
     const originalFetch = window.fetch;
@@ -102,7 +104,10 @@ try {
     } finally {
       window.fetch = originalFetch;
     }
-    await card.widgets.find((w) => w.name === "编辑工作流").callback();
+    await card
+      .getExtraMenuOptions()
+      .find((o) => o.content === "编辑工作流")
+      .callback();
     const editingImage = app.graph._nodes.find((n) => n.type === "TuringMaterialImage");
     toggleUpload(editingImage);
     const inputs = app.graph._nodes.find((n) => n.type === "TuringCanvasInputs");
@@ -123,7 +128,8 @@ try {
     await workspace.openTab(projectTab.activeState, `Canvas-${stamp}.json`);
     card = app.graph._nodes.find((n) => n.properties.instance === added.id);
     check(
-      card.widgets.filter((w) => w.label === "choose file to upload").length === 3,
+      card.properties.materials.filter((m) => m.kind !== "text" && m.allowUpload)
+        .length === 3,
       "Returning to canvas still uses the old workflow interface",
     );
     await workspace.saveProject();

@@ -103,11 +103,9 @@ try {
       return { card, targets: ids.map((id) => `${added.id}:${id}`) };
     }
     const runAll = (card) => {
-      const action = card
-        .getExtraMenuOptions()
-        .find((o) => o.content === "执行全部桩节点");
-      check(action, "Run-all action is missing from the context menu");
-      return action.callback().then(syncSubmitted);
+      const button = card.title_buttons.find((b) => b.name === "generate-all");
+      check(button, "Run-all title button is missing");
+      return card.onTitleButtonClick(button).then(syncSubmitted);
     };
     try {
       const { card, targets } = await createChain("generated");

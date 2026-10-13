@@ -5,10 +5,12 @@ import {
   releasePlayer,
   clearPosters,
   updateResultState,
+  setMaterialExecution,
 } from "./material_controls.js";
+import { titleAction } from "../lib/title_action.js";
 import { request, report, action } from "./api.js";
 import { valueControlWidget } from "../lib/value_controls.js";
-import { hiddenParameters, projectChat, saveParameters } from "./parameters.js";
+import { hiddenParameters, projectParameters, saveParameters } from "./parameters.js";
 import { refreshCanvasInstances } from "./sidebar.js";
 import { ROOT, CARD, enqueueSave, setProjectStatus } from "./project_state.js";
 
@@ -28,11 +30,13 @@ export function registerCanvasNodes({
       super("Canvas Project");
       this.flags = { pinned: true };
       this.clonable = false;
+      this.removable = false;
+      this.block_delete = true;
       this.widgets = [];
     }
     getExtraMenuOptions() {
       return [
-        { content: "Chat API 设置…", callback: action(() => projectChat(this)) },
+        { content: "隐藏参数…", callback: action(() => projectParameters(this)) },
         {
           content: "撤销未保存修改",
           callback: action(() => restoreProject(this.properties.directory)),
@@ -102,14 +106,14 @@ export function registerCanvasNodes({
     constructor() {
       super("Canvas Card");
       this.removable = false;
+      this.runAll = titleAction(
+        this,
+        "generate-all",
+        action(() => run(this)),
+      );
     }
     getExtraMenuOptions() {
       return [
-        {
-          content: "执行全部桩节点",
-          disabled: this.copyPending || !!this.properties.card?.error,
-          callback: action(() => run(this)),
-        },
         ...(this.properties.card?.fields.some((f) => f.hidden)
           ? [{ content: "隐藏参数…", callback: action(() => hiddenParameters(this)) }]
           : []),
@@ -174,6 +178,13 @@ export function registerCanvasNodes({
     }
     onConfigure() {
       this.copyIfNeeded();
+      this.materialStates = new Map();
+      this.runAll.update({
+        disabled: !!this.copyPending || !!this.properties.card?.error,
+        state: "idle",
+        label: "全部生成",
+        color: "#60a5fa",
+      });
       this.releasePlayer();
       clearPosters(this);
       for (const w of [...(this.widgets || [])]) this.removeWidget(w);
@@ -252,7 +263,58 @@ export function registerCanvasNodes({
     updateResultState() {
       updateResultState(this);
     }
+    updateExecution(operations) {
+      const isActive = (operation) => ["queued", "running"].includes(operation.status);
+      for (const material of this.properties.materials || []) {
+        const records = operations.filter((o) => o.targets.includes(material.id));
+        if (!records.length) continue;
+        const active = records.filter(
+          (o) => isActive(o) && !o.completed.includes(material.id),
+        );
+        let state,
+          error = "";
+        if (active.length)
+          state = active.some((o) => o.current_target === material.id)
+            ? "running"
+            : "waiting";
+        else if (records.some((o) => o.completed.includes(material.id)))
+          state = "completed";
+        else {
+          const failed = records.find(
+            (o) =>
+              o.status === "failed" &&
+              o.targets.find((id) => !o.completed.includes(id)) === material.id,
+          );
+          state = failed ? "failed" : "stopped";
+          error = failed?.error || "";
+        }
+        setMaterialExecution(this, material.id, state, error);
+      }
+      const targets = new Set(
+        operations
+          .flatMap((o) => o.targets)
+          .filter((id) => id.startsWith(this.properties.instance + ":")),
+      );
+      const pending = [...targets].filter((id) =>
+        operations.some(
+          (o) => isActive(o) && o.targets.includes(id) && !o.completed.includes(id),
+        ),
+      );
+      const completed = [...targets].filter((id) =>
+        operations.some((o) => o.completed.includes(id)),
+      ).length;
+      const failed = !pending.length && operations.find((o) => o.status === "failed");
+      this.runAll.update({
+        disabled: pending.length > 0,
+        state: pending.length ? "running" : failed ? "failed" : "idle",
+        label: pending.length
+          ? `全部生成 · 等待或生成中；已完成 ${completed} 个，共 ${targets.size} 个`
+          : failed?.error || "全部生成",
+        color: failed ? "#f87171" : "#60a5fa",
+      });
+    }
     onRemoved() {
+      this.runAll.release();
       const registered = instances.get(this.graph);
       if (registered?.get(this.properties.instance) === this)
         registered.delete(this.properties.instance);

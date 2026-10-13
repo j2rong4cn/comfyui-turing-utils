@@ -526,6 +526,8 @@ class WorkspaceTest(unittest.TestCase):
         workflow, graph = material_template(("image", "audio", "video"))
         image = next(n for n in workflow["nodes"] if n["type"] == "TuringMaterialImage")
         image["properties"]["canvas_allow_upload"] = False
+        image["properties"]["canvas_show_generate"] = False
+        image["properties"]["canvas_generate_label"] = "  Edit image  "
         identity = workflow_files.add_instance(
             self.project.root, workflow_files.pack(workflow, graph), "media"
         )
@@ -535,11 +537,19 @@ class WorkspaceTest(unittest.TestCase):
                 document = projection.document(self.project.root, execution=execution)
                 self.assertEqual(
                     document["cards"][0]["material_options"],
-                    {source: {"allow_upload": False}},
+                    {
+                        source: {
+                            "allow_upload": False,
+                            "show_generate": False,
+                            "generate_label": "Edit image",
+                        }
+                    },
                 )
                 for node in document["prompt"].values():
                     self.assertNotIn("canvas_allow_upload", node["inputs"])
                     self.assertNotIn("allow_upload", node["inputs"])
+                    self.assertNotIn("canvas_show_generate", node["inputs"])
+                    self.assertNotIn("canvas_generate_label", node["inputs"])
 
     def test_upload_policy_reads_nested_native_and_named_widgets(self):
         workflow = {

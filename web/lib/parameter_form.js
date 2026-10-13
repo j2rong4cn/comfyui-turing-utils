@@ -15,10 +15,49 @@ export function parameterForm({ title, fields, values, apply }) {
   const heading = document.createElement("h3");
   heading.textContent = title;
   const style = document.createElement("style");
-  style.textContent =
-    "@media(max-width:600px){.turing-parameter-form-body{flex-direction:column}.turing-parameter-form-body nav{display:flex;flex-wrap:wrap;flex-basis:auto!important}}";
+  style.textContent = `
+    .turing-parameter-form { font:inherit; }
+    .turing-parameter-form .comfy-btn,
+    .turing-parameter-form .turing-parameter-control {
+      font:inherit;color:var(--input-text,#eee);
+      background:var(--comfy-input-bg,var(--bg-color,#1e1e1e));
+      border:1px solid var(--border-color,#555);border-radius:8px;
+      box-sizing:border-box;min-height:32px;padding:6px 10px;
+    }
+    .turing-parameter-form .comfy-btn { cursor:pointer; }
+    .turing-parameter-form .comfy-btn:hover:not(:disabled),
+    .turing-parameter-form .comfy-btn[aria-current=true] {
+      background:var(--comfy-menu-secondary-bg,#353535);
+    }
+    .turing-parameter-form :disabled { opacity:.5;cursor:default; }
+    .turing-parameter-form :focus-visible {
+      outline:2px solid var(--border-color,#888);outline-offset:2px;
+    }
+    .turing-parameter-value { flex:1;min-width:120px;position:relative; }
+    .turing-parameter-control { width:100%; }
+    .turing-parameter-form select { appearance:none;padding-right:28px!important; }
+    .turing-parameter-select::after {
+      content:'▾';position:absolute;right:10px;top:7px;pointer-events:none;
+    }
+    .turing-parameter-form .turing-parameter-toggle {
+      border-radius:16px;display:flex;align-items:center;justify-content:space-between;
+      gap:10px;cursor:pointer;
+    }
+    .turing-parameter-toggle::before {
+      content:'';width:14px;height:14px;flex-shrink:0;border-radius:50%;
+      background:var(--descrip-text,#888);
+    }
+    .turing-parameter-toggle[aria-checked=true]::before {
+      background:var(--input-text,#eee);
+    }
+    @media(max-width:600px) {
+      .turing-parameter-form-body { flex-direction:column; }
+      .turing-parameter-form-body nav { display:flex;flex-wrap:wrap;flex-basis:auto!important; }
+    }
+  `;
   const search = document.createElement("input");
   search.placeholder = "搜索参数…";
+  search.className = "comfy-input turing-parameter-control";
   search.style.cssText =
     "width:100%;box-sizing:border-box;margin:8px 0 16px;padding:8px";
   const body = document.createElement("div");
@@ -46,13 +85,15 @@ export function parameterForm({ title, fields, values, apply }) {
   let selected = "全部",
     saving = false;
   function scalar(parent, field, value, change) {
-    const row = document.createElement("label");
+    const row = document.createElement("div");
     row.style.cssText =
       "display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0";
     const label = document.createElement("span");
     label.textContent = field.label;
     label.style.cssText = "flex:0 0 140px;overflow-wrap:anywhere";
     const options = field.options || {};
+    const control = document.createElement("div");
+    control.className = "turing-parameter-value";
     let input;
     if (field.type === "COMBO") {
       input = document.createElement("select");
@@ -64,11 +105,22 @@ export function parameterForm({ title, fields, values, apply }) {
       }
       input.value = String((options.values || []).indexOf(value));
       input.onchange = () => change(options.values[Number(input.value)]);
+      control.classList.add("turing-parameter-select");
     } else if (field.type === "BOOLEAN") {
-      input = document.createElement("input");
-      input.type = "checkbox";
-      input.checked = value;
-      input.onchange = () => change(input.checked);
+      input = document.createElement("button");
+      input.type = "button";
+      input.className = "turing-parameter-toggle";
+      input.setAttribute("role", "switch");
+      const update = (value) => {
+        input.setAttribute("aria-checked", String(!!value));
+        input.textContent = value ? (options.on ?? "true") : (options.off ?? "false");
+      };
+      update(value);
+      input.onclick = () => {
+        const value = input.getAttribute("aria-checked") !== "true";
+        update(value);
+        change(value);
+      };
     } else if (field.type === "STRING") {
       input = document.createElement(options.multiline ? "textarea" : "input");
       if (input.tagName === "INPUT")
@@ -93,10 +145,11 @@ export function parameterForm({ title, fields, values, apply }) {
           change(input.valueAsNumber);
       };
     }
+    input.classList.add("comfy-input", "turing-parameter-control");
     input.setAttribute("aria-label", field.label);
-    input.style.cssText = "flex:1;min-width:120px;box-sizing:border-box;padding:6px";
     input.disabled = !!field.connected;
-    row.append(label, input);
+    control.append(input);
+    row.append(label, control);
     parent.append(row);
   }
   function renderField(parent, field, value, change, path = [], root = value) {
@@ -165,6 +218,7 @@ export function parameterForm({ title, fields, values, apply }) {
         render();
       });
       b.style.cssText = `display:block;width:100%;text-align:left;margin:4px 0;padding:8px;${selected === group ? "font-weight:bold" : ""}`;
+      b.setAttribute("aria-current", String(selected === group));
       navigation.append(b);
     }
     form.replaceChildren();

@@ -219,7 +219,7 @@ try {
       editingText,
       editingText.inputs.findIndex((s) => s.name === "text"),
     );
-    await editingText.widgets.find((w) => w.name === "执行到这里").callback();
+    await editingText.widgets.find((w) => w._executionTarget).callback();
     let published = false;
     for (let i = 0; i < 60; i++) {
       const selection = await workspace.request("selection", {

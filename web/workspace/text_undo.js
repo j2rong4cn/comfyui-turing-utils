@@ -1,9 +1,8 @@
-/** Focused material-text edits; native DOM listeners and Vue widget-option events. */
+/** Focused material-text edits on the shared preview textarea in both renderers. */
 import { TextHistory } from "../lib/text_history.js";
 import { setWidgetValue } from "../lib/parameter_widget.js";
 
-export function bindTextUndo(widget) {
-  let element = widget.element;
+export function bindTextUndo(widget, element) {
   const history = new TextHistory(widget.value);
   const save = widget.callback;
   const pending = new Set();
@@ -58,19 +57,11 @@ export function bindTextUndo(widget) {
     lastEdit = { type, time: now, caret: element.selectionStart };
     return persist(value);
   };
-  const options = { ...widget.options, "data-turing-text": widget.name };
   const listen = (name, callback) => {
-    const handle = (event) => {
-      element = event.target;
-      callback(event);
-    };
-    widget.element.addEventListener(name, handle, {
+    element.addEventListener(name, callback, {
       capture: true,
       signal: events.signal,
     });
-    // WidgetTextarea forwards ordinary DOM props from options to its textarea.
-    // Avoid a global key hook, renderer DOM searches or hashed module imports.
-    options[`on${name[0].toUpperCase()}${name.slice(1)}Capture`] = handle;
   };
   listen("focus", boundary);
   listen("blur", boundary);
@@ -109,8 +100,7 @@ export function bindTextUndo(widget) {
     event.stopImmediatePropagation();
     move(event.shiftKey);
   });
-  widget.options = options;
-  widget.element.dataset.turingText = widget.name;
+  element.dataset.turingText = widget.name;
   widget.textUndo = {
     receive(value) {
       // An earlier autosave must not replace a newer draft or create an undo

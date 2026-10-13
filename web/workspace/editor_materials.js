@@ -3,7 +3,7 @@ import { bindMaterialCombo } from "../lib/material_combo.js";
 import { setWidgetValue } from "../lib/parameter_widget.js";
 import { action, report, request } from "./api.js";
 import {
-  button,
+  generateButton,
   poster,
   url,
   releasePlayer,
@@ -37,6 +37,7 @@ export function installProjectMaterials(graph, editing, run) {
       kind,
       selection: state.selection,
       allowUpload: true,
+      executable: true,
     };
     node.projectMaterial = state;
     const canonical = () =>
@@ -140,8 +141,12 @@ export function installProjectMaterials(graph, editing, run) {
         return true;
       };
       node.selectMaterial = (_material, content) => select(content);
-      poster(node, material, editing.directory, (_node, _material, file) =>
-        upload(file),
+      poster(
+        node,
+        material,
+        editing.directory,
+        (_node, _material, file) => upload(file),
+        () => run(node, target),
       );
       const audioUI = node.widgets.find((w) => w.name === "audioUI");
       if (audioUI) {
@@ -153,7 +158,7 @@ export function installProjectMaterials(graph, editing, run) {
       }
     }
     update(state.selection);
-    button(node, "执行到这里", () => run(node, target));
+    generateButton(node, material, () => run(node, target));
     node.setSize(node.computeSize());
   }
 }

@@ -51,6 +51,7 @@ try {
         controls: { "second.count": { mode: "randomize" } },
       },
       seed: 7,
+      enabled: false,
     };
     const dialog = parameterForm({
       title: "Dynamic test",
@@ -80,6 +81,7 @@ try {
           control: { mode: "fixed" },
           options: { min: 0 },
         },
+        { input: "enabled", label: "Enabled", type: "BOOLEAN" },
       ],
       values: original,
       apply: async (values, modes) => {
@@ -87,6 +89,16 @@ try {
       },
     });
     const selector = dialog.querySelector('select[aria-label="Type"]');
+    check(
+      selector.classList.contains("comfy-input"),
+      "Combo does not use themed input styling",
+    );
+    const toggle = dialog.querySelector('button[role="switch"][aria-label="Enabled"]');
+    check(
+      toggle?.getAttribute("aria-checked") === "false",
+      "Boolean switch is not accessible/bound",
+    );
+    toggle.click();
     selector.value = "1";
     selector.dispatchEvent(new Event("change", { bubbles: true }));
     const count = dialog.querySelector('input[aria-label="count"]');
@@ -115,7 +127,8 @@ try {
     check(saved.values.group.branches.first.text === "initial", "Inactive branch lost");
     check(
       saved.values.group.controls["second.count"].mode === "increment" &&
-        saved.modes.seed.mode === "randomize",
+        saved.modes.seed.mode === "randomize" &&
+        saved.values.enabled === true,
       "Control modes lost",
     );
     check(

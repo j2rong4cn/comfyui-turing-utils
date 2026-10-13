@@ -6,6 +6,7 @@ import {
   entries,
   syncPorts,
   syncDynamicTargets,
+  refreshEndpointLabels,
 } from "./canvas_ports.js";
 import { DYNAMIC_COMBO, dynamicSpec } from "./dynamic_parameter.js";
 
@@ -133,7 +134,7 @@ export function installEndpoint(node) {
                   // Presentation metadata only: retain native slots and links.
                   node.widgets.find((w) => w.name === "ports").value =
                     JSON.stringify(ps);
-                  node.graph?.setDirtyCanvas(true, true);
+                  refreshEndpointLabels(node, ps);
                 }),
             },
           ]

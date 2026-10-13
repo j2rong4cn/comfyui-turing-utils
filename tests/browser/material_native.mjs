@@ -132,7 +132,7 @@ try {
         n.properties.materials.some((x) => x.executable),
     );
     const output = generated.properties.materials.find((x) => x.kind === "text");
-    await generated.widgets.find((w) => w.name.includes("执行到这里")).callback();
+    await generated.widgets.find((w) => w._executionTarget).callback();
     let success = false;
     for (let i = 0; i < 60; i++) {
       const state = await m.request("selection", { directory, node: output.id });
@@ -144,8 +144,9 @@ try {
     }
     if (!success) throw Error("Local execution did not publish text");
     await m.openTab(task.workflow, `linked-${Date.now()}.json`);
-    const { addPort } =
-      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
+    const { addPort } = await import(
+      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
+    );
     const endpoint = app.graph._nodes.find((n) => n.type === "TuringCanvasInputs");
     if (!endpoint.inputs.some((s) => s._append))
       throw Error("Missing dynamic source input");
@@ -226,7 +227,7 @@ try {
     await m.openProject(directory);
     const restored = app.graph._nodes.find((n) => n.properties.instance === added.id);
     if (restored.inputs[0].link === null) throw Error("Cross-card link not restored");
-    await restored.widgets.find((w) => w.name.includes("执行到这里")).callback();
+    await restored.widgets.find((w) => w._executionTarget).callback();
     const finalId = restored.properties.materials.find((x) => x.kind === "text").id;
     let linkedSuccess = false;
     for (let i = 0; i < 60; i++) {
@@ -266,8 +267,9 @@ try {
   const interactions = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const m = await import("/extensions/comfyui-turing-utils/material_workspace.js");
-    const { addPort, entries } =
-      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
+    const { addPort, entries } = await import(
+      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
+    );
     const starter = await (await fetch("/turing/workspace/new-template")).json();
     await m.openTab(starter, `port-test-${Date.now()}.json`);
     window.wireStarter();
@@ -389,10 +391,12 @@ try {
   console.log(JSON.stringify(interactions));
   const pickerDirectory = `picker-smoke-${Date.now()}`;
   await page.evaluate(async (directory) => {
-    const { request } =
-      await import("/extensions/comfyui-turing-utils/material_workspace.js");
-    const { DirectoryPicker } =
-      await import("/extensions/comfyui-turing-utils/lib/directory_picker.js");
+    const { request } = await import(
+      "/extensions/comfyui-turing-utils/material_workspace.js"
+    );
+    const { DirectoryPicker } = await import(
+      "/extensions/comfyui-turing-utils/lib/directory_picker.js"
+    );
     await request("directory/create", { directory });
     window.pickerResult = new DirectoryPicker(
       request,
@@ -415,10 +419,12 @@ try {
   assert.equal(await page.evaluate(() => window.pickerResult), pickerDirectory);
   console.log(JSON.stringify({ directoryColumns: true, emptyFolderSelection: true }));
   await page.evaluate(async (directory) => {
-    const { request } =
-      await import("/extensions/comfyui-turing-utils/material_workspace.js");
-    const { DirectoryPicker } =
-      await import("/extensions/comfyui-turing-utils/lib/directory_picker.js");
+    const { request } = await import(
+      "/extensions/comfyui-turing-utils/material_workspace.js"
+    );
+    const { DirectoryPicker } = await import(
+      "/extensions/comfyui-turing-utils/lib/directory_picker.js"
+    );
     window.folderPromptReleasedModal = false;
     window.pickerResult = new DirectoryPicker(
       request,

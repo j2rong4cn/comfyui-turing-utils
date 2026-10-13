@@ -30,12 +30,15 @@ try {
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
-    const workspace =
-      await import("/extensions/comfyui-turing-utils/material_workspace.js");
-    const { entries, syncPorts } =
-      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
-    const { DYNAMIC_COMBO, dynamicDefinition } =
-      await import("/extensions/comfyui-turing-utils/lib/dynamic_parameter.js");
+    const workspace = await import(
+      "/extensions/comfyui-turing-utils/material_workspace.js"
+    );
+    const { entries, syncPorts } = await import(
+      "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
+    );
+    const { DYNAMIC_COMBO, dynamicDefinition } = await import(
+      "/extensions/comfyui-turing-utils/lib/dynamic_parameter.js"
+    );
     const check = (condition, message) => {
       if (!condition) throw Error(message);
     };
@@ -273,7 +276,7 @@ try {
         directory,
         node: selection.id,
       });
-      await card.widgets.find((w) => w.name === "image · 执行到这里").callback();
+      await card.widgets.find((w) => w._executionTarget).callback();
       for (let i = 0; i < 80; i++) {
         const current = await workspace.request("selection", {
           directory,

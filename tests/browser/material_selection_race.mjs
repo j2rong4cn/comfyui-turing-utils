@@ -13,12 +13,15 @@ try {
   console.log(
     await page.evaluate(async () => {
       const { api } = await import("/scripts/api.js");
-      const { installProjectMaterials } =
-        await import("/extensions/comfyui-turing-utils/workspace/editor_materials.js");
-      const { settleMaterials, materialChanged, selectionChanged } =
-        await import("/extensions/comfyui-turing-utils/workspace/material_selection.js");
-      const { setWidgetValue } =
-        await import("/extensions/comfyui-turing-utils/lib/parameter_widget.js");
+      const { installProjectMaterials } = await import(
+        "/extensions/comfyui-turing-utils/workspace/editor_materials.js"
+      );
+      const { settleMaterials, materialChanged, selectionChanged } = await import(
+        "/extensions/comfyui-turing-utils/workspace/material_selection.js"
+      );
+      const { setWidgetValue } = await import(
+        "/extensions/comfyui-turing-utils/lib/parameter_widget.js"
+      );
       const check = (ok, message) => {
         if (!ok) throw Error(message);
       };
@@ -149,9 +152,7 @@ try {
             card.widgets.findIndex((widget) => widget.name === "setting"),
           "Position/parameter order flattened",
         );
-        const run = card.widgets.find((widget) =>
-          widget.name.includes("执行到这里"),
-        ).callback;
+        const run = card.widgets.find((widget) => widget._executionTarget).callback;
         const change = (text) => {
           setWidgetValue(sourceWidget, text);
           return sourceWidget.callback(text);
@@ -260,9 +261,7 @@ try {
             files: [new File(["fixture"], "new.png", { type: "image/png" })],
           },
         });
-        await card.widgets
-          .find((widget) => widget.name.includes("执行到这里"))
-          .callback();
+        await card.widgets.find((widget) => widget._executionTarget).callback();
         check(
           events.indexOf("compile") > events.indexOf("import-end") &&
             events.indexOf("compile") > events.indexOf("select-end"),
@@ -289,7 +288,7 @@ try {
         setWidgetValue(text, "new editor");
         await Promise.all([
           text.callback("new editor"),
-          stub.widgets.find((widget) => widget.name === "执行到这里").callback(),
+          stub.widgets.find((widget) => widget._executionTarget).callback(),
         ]);
         check(observed === "new editor", "Editor execution read stale text");
         materialChanged(directory, target, { text: "old response", revision: 0 });
@@ -305,8 +304,9 @@ try {
           "Duplicate publication was not coalesced",
         );
 
-        const { bindMaterialCombo } =
-          await import("/extensions/comfyui-turing-utils/lib/material_combo.js");
+        const { bindMaterialCombo } = await import(
+          "/extensions/comfyui-turing-utils/lib/material_combo.js"
+        );
         const files = Array.from({ length: 125 }, (_, index) => ({
           id: `${index}`,
           name: `file-${index}.png`,

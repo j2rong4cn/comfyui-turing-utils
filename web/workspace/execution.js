@@ -73,33 +73,17 @@ function watchTask(directory, id) {
             )
           )
             continue;
-          const targets = status.targets.filter((target) =>
-            target.startsWith(node.properties.instance + ":"),
+          node.updateExecution(
+            [...jobs.values()]
+              .filter(
+                (pending) =>
+                  pending.directory === directory &&
+                  pending.status?.targets.some((target) =>
+                    target.startsWith(node.properties.instance + ":"),
+                  ),
+              )
+              .map((pending) => pending.status),
           );
-          const completed = targets.filter((target) =>
-            status.completed.includes(target),
-          ).length;
-          const active = ["queued", "running"].includes(status.status);
-          const label =
-            status.status === "queued"
-              ? "排队中"
-              : active
-                ? `执行中 ${completed}/${targets.length}`
-                : status.status === "success"
-                  ? ""
-                  : {
-                      failed: "执行失败",
-                      interrupted: "已中断",
-                      cancelled: "已取消",
-                      selection_changed: "保留手选结果",
-                    }[status.status] || "执行已停止";
-          node.title = `${node.properties.card.title}${label ? ` · ${label}` : ""}`;
-          for (const widget of node.widgets) {
-            if (!targets.includes(widget._executionTarget)) continue;
-            widget.label = `${widget._executionLabel}${active && !status.completed.includes(widget._executionTarget) ? ` · ${label}` : ""}`;
-            widget.options.tooltip = status.error || label;
-          }
-          node.graph.setDirtyCanvas(true, true);
         }
       for (const [target, selection] of Object.entries(status.selections || {})) {
         if (synced.has(target)) continue;
@@ -148,7 +132,7 @@ export function installLocalExecution() {
   const queue = app.queuePrompt;
   app.queuePrompt = function (...args) {
     if (project() || editor()?.id) {
-      report(Error("画布及项目内卡片不执行整图；请使用素材桩的执行按钮"));
+      report(Error("画布及项目内卡片不执行整图；请使用生成按钮"));
       return Promise.resolve();
     }
     return queue.apply(this, args);

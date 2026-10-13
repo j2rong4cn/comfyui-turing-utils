@@ -117,6 +117,7 @@ class MaterialTasks:
                         "Remaining steps were cancelled; saved materials were retained",
                     )
                     break
+                self.active[(project.directory, identity)]["current_target"] = target
                 snapshot = {**snapshot, "completed_materials": list(completed)}
                 run = await self._material(project, target, client_id, set(), snapshot)
                 completed.append(target)
@@ -386,6 +387,9 @@ class MaterialTasks:
             },
             "cancel_requested": self.active.get((directory, identity), {}).get(
                 "cancel_requested", False
+            ),
+            "current_target": self.active.get((directory, identity), {}).get(
+                "current_target"
             ),
         }
 

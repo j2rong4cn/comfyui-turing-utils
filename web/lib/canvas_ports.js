@@ -116,6 +116,28 @@ function syncParameterWidgets(node, ports) {
     (a, b) => (order.get(a._portId) ?? -1) - (order.get(b._portId) ?? -1),
   );
 }
+
+export function refreshEndpointLabels(node, ports = entries(node)) {
+  for (const port of ports) {
+    const label = port.name + (port.canvas_hidden ? " · 隐藏" : "");
+    const output = node.outputs.find((slot) => slot._portId === port.id);
+    if (output) output.label = output.localized_name = label;
+    const widget = node.widgets.find(
+      (w) =>
+        w._portId === port.id &&
+        !w._valueControlTarget &&
+        (!w._dynamicParameterRoot || w._dynamicParameterRoot === w),
+    );
+    if (!widget) continue;
+    labelParameter(widget, label);
+    const control = node.widgets.find((w) => w._valueControlTarget === widget);
+    if (control) control.label = `${label} · control`;
+  }
+  // Both renderers refresh the label only; hidden flags never rebuild slots.
+  for (const slotType of [LiteGraph.INPUT, LiteGraph.OUTPUT])
+    node.graph?.trigger("node:slot-label:changed", { nodeId: node.id, slotType });
+  node.graph?.setDirtyCanvas(true, true);
+}
 export function syncDynamicTargets(node, port) {
   if (port.type !== DYNAMIC_COMBO) return;
   const slot = node.outputs.findIndex((s) => s._portId === port.id);
@@ -250,11 +272,7 @@ export function syncPorts(node, ports, { syncTargets = true } = {}) {
   alignInputs(node);
   const minimum = node.computeSize();
   node.setSize([Math.max(width, minimum[0]), minimum[1]]);
-  // Nodes 2.0 consumes native slot-label events; canvas invalidation alone does
-  // not notify its DOM labels after a rename or a late template restoration.
-  for (const slotType of [LiteGraph.INPUT, LiteGraph.OUTPUT])
-    node.graph?.trigger("node:slot-label:changed", { nodeId: node.id, slotType });
-  node.graph?.setDirtyCanvas(true, true);
+  refreshEndpointLabels(node, ports);
 }
 export function appendSocket(node) {
   if (node._appendingSocket || node._syncingPorts) return;

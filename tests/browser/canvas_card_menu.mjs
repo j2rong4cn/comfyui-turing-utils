@@ -66,6 +66,9 @@ try {
           .length !== 1
       )
         throw Error("Cancel removed the card");
+      app.canvas.selectNode(card);
+      await app.canvas.deleteSelected();
+      if (!card.graph) throw Error("Native deletion bypassed cancellation");
       // A server rejection must not remove the visible node or its bindings.
       const originalFetch = window.fetch;
       window.fetch = async (input, options) => {
@@ -86,9 +89,21 @@ try {
         window.fetch = originalFetch;
       }
       if (!card.graph) throw Error("Failed save removed the visible card");
-      await remove.callback();
+      const second = await workspace.addCard({ kind: "text" });
+      const other = app.rootGraph._nodes.find(
+        (n) => n.properties.instance === second.id,
+      );
+      const root = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasProject");
+      app.canvas.selectNodes([root, card, other]);
+      // Repeated native actions share one confirmation and one persisted batch.
+      await Promise.all([app.canvas.deleteSelected(), app.canvas.deleteSelected()]);
       if (card.graph || app.rootGraph._nodes.length !== 1)
         throw Error("Confirmed deletion did not remove the card");
+      if (
+        [...app.canvas.selectedItems].some((n) => n.type === "TuringCanvasCard") ||
+        !root.graph
+      )
+        throw Error("Deletion left stale selections or removed the project root");
     } finally {
       app.extensionManager.dialog.confirm = confirm;
     }
@@ -100,6 +115,17 @@ try {
     });
     if (retained.text !== "keep this text")
       throw Error("Deletion destroyed stored material/workflow");
+    await app.loadGraphData(
+      { nodes: [], links: [], extra: {}, version: 0.4 },
+      true,
+      true,
+      "native-delete.json",
+    );
+    const ordinary = LiteGraph.createNode("PrimitiveString");
+    app.rootGraph.add(ordinary);
+    app.canvas.selectNode(ordinary);
+    app.canvas.deleteSelected();
+    if (ordinary.graph) throw Error("Ordinary workflow deletion was intercepted");
     return {
       mode: LiteGraph.vueNodesMode ? "vue" : "classic",
       freshLibrary: true,
@@ -108,10 +134,11 @@ try {
       failedSaveSafe: true,
       persistentDelete: true,
       retainedMaterial: true,
+      nativeDeletion: true,
     };
   });
   assert.deepEqual(errors, []);
-  assert.equal(result.confirmations, 3);
+  assert.equal(result.confirmations, 4);
   console.log(JSON.stringify(result));
 } finally {
   await browser.close();
