@@ -4,6 +4,7 @@ import { INPUTS, entries, syncPorts } from "./lib/canvas_ports.js";
 import { DirectoryPicker } from "./lib/directory_picker.js";
 import { setWidgetValue } from "./lib/parameter_widget.js";
 import { installTitleActionDom } from "./lib/title_action.js";
+import { installPreviewZoom } from "./lib/image_hover.js";
 import {
   assertWorkflowLinks,
   normalizeAutogrowLayouts,
@@ -656,6 +657,7 @@ app.registerExtension({
   ],
   setup() {
     installTitleActionDom(app);
+    installPreviewZoom(app);
     installSidebar({
       openCanvas: openProject,
       editTemplate,

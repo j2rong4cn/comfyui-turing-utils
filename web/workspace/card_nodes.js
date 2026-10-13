@@ -8,6 +8,7 @@ import {
   setMaterialExecution,
 } from "./material_controls.js";
 import { titleAction } from "../lib/title_action.js";
+import { CardLayout } from "./card_layout.js";
 import { request, report, action } from "./api.js";
 import { valueControlWidget } from "../lib/value_controls.js";
 import { hiddenParameters, projectParameters, saveParameters } from "./parameters.js";
@@ -106,6 +107,7 @@ export function registerCanvasNodes({
     constructor() {
       super("Canvas Card");
       this.removable = false;
+      this.cardLayout = new CardLayout(this);
       this.runAll = titleAction(
         this,
         "generate-all",
@@ -178,6 +180,7 @@ export function registerCanvasNodes({
     }
     onConfigure() {
       this.copyIfNeeded();
+      const size = [...this.size];
       this.materialStates = new Map();
       this.runAll.update({
         disabled: !!this.copyPending || !!this.properties.card?.error,
@@ -188,6 +191,7 @@ export function registerCanvasNodes({
       this.releasePlayer();
       clearPosters(this);
       for (const w of [...(this.widgets || [])]) this.removeWidget(w);
+      this.cardLayout.release();
       if (this.properties.copySource) {
         const widget = this.addWidget(
           "text",
@@ -254,8 +258,14 @@ export function registerCanvasNodes({
         }
       }
       this.updateResultState();
-      this.setSize(this.computeSize());
+      this.cardLayout.reset();
+      const minimum = this.computeSize();
+      this.setSize([Math.max(size[0], minimum[0]), Math.max(size[1], minimum[1])]);
       refreshCanvasInstances();
+    }
+    arrange() {
+      super.arrange();
+      this.cardLayout?.arrange();
     }
     releasePlayer() {
       releasePlayer(this);
@@ -321,6 +331,7 @@ export function registerCanvasNodes({
       this.releasePlayer();
       for (const w of this.widgets || []) w.onRemove?.();
       clearPosters(this);
+      this.cardLayout.release();
       refreshCanvasInstances();
     }
   }

@@ -598,5 +598,6 @@ def install_routes():
                 path,
                 item["kind"],
                 float(request.query.get("start", 0)),
+                request.query.get("quality", "thumbnail"),
             )
         return web.FileResponse(path, headers={"X-Content-Type-Options": "nosniff"})

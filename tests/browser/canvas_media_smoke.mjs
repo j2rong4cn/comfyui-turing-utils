@@ -27,10 +27,12 @@ try {
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
-    const workspace =
-      await import("/extensions/comfyui-turing-utils/material_workspace.js");
-    const { materialWidget } =
-      await import("/extensions/comfyui-turing-utils/workspace/material_controls.js");
+    const workspace = await import(
+      "/extensions/comfyui-turing-utils/material_workspace.js"
+    );
+    const { materialWidget } = await import(
+      "/extensions/comfyui-turing-utils/workspace/material_controls.js"
+    );
     const check = (value, message) => {
       if (!value) throw Error(message);
     };
@@ -54,18 +56,20 @@ try {
     const aw = materialWidget(a, first.id),
       bw = materialWidget(b, second.id);
     check(aw.name === bw.name, "Media schema grows per card identity");
-    for (const width of [0, -1, 10000, NaN]) {
+    for (const width of [200, 400, 1600]) {
+      a.setSize([width, a.size[1]]);
       const size = a.widgets
         .find((w) => w.name.startsWith("poster:"))
-        .computeSize(width);
+        .computeLayoutSize(a);
       check(
-        size.every(Number.isFinite) &&
-          size[0] >= 160 &&
-          size[0] <= 1600 &&
-          size[1] <= 360,
+        Number.isFinite(size.minHeight) &&
+          Number.isFinite(size.maxHeight) &&
+          size.minHeight >= 54 &&
+          size.maxHeight <= 1600,
         "Preview geometry is unbounded",
       );
     }
+    a.setSize([320, a.size[1]]);
     const upload = async (node, material, name, color) => {
       const canvas = document.createElement("canvas");
       canvas.width = canvas.height = 16;
@@ -74,15 +78,13 @@ try {
       const blob = await new Promise((resolve) => canvas.toBlob(resolve));
       const transfer = new DataTransfer();
       transfer.items.add(new File([blob], name, { type: "image/png" }));
-      node.previewElements
-        .get(material.id)
-        .dispatchEvent(
-          new DragEvent("drop", {
-            dataTransfer: transfer,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
+      node.previewElements.get(material.id).dispatchEvent(
+        new DragEvent("drop", {
+          dataTransfer: transfer,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
       await until(() => material.selection.asset, name + " import");
     };
     await upload(a, first, "red.png", "red");
@@ -90,9 +92,9 @@ try {
     await upload(b, second, "blue.png", "blue");
     check(first.selection.asset === original, "Drop changed a different stub");
     const img = a.posters.get(first.id);
-    const thumbnail = img.src;
-    const { hoverImages } =
-      await import("/extensions/comfyui-turing-utils/lib/image_hover.js");
+    const { hoverImages } = await import(
+      "/extensions/comfyui-turing-utils/lib/image_hover.js"
+    );
     const requests = [];
     const fetchImage = hoverImages.fetchImage;
     hoverImages.fetchImage = async (...args) => {
@@ -124,7 +126,7 @@ try {
     }
     img.dispatchEvent(new PointerEvent("pointerleave"));
     check(
-      img.src === thumbnail &&
+      img.dataset.previewQuality === "original" &&
         a.previewElements.get(first.id).querySelectorAll("img").length === 1,
       "Hover did not replace the same preview",
     );

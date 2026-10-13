@@ -8,6 +8,7 @@ import { mediaRange } from "../lib/media_range.js";
 import { action, report, request } from "./api.js";
 import { acceptsFile, chooseUpload } from "./material_selection.js";
 import { bindTextUndo } from "./text_undo.js";
+import { previewLayout } from "./card_layout.js";
 
 let playing = null;
 export const stopActivePreview = () => playing?.releasePlayer();
@@ -24,7 +25,13 @@ export function field(node, name, type, value, fn, options = {}) {
 export function materialWidget(node, identity) {
   return node.widgets.find((widget) => widget._materialId === identity);
 }
-export function url(directory, asset, thumbnail = false, start = 0) {
+export function url(
+  directory,
+  asset,
+  thumbnail = false,
+  start = 0,
+  quality = "thumbnail",
+) {
   return api.apiURL(
     "/turing/workspace/asset?" +
       new URLSearchParams({
@@ -32,6 +39,7 @@ export function url(directory, asset, thumbnail = false, start = 0) {
         asset,
         ...(thumbnail ? { thumbnail: "1" } : {}),
         ...(thumbnail && start ? { start } : {}),
+        ...(thumbnail && quality === "original" ? { quality } : {}),
       }),
   );
 }
@@ -155,7 +163,7 @@ function installMaterialMenu(
 export function poster(node, m, directory, importMedia, run) {
   const element = document.createElement("div");
   element.style.cssText =
-    "width:100%;height:100%;min-height:54px;max-height:480px;overflow:hidden;display:flex;align-items:center;justify-content:center";
+    "width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center";
   const img = new Image();
   img.loading = "lazy";
   img.style.cssText =
@@ -171,18 +179,23 @@ export function poster(node, m, directory, importMedia, run) {
       ? url(directory, m.selection.asset, true, m.selection.start || 0)
       : "";
   img.preview =
-    m.kind === "image"
+    m.kind !== "audio"
       ? bindImageHover(
           img,
-          () => (m.selection.asset ? url(directory, m.selection.asset) : ""),
+          () =>
+            m.selection.asset
+              ? url(
+                  directory,
+                  m.selection.asset,
+                  m.kind === "video",
+                  m.selection.start || 0,
+                  "original",
+                )
+              : "",
           thumbnail,
         )
       : {
-          refresh: () => {
-            const src = thumbnail();
-            if (src) img.src = src;
-            else img.removeAttribute("src");
-          },
+          refresh: () => {},
           release: () => img.removeAttribute("src"),
         };
   img.preview.refresh();
@@ -226,15 +239,19 @@ export function poster(node, m, directory, importMedia, run) {
   const widget = node.addDOMWidget(`poster:${m.id}`, "image", element, {
     serialize: false,
   });
-  widget.computeSize = (width = node.size[0]) => {
-    width = Number.isFinite(width) ? width : 320;
-    return [
-      Math.max(160, Math.min(1600, width)),
-      m.kind === "audio" ? 54 : Math.max(100, Math.min(360, width * 0.6)),
-    ];
+  const layout = previewLayout(widget, m.kind, () => !!m.selection.asset);
+  element.previewLayout = layout;
+  img.onload = () => {
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    const ratio = img.naturalWidth / img.naturalHeight;
+    if (layout.ratio === ratio) return;
+    layout.ratio = ratio;
+    node.cardLayout?.request();
+    node.graph?.setDirtyCanvas(true, true);
   };
   widget.onRemove = () => {
     img.preview.release();
+    img.onload = null;
     element.ondragover =
       element.ondrop =
       element.onclick =
@@ -253,10 +270,18 @@ export function playPreview(node, m, directory, select, importMedia, run) {
   installMaterialMenu(media, node, m, directory, importMedia, run);
   media.controls = false;
   media.preload = "none";
-  media.style.cssText = "width:100%;min-height:0;flex:1;object-fit:contain";
+  media.style.cssText = "width:100%;height:0;min-height:0;flex:1;object-fit:contain";
   node.range = mediaRange(media, () => m.selection, action(select));
   host.style.flexDirection = "column";
   host.replaceChildren(media, node.range.element);
+  host.previewLayout.playing = true;
+  media.onloadedmetadata = () => {
+    if (media.videoWidth && media.videoHeight)
+      host.previewLayout.ratio = media.videoWidth / media.videoHeight;
+    node.cardLayout?.request();
+    node.graph?.setDirtyCanvas(true, true);
+  };
+  node.cardLayout?.request();
   node.player = media;
   node.playerHost = host;
   node.playerMaterial = { id: m.id, kind: m.kind };
@@ -272,7 +297,7 @@ export function playPreview(node, m, directory, select, importMedia, run) {
 function textPreview(node, m, select, run) {
   const frame = document.createElement("div");
   frame.style.cssText =
-    "width:100%;height:100%;min-height:96px;box-sizing:border-box;border:1px solid var(--border-color,#555);border-radius:6px;padding:8px;display:flex";
+    "width:100%;height:100%;min-width:0;min-height:0;box-sizing:border-box;border:1px solid var(--border-color,#555);border-radius:6px;padding:8px;display:flex";
   const input = document.createElement("textarea");
   input.className = "comfy-multiline-input";
   input.placeholder = m.name;
@@ -296,7 +321,7 @@ function textPreview(node, m, select, run) {
   widget._materialId = m.id;
   widget.callback = action((text) => select(node, m, { text }));
   input.oninput = () => widget.callback(input.value);
-  widget.computeSize = () => [160, 160];
+  previewLayout(widget, "text");
   node.previewElements ||= new Map();
   node.previewElements.set(m.id, frame);
   installMaterialMenu(frame, node, m, node.properties.directory, null, run);
@@ -450,11 +475,14 @@ export function releasePlayer(node) {
     node.range?.release();
     node.range = null;
     const img = node.posters?.get(node.playerMaterial.id);
+    node.playerHost.previewLayout.playing = false;
+    node.playerHost.style.flexDirection = "row";
     if (node.playerMaterial.kind === "audio") node.playerHost.textContent = "Audio";
     else if (img) node.playerHost.replaceChildren(img);
     node.playerHost = null;
     node.playerMaterial = null;
     node.player = null;
+    node.cardLayout?.request();
   }
   if (playing === node) playing = null;
 }

@@ -47,7 +47,27 @@ class MaterialPreviewsTest(unittest.IsolatedAsyncioTestCase):
                     await self.store.get(self.root, "image", self.source, "image", time)
             with self.assertRaises(ValueError):
                 await self.store.get(self.root, "audio", self.source, "audio")
+            with self.assertRaises(ValueError):
+                await self.store.get(
+                    self.root, "image", self.source, "image", quality="../original"
+                )
             render.assert_not_called()
+
+    async def test_original_preview_is_lossless_and_separate_from_thumbnail(self):
+        Image.new("RGBA", (1280, 720), (25, 51, 76, 64)).save(self.source)
+        thumbnail = await self.store.get(self.root, "image", self.source, "image")
+        original = await self.store.get(
+            self.root, "image", self.source, "image", quality="original"
+        )
+        self.assertNotEqual(thumbnail, original)
+        with Image.open(original) as image:
+            self.assertEqual(image.size, (1280, 720))
+            self.assertEqual(image.mode, "RGBA")
+            self.assertEqual(image.getpixel((100, 100)), (25, 51, 76, 64))
+        repeated = await self.store.get(
+            self.root, "image", self.source, "image", quality="original"
+        )
+        self.assertEqual(original, repeated)
 
     async def test_queue_limit_still_allows_joining_an_existing_poster(self):
         self.store = previews.PreviewStore(
