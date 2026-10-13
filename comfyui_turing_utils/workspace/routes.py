@@ -389,12 +389,8 @@ def install_routes():
                 canvas = workflow_files.load_json(project.root / "canvas.json")
                 return {
                     "items": canvas["selections"],
-                    "revision": canvas["revision"],
                     "settings": project.settings(canvas),
-                    "parameters": {
-                        card["id"]: card.get("parameters", {})
-                        for card in canvas["cards"]
-                    },
+                    **workflow_files.parameter_state(project.root, canvas),
                 }
 
         return web.json_response(await asyncio.to_thread(state))

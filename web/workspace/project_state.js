@@ -2,6 +2,7 @@
 import { app } from "../../../scripts/app.js";
 import { SerialWrites } from "../lib/serial_writes.js";
 import { setWidgetValue } from "../lib/parameter_widget.js";
+import { INPUTS, entries } from "../lib/canvas_ports.js";
 import { request } from "./api.js";
 import { settleMaterials } from "./material_selection.js";
 
@@ -19,6 +20,38 @@ export function projectState(directory) {
 }
 
 export function restoreSavedValues(directory, saved) {
+  const editing = editor();
+  if (
+    editing?.directory === directory &&
+    editing.id &&
+    saved.parameters?.[editing.id]
+  ) {
+    const parameters = saved.parameters[editing.id];
+    const restore = (graph) => {
+      for (const node of graph._nodes) {
+        if (node.subgraph) restore(node.subgraph);
+        if (node.type !== INPUTS) continue;
+        const ports = entries(node);
+        for (const port of ports) {
+          if (
+            !(port.id in parameters) ||
+            JSON.stringify(port.default) !==
+              JSON.stringify(editing.parameters?.[port.id])
+          )
+            continue;
+          port.default = parameters[port.id];
+          const widget = node.widgets.find(
+            (w) => w._portId === port.id && !w._valueControlTarget,
+          );
+          if (widget?.setParameterValue) widget.setParameterValue(port.default);
+          else setWidgetValue(widget, port.default);
+        }
+        node.widgets.find((w) => w.name === "ports").value = JSON.stringify(ports);
+      }
+    };
+    restore(app.rootGraph);
+    editing.parameters = parameters;
+  }
   const state = projectState(directory);
   if (!state || !Number.isInteger(saved.revision) || state.revision > saved.revision)
     return;
@@ -29,6 +62,7 @@ export function restoreSavedValues(directory, saved) {
       : snapshot(directory)?.nodes;
   for (const node of nodes || []) {
     if (node.type === ROOT) {
+      if (!saved.settings) continue;
       const previous = node.properties.settings;
       for (const [name, key] of [
         ["项目名称", "name"],
@@ -56,6 +90,12 @@ export function restoreSavedValues(directory, saved) {
         continue;
       node.properties.values[field.input] = parameters[field.input];
       if (widget) setWidgetValue(widget, parameters[field.input]);
+      const mode = saved.control_modes?.[node.properties.instance]?.[field.input];
+      const control = widget?.linkedWidgets?.[0];
+      if (mode && control && control.value === field.control?.mode) {
+        setWidgetValue(control, mode.mode);
+        field.control = mode;
+      }
     }
     node.graph?.setDirtyCanvas(true, true);
   }

@@ -1,6 +1,7 @@
-import { parameterWidget, labelParameter } from "./parameter_widget.js";
+import { parameterWidget, labelParameter, setWidgetValue } from "./parameter_widget.js";
 import { hideMetadataSocket } from "./workflow_metadata.js";
 import { reorderInputs } from "./input_slots.js";
+import { linkedControl, valueControlWidget } from "./value_controls.js";
 import {
   DYNAMIC_COMBO,
   dynamicDefinition,
@@ -48,7 +49,14 @@ export function parameterDefinition(type, widget, target) {
     (type === "COMBO"
       ? values[0]
       : { INT: 0, FLOAT: 0, BOOLEAN: false, STRING: "" }[type]);
-  return { type, kind: "parameter", default: value, options };
+  const control = linkedControl(widget);
+  return {
+    type,
+    kind: "parameter",
+    default: value,
+    options,
+    ...(control ? { control } : {}),
+  };
 }
 
 function syncParameterWidgets(node, ports) {
@@ -61,6 +69,7 @@ function syncParameterWidgets(node, ports) {
     let widget = node.widgets.find(
       (w) =>
         w._portId === port.id &&
+        !w._valueControlTarget &&
         (!w._dynamicParameterRoot || w._dynamicParameterRoot === w),
     );
     if (!widget) {
@@ -84,6 +93,19 @@ function syncParameterWidgets(node, ports) {
       widget._portId = port.id;
     }
     labelParameter(widget, port.name);
+    if (port.control && !node.widgets.some((w) => w._valueControlTarget === widget)) {
+      const control = valueControlWidget(node, widget, port.control, (value) => {
+        const ports = entries(node);
+        ports.find((p) => p.id === port.id).control = value;
+        node.widgets.find((w) => w.name === "ports").value = JSON.stringify(ports);
+      });
+      control._portId = port.id;
+    }
+    const control = node.widgets.find((w) => w._valueControlTarget === widget);
+    if (control && port.control) {
+      control.label = `${port.name} · control`;
+      setWidgetValue(control, port.control.mode);
+    }
     if (widget.setParameterValue) widget.setParameterValue(port.default);
     else widget.value = port.default;
     for (const w of node.widgets)

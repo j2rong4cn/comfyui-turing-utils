@@ -102,10 +102,15 @@
   由原生 lazy 求值实际读取时请求依赖，未选分支不生成、不等待。
   同一段冻结参数、像素上限与随机值；依赖就绪后恢复读取，不再次随机化。
   已有素材不重新计算；若来源正在执行则等待其新发布。循环、无生成来源或空生成结果必须停止。
-- 卡片局部提交不经过原生全图队列的控件回调，数值 randomize 在编译完成的实际计算段应用。
-  从原生 named-widget 快照及节点输入 schema 读取控制关系、范围和步长，不猜测 seed 名称。
-  支持子图命名空间，跳过接线参数及已缓存素材边界；不改写模板或卡片默认值。
-  原生执行历史保留实际输入和 extra_data.turing_value_controls，不记录下一次的随机值。
+- 卡片局部提交不调用整图控件回调；在首次有效入队前推进 fixed/increment/decrement/randomize。
+  真实运行时接线不推进，Inputs 表单展开后的标量可以推进；一份表单的多个消费者共享取值。
+  新保存文件按 linkedWidgets 捕获明确控制关系，旧 named/标准 positional 快照仍可读取。
+  原生数值范围/步长及子图命名空间保留，普通 COMBO 控制支持候选项及 increment-wrap。
+  控制模式与轻量游标属于 canvas.json；暴露的表单回写实际执行值，手工编辑重置游标。
+  验证失败不提交游标；依赖重试只推进一次，不覆盖验证期间的新手工编辑。
+  自动数值推进不是结构修改，不制造卡片编辑文件冲突；显式保存工作流重建游标。
+  模板不改写，原生执行历史保留实际输入和 extra_data.turing_value_controls。
+  Canvas 使用明确的执行前语义，不读取整图队列的 Comfy.WidgetControlMode 设置。
 - 卡片底部“执行全部桩节点”和右键“执行选中卡片”由服务端持有整个批次并规划素材拓扑顺序。
   有计算输入的桩全部重新执行，纯加载桩读取已有选择；未导出桩同样参与。
   每一步发布后再继续，同一卡片的重复点击共享正在运行的批次，不预建整批任务或缓存中间张量。
@@ -148,13 +153,15 @@
 - web/lib/input_slots.js、serial_writes.js：复用连线迁移和有失败状态的有序写入；不依赖画布服务。
 - web/lib/canvas_ports.js、endpoint_interaction.js：普通工作流端点的动态插槽。
 - web/lib/parameter_widget.js：端点与卡片共享的原生表单控件。
+- web/lib/value_controls.js：原生控制控件复用及保存时的 linkedWidgets 快照。
 - web/lib/dynamic_parameter.js、workspace/parameters.py：原生分支表单、标量校验与执行输入展开。
 - web/lib/endpoint_dom.js：两种渲染器的端点名称事件、Nodes 2.0 输入空行对齐；不改其他节点。
 - web/lib/material_combo.js、directory_picker.js：原生文件下拉适配和受限目录弹窗。
 - workspace/native.py：项目图表示及保存校验。
 - workspace/store.py、workflow_files.py、runs.py：素材与实例持久化、可恢复发布。
 - workspace/projection.py、tasks.py、compiler.py：展示描述与局部计算编译。
-- workspace/value_controls.py：原生数值 randomize 控件到局部执行参数的适配，不负责调度或素材写入。
+- workspace/value_controls.py：原生控制关系/模式及标量推进，不负责调度或持久化。
+  projection.py 负责表单来源与控制关系映射；workflow_files.py 拥有游标、模式及手工写入保护。
 - workspace/cards.py、editor.py：项目副本的计算范围及编辑素材选择校验。
 - workspace/execution.py：服务端批次、递归/并发依赖、原生队列的单一适配边界。
 - workspace/cache.py：保持节点原身份的任务范围缓存隔离及中间结果清理；不全局清理模型。
@@ -176,7 +183,8 @@ canvas_recovery.mjs 检查多画布标题、刷新草稿、标签顺序、懒加
 canvas_upgrade.mjs 真实加载旧扩展后再刷新，检查普通已保存/未保存标签与旧画布草稿恢复，
 原生同步及浏览器会话重启；document_session.mjs 检查旧指针、路径归属、格式版本与服务器/用户隔离。
 canvas_copy.mjs 检查原生多节点复制、身份/参数/选择隔离、连线、保存竞态和复制失败回退。
-canvas_randomize.mjs 通过两次真实 CPU 生成检查数值随机化、素材发布和原生历史中的实际参数。
+canvas_randomize.mjs 用真实 CPU 生成检查表单随机化、递增、模式持久化、编辑页连续执行/保存
+及原生历史中的实际参数；两种渲染器都运行。
 canvas_run_all.mjs 检查底部按钮、逆显示顺序的拓扑执行、未导出桩、重复点击和循环/空输出停止。
 material_picker.mjs 检查两种渲染器的素材选择、保存重开及项目历史隔离；
 Nodes 2.0 使用原生 DOM 面板，验证图片缩略图、视频静态海报及无媒体原文件预加载。
@@ -206,3 +214,38 @@ ordinary_subgraphs.mjs、chat_advanced_layout.mjs 检查普通节点的控件、
 Nodes 2.0 的 DOM 选择器集中在 endpoint_dom.js；原生旧草稿字段仅在一次性迁移桥中出现。
 升级时先跑两种渲染器的保存恢复、原生复制和动态槽位回归，修复或删除对应适配，
 不通过再增加一套保存、图编辑或模型缓存实现来兼容。
+
+## 2026-10-13 需求回溯
+
+按这轮画布对话的最新选择核对；已取消的拖拽排序、预连线模板、独立画布窗口不再恢复。
+“已实现”表示存在完整数据路径及相应回归，不等于所有第三方节点/浏览器都已人工验收。
+
+| 要求 | 当前实现与核对点 |
+| --- | --- |
+| 标准工作流作为卡片，模型/LoRA 共享 | 原生工作流快照、项目副本、原生执行缓存；模型/LoRA 共享的 CPU 对象回归通过，不额外复制权重 |
+| 新卡片只有两端点和四个桩，不预连线 | templates.py；模板/普通素材口顺序测试覆盖 position 优先 |
+| 参数表单、动态组、无多余左侧参数口 | canvas_ports.js / parameters.py；COMBO、嵌套 DynamicCombo、各分支保存恢复有回归 |
+| 名称不空、直接名称菜单、去掉拖拽 | endpoint_interaction.js / endpoint_dom.js；经典及 Vue 名称/连线回归 |
+| Text 字符串而非 UUID、无文件前缀 | 文本内联；parameter_widget.js 使用显示标签；文本桩保留接线后的文本框 |
+| 文件保存、菜单名称、复制模板 | 托管标签 Save/Ctrl+S 对应真实文件；保存画布/保存卡片及复制卡片入口保留 |
+| 标题、刷新、正常工作流共存 | document_session.js 只保存文件引用；原生标签/草稿负责图状态；无全局原型替换 |
+| 项目内编辑与全局模板不同 | 前者删除外侧测试支路、禁止整图 Run；后者保留测试支路并允许原生 Run |
+| 项目历史、标准下拉、上传开关 | 项目隔离；原生媒体选择面板；allow_upload 同时约束按钮和拖入；不再全局 auto-refresh |
+| 上传失败后的拷贝 | 支持服务器 input 相对路径拷贝；浏览器不会提供本机真实路径，远程电脑的文件不能自动本地拷贝 |
+| 预览与素材同步、原件下载 | 静态海报默认不播放；按需建立播放器；右键下载原文件；RGBA/像素上限有测试 |
+| 桩可不导出、递归满足依赖、执行全部 | position 必绑、Outputs 可选；原生 lazy 读取触发递归；服务端按素材拓扑执行/失败停止 |
+| 连点依赖卡片、ABAB、读当前选择 | 按实际 reader 执行时间解析当前桩，等待当时在执行的上游；不是读历史最新文件；任务内重试固定输入版本 |
+| 复制产生新身份 | 原生卡片 clone 生命周期生成新实例；参数、工作流和选择独立，已保存媒体只读共用 |
+| 动态节点保存/嵌套/连线 | 原生与派生快照分离；动态槽位按名称恢复；版本适配集中 native_graph.js；自洽的历史错接不能反推原意 |
+| randomize 等模式 | 本轮补齐内部/表单控制、递增递减、共享取值、持久化、界面回写、依赖重试和验证失败保护 |
+| Chat thinking 位置及语义 | 普通参数，api_key 下/cache_buster 上，默认 false；旧 disable_thinking 迁移及请求语义有回归 |
+
+仍未闭环/未验证的边界：
+
+- 整组 DynamicCombo 内部的控制模式，不同于分支字段的参数值；目前不能保证在卡片里
+  修改组内 seed 的控制模式后持久化并回写该分支。当前完整保证的是独立标量表单与内部原生控件。
+- 素材桩没有自动按模态设置不同节点底色，仍使用官方默认节点样式；不是数据类型区分失效。
+- 起止点仍为会话数值控件，不是进度条拖拽手柄。播放器和媒体选择功能已有，但不能称为自定义时间线已完成。
+- 没有对大规模画布、真实低带宽链路或本轮 Qwen/H3 GPU 生成质量做验收；本轮验证调度、读写与控件链路。
+- Frontend 1.53.6 的动态槽位/子图交接及媒体定义适配仍是升级敏感边界，不能保证未来版本零修改。
+- 跨项目粘贴及整项目另存为没有实现；当前明确拒绝，避免只复制显示图而丢失素材。

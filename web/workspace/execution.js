@@ -63,6 +63,7 @@ function watchTask(directory, id) {
         setProjectStatus(directory, "任务状态暂不可用；服务端任务不受影响");
         throw error;
       }
+      restoreSavedValues(directory, status);
       for (const [target, selection] of Object.entries(status.selections || {})) {
         if (synced.has(target)) continue;
         materialChanged(directory, target, selection);
@@ -125,5 +126,8 @@ export function installLocalExecution() {
   api.addEventListener("turing_material_changed", (event) => {
     const { directory, target, selection } = event.detail;
     materialChanged(directory, target, selection);
+  });
+  api.addEventListener("turing_parameters_changed", (event) => {
+    restoreSavedValues(event.detail.directory, event.detail);
   });
 }

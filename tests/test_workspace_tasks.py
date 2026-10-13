@@ -61,6 +61,30 @@ class LazyJoin:
         return (a + b,)
 
 
+class SeedText:
+    FUNCTION = "execute"
+    RETURN_TYPES = ("STRING",)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 1000,
+                        "control_after_generate": True,
+                    },
+                )
+            }
+        }
+
+    def execute(self, seed):
+        return (str(seed),)
+
+
 class Server:
     client_id = None
     last_node_id = None
@@ -101,6 +125,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                 **INTERNAL_NODES,
                 "TaskText": Text,
                 "TaskJoin": LazyJoin,
+                "TaskSeed": SeedText,
                 "TuringUtilsLazyIfElse": LazyIfElse,
                 "TuringUtilsStageBarrier": StageBarrier,
                 "TuringUtilsStagePath": StagePath,
@@ -165,6 +190,173 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                 if state["status"] not in {"queued", "running"}:
                     return state
                 await asyncio.sleep(0.01)
+
+    def seeded_card(
+        self, mode="increment", *, exposed=True, fanout=False, dependency=False
+    ):
+        workflow, graph = material_template(
+            ("text", "text") if dependency else ("text",)
+        )
+        endpoint = next(n for n in workflow["nodes"] if n["id"] == 1)
+        ports = json.loads(graph["1"]["inputs"]["ports"])
+        if exposed:
+            ports.append(
+                dict(
+                    id="seed",
+                    name="Seed",
+                    type="INT",
+                    kind="parameter",
+                    slot=len(ports),
+                    default=0,
+                    options={"min": 0, "max": 1000},
+                )
+            )
+            encoded = json.dumps(ports)
+            graph["1"]["inputs"]["ports"] = encoded
+            endpoint["widgets_values"] = [encoded]
+            endpoint["widgets_values_named"] = {"ports": encoded}
+        for node_id in (5, 6) if fanout else (5,):
+            graph[str(node_id)] = dict(
+                class_type="TaskSeed",
+                inputs={
+                    "seed": ["1", ports[-1]["slot"]] if exposed else 0,
+                },
+            )
+            workflow["nodes"].append(
+                dict(
+                    id=node_id,
+                    type="TaskSeed",
+                    widgets_values_named={"seed": 0, "control_after_generate": mode},
+                )
+            )
+        if fanout:
+            graph["7"] = dict(
+                class_type="TaskJoin", inputs={"a": ["5", 0], "b": ["6", 0]}
+            )
+        if dependency:
+            graph["7"] = dict(
+                class_type="TaskJoin", inputs={"a": ["5", 0], "b": ["4", 0]}
+            )
+            graph["4"]["inputs"]["text"] = ["8", 0]
+            graph["8"] = dict(class_type="TaskText", inputs={"text": "dependency"})
+        graph["3"]["inputs"]["text"] = ["7" if fanout or dependency else "5", 0]
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "Seeds"
+        )
+        return identity, identity + ":" + graph["3"]["inputs"]["stub_id"]
+
+    async def test_value_controls_advance_exposed_and_internal_seeds_and_persist(self):
+        for exposed in (True, False):
+            with self.subTest(exposed=exposed):
+                identity, target = self.seeded_card(exposed=exposed)
+                revision = self.project.document()["revision"]
+                editor_revision = workflow_files.read_instance(
+                    self.project.root, identity
+                )["revision"]
+                for expected in ("1", "2", "3"):
+                    operation = await self.tasks.start(
+                        "project", revision, target=target
+                    )
+                    state = await self.finished(operation)
+                    self.assertEqual(state["status"], "success", state.get("error"))
+                    self.assertEqual(
+                        self.project.selections()[target]["text"], expected
+                    )
+                    if exposed:
+                        self.assertEqual(
+                            state["parameters"][identity]["seed"], int(expected)
+                        )
+                    self.assertEqual(
+                        workflow_files.read_instance(self.project.root, identity)[
+                            "revision"
+                        ],
+                        editor_revision,
+                    )
+                canvas = workflow_files.load_json(self.project.root / "canvas.json")
+                instance = next(c for c in canvas["cards"] if c["id"] == identity)
+                self.assertEqual(
+                    next(iter(instance["value_controls"].values()))["value"], 3
+                )
+                if exposed:
+                    # An explicit edit, even back to the original seed, resets it.
+                    self.project.patch(
+                        revision,
+                        [
+                            dict(
+                                type="input",
+                                id=identity + ":parameters",
+                                name="seed",
+                                value=0,
+                            )
+                        ],
+                    )
+                    operation = await self.tasks.start(
+                        "project", revision + 1, target=target
+                    )
+                    await self.finished(operation)
+                    self.assertEqual(self.project.selections()[target]["text"], "1")
+
+    async def test_control_modes_fanout_and_repeated_draws_match_native_prompt(self):
+        identity, target = self.seeded_card("randomize", fanout=True)
+        revision = self.project.document()["revision"]
+        with mock.patch(
+            "comfyui_turing_utils.workspace.value_controls.secrets.randbelow",
+            side_effect=[123, 456],
+        ) as draw:
+            for expected in ("123123", "456456"):
+                operation = await self.tasks.start("project", revision, target=target)
+                state = await self.finished(operation)
+                self.assertEqual(state["status"], "success", state.get("error"))
+                self.assertEqual(self.project.selections()[target]["text"], expected)
+            self.assertEqual(draw.call_count, 2)
+        for mode, expected in (("fixed", "456456"), ("decrement", "455455")):
+            revision = self.project.patch(
+                revision,
+                [
+                    dict(
+                        type="control",
+                        id=identity + ":parameters",
+                        name="seed",
+                        value={"mode": mode},
+                    )
+                ],
+            )
+            operation = await self.tasks.start("project", revision, target=target)
+            state = await self.finished(operation)
+            self.assertEqual(state["status"], "success", state.get("error"))
+            self.assertEqual(self.project.selections()[target]["text"], expected)
+        history = self.server.prompt_queue.get_history()
+        for record in history.values():
+            queued = record["prompt"]
+            for key, fields in queued[3]["turing_value_controls"].items():
+                for name, value in fields.items():
+                    self.assertEqual(queued[2][key]["inputs"][name], value)
+
+    async def test_seed_is_frozen_across_dependency_retry_and_invalid_queue_does_not_advance(
+        self,
+    ):
+        identity, target = self.seeded_card("randomize", dependency=True)
+        revision = self.project.document()["revision"]
+        with mock.patch(
+            "comfyui_turing_utils.workspace.value_controls.secrets.randbelow",
+            return_value=321,
+        ) as draw:
+            operation = await self.tasks.start("project", revision, target=target)
+            state = await self.finished(operation)
+            self.assertEqual(state["status"], "success", state.get("error"))
+            self.assertEqual(
+                self.project.selections()[target]["text"], "321dependency!"
+            )
+            self.assertEqual(draw.call_count, 1)
+        before = workflow_files.parameter_state(self.project.root)
+        with mock.patch(
+            "comfyui_turing_utils.workspace.execution.validate_prompt",
+            return_value=(False, "invalid", [], {}),
+        ):
+            operation = await self.tasks.start("project", revision, target=target)
+            state = await self.finished(operation)
+            self.assertEqual(state["status"], "failed")
+        self.assertEqual(workflow_files.parameter_state(self.project.root), before)
 
     async def queued(self):
         async with asyncio.timeout(5):

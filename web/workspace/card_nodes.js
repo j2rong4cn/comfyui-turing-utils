@@ -8,6 +8,7 @@ import {
   clearPosters,
 } from "./material_controls.js";
 import { request, report, action } from "./api.js";
+import { valueControlWidget } from "../lib/value_controls.js";
 import {
   ROOT,
   CARD,
@@ -202,6 +203,28 @@ export function registerCanvasNodes({
           },
           { ...f.options, label: f.label },
         );
+        if (f.control) {
+          const control = valueControlWidget(
+            this,
+            widget,
+            f.control,
+            action(async (value) => {
+              const state = this.graph.extra.turing_project;
+              await enqueueSave(
+                state,
+                (revision) =>
+                  request("patch", {
+                    ...state,
+                    revision,
+                    changes: [{ type: "control", id: f.node, name: f.input, value }],
+                  }),
+                `control:${f.node}:${f.input}`,
+              );
+              f.control = value;
+            }),
+          );
+          control.label = `${f.label} · control before generate`;
+        }
         if (f.connected) {
           widget.disabled = true;
           if (widget.element) widget.element.readOnly = true;

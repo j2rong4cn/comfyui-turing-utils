@@ -5,7 +5,6 @@ import uuid
 
 from .compiler import MissingMaterial, compile_segment, is_link, material_order
 from .store import Conflict
-from .value_controls import randomize_inputs
 
 
 def plan_card(project, identity, revision, *, snapshot=None):
@@ -72,6 +71,12 @@ def compile_task(
         # Standalone compilation can report an absent boundary. The task service
         # uses allow_missing and lets native lazy evaluation choose what to read.
         return {"dependency": missing.target}
-    controls = randomize_inputs(prompt, document["controls"])
     project.begin_run(target, selection_revision, run_id)
-    return {"prompt": prompt, "run_id": run_id, "target": target, "controls": controls}
+    return {
+        "prompt": prompt,
+        "run_id": run_id,
+        "target": target,
+        "controls": {},
+        "control_specs": document["controls"],
+        "control_parameters": document.get("control_parameters", {}),
+    }

@@ -13,7 +13,7 @@ from .parameters import (
 )
 from .protocol import MATERIAL_TYPES
 from .workflow_files import card_path, load_json, unpack
-from .value_controls import workflow_controls
+from .value_controls import control_definition, workflow_controls
 
 
 def material_options(workflow, interface, identities):
@@ -44,7 +44,7 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         canvas = load_json(Path(root) / "canvas.json")
     if canvas.get("format") != 3:
         raise ValueError("Unsupported Canvas project format")
-    prompt, cards, connections, controls = {}, [], {}, {}
+    prompt, cards, connections, controls, control_parameters = {}, [], {}, {}, {}
     for connection in canvas.get("connections", []):
         connections.setdefault(connection["target"], {})[connection["port"]] = (
             connection
@@ -100,8 +100,55 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                 if node not in identities
             }
         )
+        # A form connection is flattened into a scalar, unlike a genuine runtime
+        # link. Scan those values in both views so old cards gain their controls
+        # without recreating nodes or saving their workflow again.
+        form_prompt = {}
+        parameter_ports = {}
+        for node_id, node in data["prompt"].items():
+            inputs = dict(node["inputs"])
+            for name, value in inputs.items():
+                if is_link(value) and value[0] == interface["input_node"]:
+                    port = next(p for p in interface["inputs"] if p["slot"] == value[1])
+                    if is_parameter(port):
+                        inputs[name] = overrides.get(
+                            port["id"], parameter_default(port)
+                        )
+                        parameter_ports.setdefault(identities[node_id], {})[name] = (
+                            port["id"]
+                        )
+            form_prompt[node_id] = {**node, "inputs": inputs}
+        local_controls = workflow_controls(workflow, form_prompt, identities)
+        form_controls = {}
+        for key, fields in parameter_ports.items():
+            for name, port_id in fields.items():
+                control = local_controls.get(key, {}).get(name)
+                if control:
+                    form_controls.setdefault(port_id, {"mode": control["mode"]})
+        for port in interface["inputs"]:
+            if is_parameter(port) and port.get("control"):
+                form_controls[port["id"]] = port["control"]
+        for port_id, control in form_controls.items():
+            control = {**control, **instance.get("control_modes", {}).get(port_id, {})}
+            form_controls[port_id] = control
+            port = next(p for p in interface["inputs"] if p["id"] == port_id)
+            options = parameter_options(port)
+            definition = control_definition(
+                port["type"],
+                {
+                    **options,
+                    "step": options.get("step2", options.get("step", 1)),
+                },
+                control,
+            )
+            for key, fields in parameter_ports.items():
+                for name, source in fields.items():
+                    if source == port_id:
+                        local_controls.setdefault(key, {}).setdefault(name, definition)
+                        local_controls[key][name].update(control)
+                        control_parameters.setdefault(key, {})[name] = port_id
         if execution:
-            controls.update(workflow_controls(workflow, data["prompt"], identities))
+            controls.update(local_controls)
         for node_id, node in local.items():
             for value in node["inputs"].values():
                 if is_link(value):
@@ -158,6 +205,11 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                     "label": port["name"],
                     "type": port["type"],
                     "options": parameter_options(port),
+                    **(
+                        {"control": form_controls[port["id"]]}
+                        if port["id"] in form_controls
+                        else {}
+                    ),
                     "connected": port["id"] in bindings
                     or f"port_{port['slot']}"
                     in data["prompt"][interface["input_node"]]["inputs"]
@@ -195,5 +247,9 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         "workflow": {},
         "cards": cards,
         "format": 3,
-        **({"controls": controls} if execution else {}),
+        **(
+            {"controls": controls, "control_parameters": control_parameters}
+            if execution
+            else {}
+        ),
     }

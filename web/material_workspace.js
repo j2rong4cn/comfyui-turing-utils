@@ -281,6 +281,8 @@ function restoreEditor(graph, editing) {
       if (n.type === INPUTS) {
         const ports = entries(n);
         for (const p of ports)
+          if (editing.control_modes?.[p.id]) p.control = editing.control_modes[p.id];
+        for (const p of ports)
           if (p.id in overrides) {
             p.default = overrides[p.id];
             const slot = n.inputs.findIndex((s) => s.name === `port_${p.slot}`);
@@ -408,7 +410,11 @@ async function loadDocument(reference) {
     ...reference,
     revision: data.revision,
     ...(reference.id
-      ? { parameters: data.parameters, selections: data.selections }
+      ? {
+          parameters: data.parameters,
+          selections: data.selections,
+          control_modes: data.control_modes,
+        }
       : {}),
   };
   return data.workflow;

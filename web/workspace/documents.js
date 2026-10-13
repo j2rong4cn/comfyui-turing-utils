@@ -8,6 +8,7 @@ import {
 } from "../lib/workflow_metadata.js";
 import { settleMaterials } from "./material_selection.js";
 import { settleProjectWrites } from "./project_state.js";
+import { captureValueControls } from "../lib/value_controls.js";
 import {
   documentPath,
   fileReference,
@@ -43,6 +44,7 @@ export async function snapshotCard(graph = app.rootGraph) {
       sortNodes: app.extensionManager.setting.get("Comfy.Workflow.SortNodeIdOnSave"),
     }),
   );
+  captureValueControls(graph, workflow);
   assertWorkflowLinks(workflow);
   normalizeAutogrowLayouts(workflow);
   const task = await app.graphToPrompt(graph);

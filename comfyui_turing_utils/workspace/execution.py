@@ -285,8 +285,24 @@ class MaterialTasks:
             self.waits.pop(owner, None)
 
     async def _submit(self, project, prepared, client_id, continuation):
+        # Cursor advancement and first enqueue are ordered across card tasks.
+        # A dependency retry reuses the prepared values rather than drawing again.
+        async with self.lock:
+            return await self._enqueue(project, prepared, client_id, continuation)
+
+    async def _enqueue(self, project, prepared, client_id, continuation):
         # Version-sensitive enqueue lives here, never in media/node code.
         # Preserve normal hooks, replacement, validation and the native worker.
+        first = "control_updates" not in prepared
+        if first:
+            prepared["controls"], prepared["control_updates"] = (
+                workflow_files.prepare_controls(
+                    project.root,
+                    prepared["prompt"],
+                    prepared["control_specs"],
+                    prepared["control_parameters"],
+                )
+            )
         native_id = str(uuid.uuid4())
         data = self.server.trigger_on_prompt(
             {
@@ -305,6 +321,13 @@ class MaterialTasks:
                 )
             )
         continuation.bind(prompt)
+        if first and any(prepared["control_updates"].values()):
+            state = workflow_files.commit_controls(
+                project.root, prepared["control_updates"]
+            )
+            self.server.send_sync(
+                "turing_parameters_changed", {"directory": project.directory, **state}
+            )
         extra = {
             **data.get("extra_data", {}),
             "client_id": data.get("client_id", client_id),
@@ -345,6 +368,10 @@ class MaterialTasks:
         selections = project.selections()
         return {
             **record,
+            **workflow_files.parameter_state(
+                project.root,
+                card_ids={target.split(":", 1)[0] for target in record["targets"]},
+            ),
             "selections": {
                 target: selections.get(target, {}) for target in record["completed"]
             },

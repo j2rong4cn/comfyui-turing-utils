@@ -17,6 +17,10 @@ try {
     const { app } = await import("/scripts/app.js");
     const { api } = await import("/scripts/api.js");
     const { addValueControlWidget } = await import("/scripts/widgets.js");
+    const { snapshotCard } =
+      await import("/extensions/comfyui-turing-utils/workspace/documents.js");
+    const { entries } =
+      await import("/extensions/comfyui-turing-utils/lib/canvas_ports.js");
     const workspace =
       await import("/extensions/comfyui-turing-utils/material_workspace.js");
     const check = (ok, message) => {
@@ -42,6 +46,16 @@ try {
     color.linkedWidgets = [control];
     input.connect(
       input.outputs.findIndex((p) => p._append),
+      source,
+      source.inputs.findIndex((p) => p.name === "color"),
+    );
+    const colorPort = entries(input).at(-1);
+    check(
+      colorPort.control?.mode === "randomize",
+      "Exposed form lost its linked control",
+    );
+    input.connect(
+      input.outputs.findIndex((p) => p._append),
       image,
       0,
     );
@@ -55,7 +69,7 @@ try {
       output,
       output.inputs.findIndex((p) => p._append),
     );
-    const task = await app.graphToPrompt();
+    const task = await snapshotCard();
     const name = directory + ".json";
     await workspace.request("template/save", {
       name,
@@ -65,6 +79,11 @@ try {
     await workspace.openProject(directory);
     await workspace.addCard({ name });
     const card = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasCard");
+    const colorField = card.widgets.find((w) => w.name === colorPort.id);
+    check(
+      colorField?.linkedWidgets?.[0]?.value === "randomize",
+      "Card control was not rendered",
+    );
     const button = card.widgets.find((w) => w.name.includes("执行到这里"));
     await button.callback();
     await button.callback();
@@ -101,6 +120,52 @@ try {
         "Native history did not retain the actual execution value",
       );
     }
+    check(
+      colorField.value === colors.at(-1),
+      "Card form does not show the actual queued value",
+    );
+    const modeWidget = colorField.linkedWidgets[0];
+    modeWidget.value = "increment";
+    await modeWidget.callback("increment");
+    await button.callback();
+    check(
+      colorField.value === colors.at(-1) + 1,
+      "Increment did not advance the current form value",
+    );
+    await workspace.openProject(directory);
+    const reopened = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasCard");
+    const restoredColor = reopened.widgets.find((w) => w.name === colorPort.id);
+    check(
+      restoredColor?.value === colors.at(-1) + 1 &&
+        restoredColor.linkedWidgets?.[0]?.value === "increment",
+      "Reopen lost the value/control mode",
+    );
+    await reopened.widgets.find((w) => w.name === "编辑工作流").callback();
+    const endpoint = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasInputs");
+    const editorColor = endpoint.widgets.find(
+      (w) => w._portId === colorPort.id && !w._valueControlTarget,
+    );
+    check(
+      editorColor?.linkedWidgets?.[0]?.value === "increment",
+      "Editor lost the card's control override",
+    );
+    const stub = app.rootGraph._nodes.find((n) => n.type === "TuringMaterialImage");
+    await stub.widgets.find((w) => w.name === "执行到这里").callback();
+    await stub.widgets.find((w) => w.name === "执行到这里").callback();
+    check(
+      editorColor.value === colors.at(-1) + 3,
+      "Repeated execution in the editor did not restore its value: " +
+        JSON.stringify({
+          actual: editorColor.value,
+          expected: colors.at(-1) + 3,
+          ports: entries(endpoint),
+          parameters: app.rootGraph.extra.turing_editor.parameters,
+          current: app.rootGraph._nodes
+            .find((n) => n.type === "TuringCanvasInputs")
+            .widgets.map((w) => [w.name, w.value]),
+        }),
+    );
+    await app.extensionManager.workflow.activeWorkflow.save();
     // Repeated draws are legal. Unit tests use a deterministic RNG to verify
     // both tasks draw independently; this test checks actual queue/history I/O.
     check(

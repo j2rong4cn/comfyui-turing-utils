@@ -43,7 +43,8 @@ from comfyui_turing_utils.workspace.templates import (
 from comfyui_turing_utils.workspace.native import project_workflow, save_layout
 from comfyui_turing_utils.workspace.value_controls import (
     workflow_controls,
-    randomize_inputs,
+    advance_inputs,
+    next_value,
 )
 from comfyui_turing_utils.workspace.materials import material_files
 import torch
@@ -100,6 +101,48 @@ class SeedText:
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_native_control_modes_clamp_steps_and_combo_choices(self):
+        options = dict(min=-1, max=1, step=0.25, integer=False)
+        self.assertEqual(next_value(0.9, {**options, "mode": "increment"}), 1)
+        self.assertEqual(next_value(-0.9, {**options, "mode": "decrement"}), -1)
+        self.assertEqual(next_value(0.1, {**options, "mode": "fixed"}), 0.1)
+        combo = dict(values=["red", "green", "blue"])
+        self.assertEqual(next_value("blue", {**combo, "mode": "increment-wrap"}), "red")
+        self.assertEqual(next_value("green", {**combo, "mode": "decrement"}), "red")
+        self.assertEqual(next_value("blue", {**combo, "mode": "increment"}), "blue")
+        self.assertEqual(
+            next_value("green", {**combo, "mode": "randomize", "filter": "blue"}),
+            "blue",
+        )
+
+    def test_positional_and_explicit_control_snapshots(self):
+        workflow = {
+            "nodes": [
+                dict(id=5, type="WorkspaceSeedText", widgets_values=[0, "increment"])
+            ]
+        }
+        graph = {"5": dict(class_type="WorkspaceSeedText", inputs={"seed": 0})}
+        controls = workflow_controls(workflow, graph, {"5": "5"})
+        self.assertEqual(advance_inputs(graph, controls), {"5": {"seed": 1}})
+        workflow["nodes"][0]["properties"] = {
+            "turing_value_controls": {"seed": {"mode": "decrement"}}
+        }
+        controls = workflow_controls(workflow, graph, {"5": "5"})
+        self.assertEqual(advance_inputs(graph, controls), {"5": {"seed": 0}})
+        # Standard KSampler begins with MODEL, which has no positional widget.
+        workflow = {
+            "nodes": [
+                dict(
+                    id=5,
+                    type="KSampler",
+                    widgets_values=[0, "increment", 8, 1.0, "euler", "simple", 1.0],
+                )
+            ]
+        }
+        graph = {"5": dict(class_type="KSampler", inputs={"seed": 0})}
+        controls = workflow_controls(workflow, graph, {"5": "5"})
+        self.assertEqual(advance_inputs(graph, controls), {"5": {"seed": 1}})
+
     def test_card_plan_orders_all_computations_and_reuses_loader_only_material(self):
         workflow, prompt = material_template(("text", "text", "text"))
         prompt["3"]["inputs"]["text"] = ["8", 0]
@@ -189,11 +232,11 @@ class WorkspaceTest(unittest.TestCase):
             "comfyui_turing_utils.workspace.value_controls.secrets.randbelow",
             return_value=123,
         ) as random:
-            self.assertEqual(randomize_inputs({}, controls), {})
+            self.assertEqual(advance_inputs({}, controls), {})
             random.assert_not_called()
             compiled = {"instance:node:9:5": copy.deepcopy(prompt["9:5"])}
             self.assertEqual(
-                randomize_inputs(compiled, controls),
+                advance_inputs(compiled, controls),
                 {"instance:node:9:5": {"seed": 123}},
             )
 
@@ -254,7 +297,7 @@ class WorkspaceTest(unittest.TestCase):
             side_effect=[3, 5],
         ) as random:
             self.assertEqual(
-                randomize_inputs(prompt, controls), {"5": {"scale": -0.25, "seed": 5}}
+                advance_inputs(prompt, controls), {"5": {"scale": -0.25, "seed": 5}}
             )
             self.assertEqual(random.call_args_list, [mock.call(8), mock.call(2**50)])
 
@@ -287,6 +330,13 @@ class WorkspaceTest(unittest.TestCase):
             first = compile_task(self.project, target, revision)
             second = compile_task(self.project, target, revision)
             kept = compile_task(self.project, fixed, revision)
+            for prepared in (first, second, kept):
+                prepared["controls"], _ = workflow_files.prepare_controls(
+                    self.project.root,
+                    prepared["prompt"],
+                    prepared["control_specs"],
+                    prepared["control_parameters"],
+                )
             self.assertEqual(random.call_count, 2)
         key = identity + ":node:5"
         self.assertEqual(first["prompt"][key]["inputs"]["seed"], 123)

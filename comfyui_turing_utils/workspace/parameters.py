@@ -5,6 +5,7 @@ import math
 
 DYNAMIC_COMBO = "COMFY_DYNAMICCOMBO_V3"
 PARAMETER_TYPES = {"INT", "FLOAT", "BOOLEAN", "STRING", "COMBO", DYNAMIC_COMBO}
+VALUE_CONTROL_MODES = {"fixed", "increment", "decrement", "randomize", "increment-wrap"}
 DYNAMIC_BINDINGS = "turing_dynamic_inputs"
 
 
@@ -38,6 +39,12 @@ def validate_definition(port, depth=0):
     if depth > 16:
         raise ValueError("Dynamic parameter nesting is too deep")
     options = parameter_options(port)
+    if "control" in port and (
+        port["type"] not in {"INT", "FLOAT", "COMBO"}
+        or not isinstance(port["control"], dict)
+        or port["control"].get("mode") not in VALUE_CONTROL_MODES
+    ):
+        raise ValueError("Invalid endpoint value-control mode")
     if not isinstance(options, dict):
         raise ValueError("Parameter options must be an object")
     if (
@@ -51,7 +58,8 @@ def validate_definition(port, depth=0):
         values = options.get("values")
         if not isinstance(values, list) or any(
             type(v) not in {str, int, float, bool}
-            or isinstance(v, float) and not math.isfinite(v)
+            or isinstance(v, float)
+            and not math.isfinite(v)
             for v in values
         ):
             raise ValueError("Combo parameters need serializable choices")
@@ -83,7 +91,8 @@ def validate_definition(port, depth=0):
                         or name in names
                         or not isinstance(spec, (list, tuple))
                         or len(spec) not in {1, 2}
-                        or len(spec) == 2 and not isinstance(spec[1], dict)
+                        or len(spec) == 2
+                        and not isinstance(spec[1], dict)
                     ):
                         raise ValueError("Invalid dynamic branch input")
                     names.add(name)
@@ -110,9 +119,7 @@ def parameter_default(port):
         }
     if port["type"] == "COMBO":
         return options["values"][0] if options["values"] else None
-    return {"INT": 0, "FLOAT": 0.0, "BOOLEAN": False, "STRING": ""}.get(
-        port["type"]
-    )
+    return {"INT": 0, "FLOAT": 0.0, "BOOLEAN": False, "STRING": ""}.get(port["type"])
 
 
 def validate_parameter(port, value):
@@ -131,7 +138,9 @@ def validate_parameter(port, value):
         for key, branch in value["branches"].items():
             fields = branch_parameters(options[key])
             if not isinstance(branch, dict) or set(branch) != set(fields):
-                raise ValueError("DynamicCombo branch parameters do not match its schema")
+                raise ValueError(
+                    "DynamicCombo branch parameters do not match its schema"
+                )
             for name, child in fields.items():
                 validate_parameter(child, branch[name])
         return value
@@ -141,7 +150,8 @@ def validate_parameter(port, value):
         "BOOLEAN": type(value) is bool,
         "STRING": isinstance(value, str),
         "COMBO": value in parameter_options(port).get("values", [])
-        or not parameter_options(port).get("values") and value is None,
+        or not parameter_options(port).get("values")
+        and value is None,
     }.get(type_, False)
     if not valid:
         raise ValueError("Value does not match the endpoint parameter type")

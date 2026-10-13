@@ -13,6 +13,7 @@ from .cards import describe, project_content
 from .parameters import is_parameter, parameter_default, validate_parameter
 from .endpoints import INPUTS, parse_ports
 from .protocol import MATERIAL_TYPES
+from .value_controls import MODES, advance_inputs
 
 LOCK = threading.RLock()
 KEY = "turing_card"
@@ -226,6 +227,12 @@ def read_instance(root, identity):
             **(overrides if isinstance(overrides, dict) else {}),
             **instance.get("parameters", {}),
         }
+        control_modes = instance.get("control_modes", {})
+        revision_parameters = dict(parameters)
+        for cursor in instance.get("value_controls", {}).values():
+            port = cursor["port"]
+            if port and revision_parameters.get(port) == cursor["value"]:
+                revision_parameters[port] = cursor["base"]
         # The editor opens native content even when its derived API metadata is
         # damaged. Only a verified graph may prune external test branches.
         try:
@@ -237,9 +244,12 @@ def read_instance(root, identity):
         return {
             "workflow": project_copy(workflow) if clean else workflow,
             "revision": hashlib.sha256(
-                content + json.dumps(parameters, sort_keys=True).encode()
+                content
+                + json.dumps(revision_parameters, sort_keys=True).encode()
+                + json.dumps(control_modes, sort_keys=True).encode()
             ).hexdigest(),
             "parameters": parameters,
+            "control_modes": control_modes,
         }
 
 
@@ -286,6 +296,8 @@ def save_instance(root, identity, workflow, prompt, revision, parameters=None):
         _, interface = unpack(result)
         old_ports, old_materials = _saved_contract(current["workflow"])
         instance = next(c for c in canvas["cards"] if c["id"] == identity)
+        instance.pop("value_controls", None)
+        instance.pop("control_modes", None)
         ports = {p["id"]: p for p in interface["inputs"] if is_parameter(p)}
         instance["parameters"] = {
             key: value for key, value in current["parameters"].items() if key in ports
@@ -363,7 +375,7 @@ def patch(root, revision, changes):
             raise ValueError("Canvas changed; reload before saving")
         interfaces = {}
         for change in changes:
-            if change["type"] == "input":
+            if change["type"] in {"input", "control"}:
                 identity, suffix = change["id"].split(":", 1)
                 if suffix != "parameters":
                     raise ValueError("Only endpoint parameters can be edited on a card")
@@ -387,10 +399,118 @@ def patch(root, revision, changes):
                 )
                 if port is None:
                     raise ValueError("Unknown card input")
-                validate_parameter(port, change["value"])
-                instance.setdefault("parameters", {})[change["name"]] = change["value"]
+                if change["type"] == "control":
+                    control = change["value"]
+                    if (
+                        port["type"] not in {"INT", "FLOAT", "COMBO"}
+                        or not isinstance(control, dict)
+                        or control.get("mode") not in MODES
+                    ):
+                        raise ValueError("Invalid card value-control mode")
+                    instance.setdefault("control_modes", {})[change["name"]] = {
+                        "mode": control["mode"],
+                    }
+                else:
+                    validate_parameter(port, change["value"])
+                    instance.setdefault("parameters", {})[change["name"]] = change[
+                        "value"
+                    ]
+                instance.get("value_controls", {}).pop(
+                    "parameter:" + change["name"], None
+                )
             else:
                 raise ValueError("Unknown Canvas edit")
         canvas["revision"] += 1
         atomic_json(path, canvas)
         return canvas["revision"]
+
+
+def prepare_controls(root, prompt, specs, parameters):
+    """Read tiny persistent cursors; don't mutate the project before validation."""
+    with LOCK:
+        canvas = load_json(Path(root) / "canvas.json")
+        instances = {card["id"]: card for card in canvas["cards"]}
+        updates, groups = {}, {}
+        for key, fields in specs.items():
+            if key not in prompt:
+                continue
+            identity, local = key.split(":", 1)
+            instance = instances.get(identity)
+            if instance is None:
+                raise ValueError("The controlled card no longer belongs to this Canvas")
+            for name, options in fields.items():
+                if name not in prompt[key]["inputs"]:
+                    continue
+                port = parameters.get(key, {}).get(name)
+                source = "parameter:" + port if port else local + ":" + name
+                groups.setdefault(key, {})[name] = identity + ":" + source
+                base = prompt[key]["inputs"][name]
+                previous = instance.get("value_controls", {}).get(source, {})
+                definition = hashlib.sha256(
+                    json.dumps(options, sort_keys=True).encode()
+                ).hexdigest()
+                # A saved workflow/form edit resets the cursor; another queued
+                # task from the same snapshot continues it instead of repeating.
+                if previous.get("definition") == definition and base in (
+                    previous.get("base"),
+                    previous.get("value"),
+                ):
+                    prompt[key]["inputs"][name] = previous["value"]
+                    base = previous["base"]
+                updates.setdefault(identity, {})[source] = {
+                    "definition": definition,
+                    "base": base,
+                    "port": port,
+                    "revision": canvas["revision"],
+                    "key": key,
+                    "name": name,
+                }
+        used = advance_inputs(prompt, specs, groups)
+        for identity, sources in updates.items():
+            for source, update in list(sources.items()):
+                key, name = update.pop("key"), update.pop("name")
+                if name not in used.get(key, {}):
+                    del sources[source]
+                else:
+                    update["value"] = used[key][name]
+        return used, updates
+
+
+def commit_controls(root, updates):
+    """Automatic advancement is runtime state, not a graph/layout revision."""
+    with LOCK:
+        path = Path(root) / "canvas.json"
+        canvas = load_json(path)
+        for instance in canvas["cards"]:
+            for source, update in updates.get(instance["id"], {}).items():
+                if canvas["revision"] != update["revision"]:
+                    continue
+                previous = instance.get("value_controls", {}).get(source, {})
+                port = update["port"]
+                if port:
+                    current = instance.get("parameters", {}).get(port)
+                    if current not in (update["base"], previous.get("value")):
+                        continue  # Never overwrite a manual edit during validation.
+                    instance.setdefault("parameters", {})[port] = update["value"]
+                instance.setdefault("value_controls", {})[source] = {
+                    name: value for name, value in update.items() if name != "revision"
+                }
+        atomic_json(path, canvas)
+        return parameter_state(root, canvas, card_ids=set(updates))
+
+
+def parameter_state(root, canvas=None, *, card_ids=None):
+    with LOCK:
+        canvas = canvas if canvas is not None else load_json(Path(root) / "canvas.json")
+        cards = [
+            card
+            for card in canvas["cards"]
+            if card_ids is None or card["id"] in card_ids
+        ]
+        return {
+            "revision": canvas["revision"],
+            "parameters": {card["id"]: card.get("parameters", {}) for card in cards},
+            "control_modes": {
+                card["id"]: card.get("control_modes", {}) for card in cards
+            },
+        }
