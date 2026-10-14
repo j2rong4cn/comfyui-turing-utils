@@ -50,7 +50,7 @@ try {
       "Field did not disable upload",
     );
     check(
-      image.widgets.some((w) => w.label === "choose file to upload"),
+      image.widgets.some((w) => w.label === "上传素材"),
       "Card-only setting removed the ordinary workflow's upload widget",
     );
     const outputs = app.graph._nodes.find((n) => n.type === "TuringCanvasOutputs");

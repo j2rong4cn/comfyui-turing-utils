@@ -93,7 +93,7 @@ try {
         throw Error("Material has no native file combo");
       if (
         !node.widgets.some(
-          (w) => w.type === "button" && w.label === "choose file to upload",
+          (w) => w.type === "button" && w.label === "上传素材",
         )
       )
         throw Error("Material has no native upload button");

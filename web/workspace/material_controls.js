@@ -97,7 +97,7 @@ function installMaterialMenu(
               ...(importMedia && material.allowUpload !== false
                 ? [
                     {
-                      content: "choose file to upload…",
+                      content: "上传素材…",
                       callback: () =>
                         chooseUpload(
                           material.kind,

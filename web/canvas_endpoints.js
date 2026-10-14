@@ -138,7 +138,7 @@ app.registerExtension({
           node.widgets.find((w) => w.name === "audioUI").element.preload = "none";
         }
         for (const widget of node.widgets.filter((w) => w.name === "upload"))
-          widget.label = "choose file to upload";
+          widget.label = "上传素材";
       }
       const executed = node.onExecuted;
       node.onExecuted = function (data) {

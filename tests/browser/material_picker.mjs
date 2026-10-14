@@ -147,7 +147,7 @@ try {
     assert.equal(await panel.locator("img").count(), 2);
     assert.equal(await node.locator('input[type="file"]').count(), 0);
     assert.equal(
-      await node.getByRole("button", { name: "choose file to upload" }).count(),
+      await node.getByRole("button", { name: "上传素材" }).count(),
       1,
     );
     await panel.locator("img[alt*='first']").evaluate((image) => image.click());
