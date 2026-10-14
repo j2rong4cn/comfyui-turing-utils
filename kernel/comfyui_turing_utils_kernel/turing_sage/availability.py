@@ -60,9 +60,9 @@ def w8a8_available() -> bool:
 def spark_available() -> bool:
     return w8a8_available() and _has_symbols(
         _ATTENTION_EXTENSION,
-        "spark_directions", "spark_indexed_scores", "spark_gather_value",
+        "spark_directions", "spark_indexed_scores",
         "spark_group_indices", "spark_partition", "spark_finalize_permutation", "spark_fused_nodes",
-        "spark_summaries", "spark_sparse_online_attn",
+        "spark_sparse_w8a8_attn",
         "spark_prepare_w8a8", "spark_topk_routes",
     ) and _has_symbols(_FUSION_EXTENSION, "quant_qk_per_warp_int8_rotated_permuted_cuda")
 

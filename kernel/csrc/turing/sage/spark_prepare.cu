@@ -472,20 +472,6 @@ __global__ void scores_kernel(const T *source, const int32_t *indices,
   }
 }
 
-template <class T>
-__global__ void gather_value_kernel(const T *value, const int32_t *indices,
-                                    T *output, int tokens, int heads, int dim,
-                                    int64_t s0, int64_t s1, int64_t s2) {
-  const int64_t i =
-      (int64_t(blockIdx.y) * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;
-  if (i >= int64_t(gridDim.y) * heads * tokens * dim)
-    return;
-  const int d = i % dim, token = (i / dim) % tokens;
-  const int h = (i / dim / tokens) % heads, b = i / dim / tokens / heads;
-  const int original = indices[(int64_t(b) * heads + h) * tokens + token];
-  output[i] = value[b * s0 + h * s1 + original * s2 + d];
-}
-
 template <bool Scatter>
 __global__ void
 group_indices_kernel(int32_t *global, int32_t *grouped,
@@ -573,7 +559,7 @@ __global__ void value_scale_kernel(const float *partial, float *scale,
   scale[i] = fmaxf(maximum / 127.0f, 1e-12f);
 }
 
-template <class T, bool PackValue = false>
+template <class T>
 __global__ void summaries_kernel(
     const int8_t *q, const int8_t *k, const float *qs, const float *ks,
     const T *value, const float *value_scale, const int32_t *permutation,
@@ -582,7 +568,7 @@ __global__ void summaries_kernel(
     int64_t qs0, int64_t qs1, int64_t qs2, int64_t ks0, int64_t ks1,
     int64_t ks2, int64_t vs0, int64_t vs1, int64_t vs2, int8_t *packed_value) {
   __shared__ int8_t keys[64][128];
-  __shared__ __align__(16) int8_t packed[PackValue ? 128 : 1][68];
+  __shared__ __align__(16) int8_t packed[128][68];
   __shared__ float scores[64], weights[64];
   __shared__ float scratch[4], maximum, denominator;
   const int block = blockIdx.x, h = blockIdx.y, b = blockIdx.z,
@@ -626,24 +612,20 @@ __global__ void summaries_kernel(
   __syncthreads();
   float weighted_key = 0, weighted_value = 0, mean_q = 0, mean_k = 0;
   if (lane < dim) {
-    const float inverse_scale =
-        PackValue ? 1.0f / value_scale[head * dim + lane] : 0;
+    const float inverse_scale = 1.0f / value_scale[head * dim + lane];
     for (int t = 0; t < count; ++t) {
       const int token = block * 64 + t;
-      const int original =
-          permutation == nullptr ? token : permutation[head * tokens + token];
+      const int original = permutation[head * tokens + token];
       weighted_key = fmaf(weights[t], float(keys[t][lane]), weighted_key);
       const float v = float(value[b * vs0 + h * vs1 + original * vs2 + lane]);
       weighted_value = fmaf(weights[t], v, weighted_value);
-      if constexpr (PackValue) {
-        const int destination = (t & ~15) | (t & 1) | ((t & 8) >> 2) |
-                                ((t & 2) << 1) | ((t & 4) << 1);
-        int converted;
-        asm volatile("cvt.rni.sat.s8.f32 %0, %1;"
-                     : "=r"(converted)
-                     : "f"(v * inverse_scale));
-        packed[lane][destination] = static_cast<int8_t>(converted);
-      }
+      const int destination = (t & ~15) | (t & 1) | ((t & 8) >> 2) |
+                              ((t & 2) << 1) | ((t & 4) << 1);
+      int converted;
+      asm volatile("cvt.rni.sat.s8.f32 %0, %1;"
+                   : "=r"(converted)
+                   : "f"(v * inverse_scale));
+      packed[lane][destination] = static_cast<int8_t>(converted);
       mean_k += float(keys[t][lane]);
       mean_q = fmaf(float(q[b * qs0 + h * qs1 + token * qs2 + lane]),
                     qs[head * blocks * 4 + token / 16], mean_q);
@@ -651,19 +633,15 @@ __global__ void summaries_kernel(
     const int64_t offset = (head * padded + block) * dim + lane;
     ak[offset] = __float2half_rn(weighted_key * key_scale);
     av[offset] = __float2half_rn(
-        value_scale == nullptr
-            ? weighted_value
-            : weighted_value / fmaxf(value_scale[head * dim + lane], 1e-12f));
+        weighted_value / fmaxf(value_scale[head * dim + lane], 1e-12f));
     qm[(head * blocks + block) * dim + lane] = __float2half_rn(mean_q / count);
     km[(head * blocks + block) * dim + lane] =
         __float2half_rn(mean_k * key_scale / count);
     weighted_key = __half2float(ak[offset]) * anchor[head * dim + lane];
-    if constexpr (PackValue) {
-      for (int t = count; t < 64; ++t) {
-        const int destination = (t & ~15) | (t & 1) | ((t & 8) >> 2) |
-                                ((t & 2) << 1) | ((t & 4) << 1);
-        packed[lane][destination] = 0;
-      }
+    for (int t = count; t < 64; ++t) {
+      const int destination = (t & ~15) | (t & 1) | ((t & 8) >> 2) |
+                              ((t & 2) << 1) | ((t & 4) << 1);
+      packed[lane][destination] = 0;
     }
   } else
     weighted_key = 0;
@@ -671,13 +649,11 @@ __global__ void summaries_kernel(
   if (wlane == 0)
     scratch[warp] = weighted_key;
   __syncthreads();
-  if constexpr (PackValue) {
-    for (int i = lane; i < dim * 16; i += 128) {
-      const int d = i / 16, t = (i % 16) * 4;
-      *reinterpret_cast<uint32_t *>(
-          packed_value + (head * dim + d) * blocks * 64 + block * 64 + t) =
-          *reinterpret_cast<const uint32_t *>(&packed[d][t]);
-    }
+  for (int i = lane; i < dim * 16; i += 128) {
+    const int d = i / 16, t = (i % 16) * 4;
+    *reinterpret_cast<uint32_t *>(
+        packed_value + (head * dim + d) * blocks * 64 + block * 64 + t) =
+        *reinterpret_cast<const uint32_t *>(&packed[d][t]);
   }
   if (lane == 0) {
     float dot = 0;
@@ -859,33 +835,6 @@ at::Tensor spark_indexed_scores(at::Tensor source, at::Tensor indices,
   return output.transpose(2, 3);
 }
 
-at::Tensor spark_gather_value(at::Tensor value, at::Tensor permutation) {
-  floating_input(value);
-  TORCH_CHECK(value.dim() == 4 && permutation.dim() == 3 &&
-                  permutation.sizes() == value.sizes().slice(0, 3) &&
-                  permutation.scalar_type() == at::kInt &&
-                  permutation.is_contiguous() &&
-                  permutation.device() == value.device(),
-              "Spark value gather inputs invalid");
-  c10::cuda::CUDAGuard guard(value.device());
-  auto output = at::empty(value.sizes(), value.options());
-  dim3 grid((value.numel() / value.size(0) + 255) / 256, value.size(0));
-#define GATHER(T)                                                              \
-  gather_value_kernel<T><<<grid, 256, 0, c10::cuda::getCurrentCUDAStream()>>>( \
-      reinterpret_cast<const T *>(value.data_ptr()),                           \
-      permutation.data_ptr<int32_t>(),                                         \
-      reinterpret_cast<T *>(output.data_ptr()), value.size(2), value.size(1),  \
-      value.size(3), value.stride(0), value.stride(1), value.stride(2))
-  if (value.scalar_type() == at::kHalf) {
-    GATHER(half);
-  } else {
-    GATHER(nv_bfloat16);
-  }
-#undef GATHER
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return output;
-}
-
 at::Tensor spark_group_indices(at::Tensor indices, std::vector<int64_t> offsets,
                                int node_tokens,
                                std::optional<at::Tensor> ordered) {
@@ -988,10 +937,10 @@ at::Tensor spark_finalize_permutation(at::Tensor indices, int sequence,
   return output;
 }
 
-static std::vector<at::Tensor> spark_summaries_impl(
+static std::vector<at::Tensor> prepare_summaries(
     at::Tensor q, at::Tensor k, at::Tensor qs, at::Tensor ks, at::Tensor value,
     int start, int stop, float scale, at::Tensor value_scale,
-    std::optional<at::Tensor> permutation, at::Tensor packed_value) {
+    at::Tensor permutation, at::Tensor packed_value) {
   floating_input(value);
   TORCH_CHECK(q.dim() == 4 && q.sizes() == k.sizes() &&
                   q.sizes() == value.sizes() && q.scalar_type() == at::kChar &&
@@ -1008,18 +957,15 @@ static std::vector<at::Tensor> spark_summaries_impl(
   const int batch = q.size(0), heads = q.size(1), tokens = q.size(2),
             dim = q.size(3);
   const int blocks = (tokens + 63) / 64, padded = (blocks + 15) / 16 * 16;
-  if (permutation.has_value()) {
-    TORCH_CHECK(permutation->is_contiguous() &&
-                    permutation->scalar_type() == at::kInt &&
-                    permutation->device() == value.device() &&
-                    permutation->sizes() == value.sizes().slice(0, 3),
-                "Spark summary permutation must be CUDA int32 [B,H,N]");
-  }
+  TORCH_CHECK(permutation.is_contiguous() &&
+                  permutation.scalar_type() == at::kInt &&
+                  permutation.device() == value.device() &&
+                  permutation.sizes() == value.sizes().slice(0, 3),
+              "Spark summary permutation must be CUDA int32 [B,H,N]");
   TORCH_CHECK(value_scale.is_cuda() && value_scale.device() == value.device() &&
                   value_scale.scalar_type() == at::kFloat &&
                   value_scale.is_contiguous() &&
-                  (value_scale.numel() == 0 ||
-                   value_scale.sizes() == at::IntArrayRef({batch, heads, dim})),
+                  value_scale.sizes() == at::IntArrayRef({batch, heads, dim}),
               "Spark value scale shape/dtype invalid");
   TORCH_CHECK(qs.sizes() == at::IntArrayRef({batch, heads, blocks * 4}) &&
                   ks.sizes() == at::IntArrayRef({batch, heads, blocks}),
@@ -1040,45 +986,29 @@ static std::vector<at::Tensor> spark_summaries_impl(
        av = at::zeros_like(ak);
   auto lm = at::full({batch, heads, padded}, -INFINITY,
                      value.options().dtype(at::kFloat));
-#define SUMMARIES(T, PACK)                                                     \
-  summaries_kernel<T, PACK><<<dim3(blocks, heads, batch), 128, 0,              \
-                              c10::cuda::getCurrentCUDAStream()>>>(            \
-      q.data_ptr<int8_t>(), k.data_ptr<int8_t>(), qs.data_ptr<float>(),        \
-      ks.data_ptr<float>(), reinterpret_cast<const T *>(value.data_ptr()),     \
-      value_scale.numel() ? value_scale.data_ptr<float>() : nullptr,           \
-      permutation.has_value() ? permutation->data_ptr<int32_t>() : nullptr,    \
-      anchor.data_ptr<float>(), reinterpret_cast<half *>(qm.data_ptr()),       \
-      reinterpret_cast<half *>(km.data_ptr()),                                 \
-      reinterpret_cast<half *>(ak.data_ptr()),                                 \
-      reinterpret_cast<half *>(av.data_ptr()), lm.data_ptr<float>(), tokens,   \
-      heads, dim, blocks, padded, scale, q.stride(0), q.stride(1),             \
-      q.stride(2), k.stride(0), k.stride(1), k.stride(2), value.stride(0),     \
-      value.stride(1), value.stride(2),                                        \
-      PACK ? packed_value.data_ptr<int8_t>() : nullptr)
-#define SUMMARY_TYPE(T)                                                        \
-  if (packed_value.defined()) {                                                \
-    SUMMARIES(T, true);                                                        \
-  } else {                                                                     \
-    SUMMARIES(T, false);                                                       \
-  }
+#define SUMMARIES(T)                                                         \
+  summaries_kernel<T><<<dim3(blocks, heads, batch), 128, 0,                  \
+                              c10::cuda::getCurrentCUDAStream()>>>(          \
+      q.data_ptr<int8_t>(), k.data_ptr<int8_t>(), qs.data_ptr<float>(),      \
+      ks.data_ptr<float>(), reinterpret_cast<const T *>(value.data_ptr()),   \
+      value_scale.data_ptr<float>(),                                         \
+      permutation.data_ptr<int32_t>(),                                       \
+      anchor.data_ptr<float>(), reinterpret_cast<half *>(qm.data_ptr()),     \
+      reinterpret_cast<half *>(km.data_ptr()),                               \
+      reinterpret_cast<half *>(ak.data_ptr()),                               \
+      reinterpret_cast<half *>(av.data_ptr()), lm.data_ptr<float>(), tokens, \
+      heads, dim, blocks, padded, scale, q.stride(0), q.stride(1),           \
+      q.stride(2), k.stride(0), k.stride(1), k.stride(2), value.stride(0),   \
+      value.stride(1), value.stride(2),                                      \
+      packed_value.data_ptr<int8_t>())
   if (value.scalar_type() == at::kHalf) {
-    SUMMARY_TYPE(half);
+    SUMMARIES(half);
   } else {
-    SUMMARY_TYPE(nv_bfloat16);
+    SUMMARIES(nv_bfloat16);
   }
-#undef SUMMARY_TYPE
 #undef SUMMARIES
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {anchor, qm, km, ak, av, lm};
-}
-
-std::vector<at::Tensor> spark_summaries(at::Tensor q, at::Tensor k,
-                                        at::Tensor qs, at::Tensor ks,
-                                        at::Tensor value, int start, int stop,
-                                        float scale, at::Tensor value_scale,
-                                        std::optional<at::Tensor> permutation) {
-  return spark_summaries_impl(q, k, qs, ks, value, start, stop, scale,
-                              value_scale, permutation, at::Tensor());
 }
 
 std::vector<at::Tensor> spark_prepare_w8a8(at::Tensor q, at::Tensor k,
@@ -1114,8 +1044,8 @@ std::vector<at::Tensor> spark_prepare_w8a8(at::Tensor q, at::Tensor k,
       partial.data_ptr<float>(), vs.data_ptr<float>(), batch * heads, dim,
       chunks);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto summaries = spark_summaries_impl(q, k, qs, ks, value, start, stop, scale,
-                                        vs, permutation, vi);
+  auto summaries = prepare_summaries(q, k, qs, ks, value, start, stop, scale,
+                                      vs, permutation, vi);
   summaries.insert(summaries.begin(), {vi, vs});
   return summaries;
 }

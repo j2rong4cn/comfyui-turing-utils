@@ -1,8 +1,8 @@
 # comfyui-turing-utils-kernel
 
-Version 0.46.0 adds Spark-H3 reblocking, weighted summaries and fixed-budget
-sparse attention for SM75 and newer. Rebuild the independent kernel to use the
-plugin's Spark strategy; its default backend is W8A8 with a 20% exact-block budget.
+Version 0.47.0 consolidates Spark-H3 into W8A8 with complete fine-grained
+clustering and a default 20% exact-block budget. It removes Spark's FP16-PV and
+phase-cycle profiling interfaces. Rebuild the independent kernel when updating.
 
 Version 0.45.0 extends the existing grouped INT8 operator to uniform W6A8.
 The exported `turing_codebook_w4a8_linear` name is retained as an ABI entry point:
@@ -106,55 +106,28 @@ It also provides fixed-budget SLA routing: 128-token Query centroids choose a
 Top-K set of 64-token K/V blocks, adjacent Q64 execution CTAs share one compact
 route, and selected blocks use the same FP16-PV or W8A8-PV exact core without a
 Sol-style skipped residual.
-Spark-H3 adds independent 64x64 Top-K routes and global-anchor weighted
-summaries. The exact and per-query approximate branches share one FP32 online
-softmax/output accumulator. Native CUDA handles landmark directions, Tensor
-Core indexed cosine scoring, exact-capacity radix selection, and FP32
-anchor/summary construction. Small nodes fuse landmarks, scores, exact routing,
-and stable partition in one CTA with at most 32 KiB shared memory. Their final
-leaf grouping uses warp counts and stable scatter rather than another sort.
-Independent proxy branches at a depth run in separate warps. Large nodes select
-exact FP32-score/original-ID cutoffs, then fuse label assignment and counting
-before prefix/scatter to retain parent order at each depth. Long upper branches
-use parallel 4096-token radix histograms; smaller branches select within one CTA.
-No global full-token sort remains. Direction-major
-scores are produced directly for coalesced selection scans, without a transpose
-copy. Immutable launch geometry uses CUDA grid-constant arguments rather than
-thread-local parameter copies. Only bounded CPU geometry plans are cached.
-Q/K permutation is fused into rotated INT8
-packing; output stores restore the original order directly. W8A8 computes the
-unchanged per-channel V scales through parallel partial maxima, then fuses
-permuted INT8 packing and weighted summaries into one read of original floating
-V. Summaries never use dequantized INT8 V. Only FP16 PV gathers V.
-SM80+ overlaps summary/selected-V loads; SM75 retains the
-32-KiB D128 attention footprint and synchronous-copy semantics. Spark W8A8
-keeps each CTA's Q MMA fragments in registers across selected K blocks instead
-of reloading them from shared memory. Landmark centroid updates share weight
-shuffles across channels while preserving each channel's original FP32 FMA
-order. Landmark loads use aligned 16-byte reads with a scalar fallback for
-unaligned contiguous views. Pairwise distances reuse each landmark's register
-values across partners without changing dot-product reduction order. Indexed
-scoring pads shared-memory rows by eight FP16 values; large-node scoring reuses
-the input tile for output after all warps finish reading it. These changes keep
-the complete clustering tree, both centroid updates, 64-token leaves, and exact
-score/ID partition rules. It uses
-either U8×S8 or FP16 PV, with no Triton/CuTe dependency or architecture-specific
-upstream wheel. Only target-video blocks are reblocked; all other modalities
-and partial boundary blocks remain exact. See `tests/test_spark_attention.py`
-for mathematical and native-kernel oracles. Spark requires kernel 0.46.0.
+Spark-H3 uses complete Landmark-v2 reblocking: 32 midpoint landmarks, two
+centroid updates, balanced splits down to 64-token leaves, and stable parent
+ordering with FP32-score/original-ID cuts. Small nodes fuse direction building,
+Tensor Core scoring and partition/scatter; large nodes use bounded radix
+selection. Aligned landmark reads, register reuse and padded shared scoring
+rows preserve the same grouping. Only immutable CPU geometry plans are cached.
+
+Q/K permutation is fused into rotated INT8 packing. Parallel V maxima feed
+fused permuted INT8 packing and weighted summaries computed from floating V.
+Exact Top-K writes compact route words; ties use ascending key-block order.
+Exact tokens and per-query weighted summaries share one FP32 online softmax,
+and output stores restore the original order. SM80+ overlaps summary/selected-V
+loads; SM75 retains synchronous copies and the 32-KiB D128 attention footprint.
+Only target video is reblocked; other modalities and mixed boundary blocks stay
+exact. Spark requires kernel 0.47.0 and has no FP16-PV or diagnostic kernel branch.
+The PyTorch mathematical oracles live in `tests/spark_reference.py`.
+
 `scripts/benchmark_spark.py --tokens 19968 52842 --heads 14 --profile`
-reports the complete preparation/attention latency, peak scratch, actual
-retained-block budget, and stage timings. `--layout NHD` exercises the
-transposed layout used by model projections. These synthetic timings do not
-establish video quality or guarantee a speedup over the bundled Sol path.
-The retained preparation optimizations preserve FP32 score keys,
-original-token-ID tie breaks and stable parent ordering. Large branches compact
-surviving radix keys into a 512-key shared buffer, keeping four theoretical
-selector CTAs/SM on SM75; larger buckets remain parallel. Weighted summaries
-compute each exponential once and reuse it across channels without changing
-the denominator's FP32 addition order. Exact Top-K selection writes the route
-bitmap directly, avoiding index conversion and concatenation. Equal routing
-scores consume the remaining budget in ascending key-block order.
+reports complete-call latency, peak scratch, retained-block budget and CUDA-event
+stage timings. `--layout NHD` exercises model projection storage. Nested stage
+probes are not disjoint durations and must not be summed. These synthetic timings
+do not establish video quality or guarantee a speedup over Sol.
 
 For model-distribution replay, run `scripts/capture_h3_qkv.py` from the owning
 ComfyUI root with `--checkpoint PATH --output NEW_CAPTURE_DIRECTORY`. It uses
@@ -169,27 +142,19 @@ Replay saved captures with `scripts/benchmark_spark.py --qkv CAPTURE.pt ...
 reported against dense PyTorch SDPA. Capture files belong in the development
 instance's diagnostic/cache directory, not in Git or another instance.
 
-Final A40 validation on 2026-10-14 used PyTorch 2.9.1+cu130, BF16 ref2va weights,
+A40 validation of kernel 0.47.0 on 2026-10-14 used PyTorch 2.9.1+cu130,
+BF16 ref2va weights,
 NHD projection storage, D128, 52,800 video tokens and the unchanged 20% Top-K.
 Each backend timing is the median of seven rotating-order repetitions:
 
 | Activation replay | Spark W8A8 | Sol W8A8 | Dense W8A8 |
 |---|---:|---:|---:|
-| 14 heads, median of blocks 0/24/49 at sigma 1.0/0.7 | 50.147 ms | 45.451 ms | 143.122 ms |
-| 56 heads, block 0 at sigma 1.0 | 195.751 ms | 195.208 ms | 587.085 ms |
-| 56 heads, block 24 at sigma 1.0 | 197.440 ms | 191.376 ms | 586.450 ms |
+| 14 heads, median of blocks 0/24/49 at sigma 1.0/0.7 | 50.211 ms | 45.632 ms | 145.986 ms |
+| 56 heads, block 0 at sigma 1.0 | 195.539 ms | 194.585 ms | 587.592 ms |
+| 56 heads, block 24 at sigma 1.0 | 197.863 ms | 189.203 ms | 590.193 ms |
 
-Separate same-process comparisons against commit `54ef6f8`, alternating over
-13 repetitions, isolate the clustering changes. Complete attention saves
-1.47–1.88 ms across six 14-head captures and 5.84 ms across two 56-head captures,
-with bitwise-identical outputs at all eight sites. Full 56-head reblocking falls
-from 31.71/31.77 ms to 25.85/25.92 ms (18.4% less time), with identical token
-permutations. Another 120 direction/scoring comparisons cover FP16/BF16,
-D64/D128, tied inputs, and unaligned views with bitwise equality. These paired
-comparisons use a different measurement sequence; their absolute timings must
-not be substituted into the backend table.
-**The default faster-than-Sol objective is not met.** Reducing Top-K would change
-the quality budget and is not counted as an equivalent optimization.
+**Spark does not consistently beat Sol at the default budget.** Reducing Top-K
+changes that budget and is not an equivalent optimization.
 
 Against dense SDPA, Spark's relative L2 error was lower than Sol's at five of
 the six 14-head sites, but at step 1/block 49 it was 0.0907 versus Sol 0.0324.
@@ -197,25 +162,15 @@ The two 56-head sites measured Spark 0.0685/0.0971 versus Sol 0.1187/0.1899.
 These activation errors establish neither end-to-end video quality nor a
 uniform quality advantage.
 
-Small-node threshold selection and CUB radix sorting were tested and removed:
-CUB preserved outputs but added about 0.16 ms to all six 14-head reblocking
-cases and 0.57–0.70 ms to the two 56-head attention calls. Head-group pipelining
-did not improve real-weight replay and was also removed. Small nodes retain
-the fused bitonic/stable-scatter implementation; no experimental runtime modes
-or cross-call tensor caches remain.
+Separate alternating comparisons against `6f68c29` preserve bitwise outputs at
+all eight replay sites, with latency changes between -0.06% and +0.47%.
+The eight layout/dtype/boundary comparisons are also bitwise identical. The
+suite passes 1153 tests and 1468 subtests (104 skipped); both UI renderers pass
+parameter persistence checks.
 
-`--profile` reports main-kernel phase cycle proportions for setup, weighted
-summaries, route transition, selected-token attention and output using a separate
-compile-time diagnostic specialization. Normal kernels contain no clocks or
-profiling barriers. The proportions aggregate CTA cycles, not wall-clock time;
-stage event timings include nested probes and must not be summed as disjoint
-durations. Hardware performance counters are not required.
-
-The final SM75/SM86 build passes resource checks with zero local memory and
-stack at most the existing 16-byte argument frame. The A40 development suite
-passes 1155 tests and 1468 subtests, with 104 skipped. Actual 2080 Ti/RTX 3070
-and target-OS runtime validation, plus prompt-conditioned video quality testing,
-remain necessary before claiming those deployment or quality results.
+The SM75/SM86 build is checked for zero local memory and stack at most the
+existing 16-byte argument frame. Actual 2080 Ti/RTX 3070 and target-OS runtime
+validation, plus prompt-conditioned video quality tests, remain outstanding.
 
 Legacy W4A8 K/N edge dimensions use predicated or tail-padded Tensor Core
 launches; the former full-matrix DP4A compatibility kernel has been removed.

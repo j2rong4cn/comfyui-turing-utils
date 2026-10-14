@@ -8,7 +8,8 @@ from unittest import mock
 import pytest
 import torch
 
-from comfyui_turing_utils.attention.spark import SparkSchedule, _target
+from comfyui_turing_utils.attention.spark import make_spark_attention_override, _target
+from comfyui_turing_utils.attention.sparse_runtime import SparseSchedule
 from comfyui_turing_utils.attention.protocol import SAMPLING_PROGRESS_KEY
 from comfyui_turing_utils.attention.layout import (
     AttentionSegment,
@@ -16,81 +17,80 @@ from comfyui_turing_utils.attention.layout import (
     AttentionSemanticLayout,
     ATTENTION_LAYOUT_KEY,
 )
-from comfyui_turing_utils.kernel_api import kernel_extension_has_symbol, load_kernel_extension
+from comfyui_turing_utils.kernel_api import load_kernel_extension
 from comfyui_turing_utils.runtime.sampling import SamplingProgress
 from comfyui_turing_utils.nodes.attention import AttentionStrategy, _ATTENTION_STRATEGIES
 from comfyui_turing_utils_kernel.turing_sage.spark import (
-    _partition,
-    _directions_reference,
-    _metric_indices,
     _reblock_groups,
-    reblock,
-    reweight_reference,
     spark_attention,
 )
 from comfyui_turing_utils_kernel.turing_sage.quant import per_warp_int8, per_warp_int8_hadamard
 from comfyui_turing_utils_kernel.turing_sage import spark_available
 
+from .spark_reference import _partition, _directions_reference, reblock_reference, reweight_reference
 
-def test_spark_warmup_is_task_wide_and_does_not_restart_at_upscale():
-    schedule = SparkSchedule()
-    progress = SamplingProgress(8)
+
+def test_spark_uses_shared_step_schedule_with_two_dense_steps():
+    with mock.patch("comfyui_turing_utils.attention.spark.is_supported_attention_device", return_value=True), \
+         mock.patch("comfyui_turing_utils.attention.spark.kernel_capabilities"), \
+         mock.patch("comfyui_turing_utils.attention.spark.preflight_bundled_sparse"), \
+         mock.patch("comfyui_turing_utils.attention.spark.load_turing_sage"), \
+         mock.patch("comfyui_turing_utils.attention.spark.make_attention_override"), \
+         mock.patch("comfyui_turing_utils.attention.spark.SparseSchedule", wraps=SparseSchedule) as factory:
+        make_spark_attention_override("cuda")
+    factory.assert_called_once_with(
+        dense_prefix_steps=2, dense_suffix_steps=0, dense_prefix_layers=0, dense_suffix_layers=0
+    )
+
+
+@pytest.mark.parametrize("total", [3, 8, 20])
+def test_spark_dense_steps_do_not_scale_with_task_length_or_restart_at_upscale(total):
+    schedule = SparseSchedule(dense_prefix_steps=2, dense_suffix_steps=1,
+                              dense_prefix_layers=0, dense_suffix_layers=0)
+    progress = SamplingProgress(total)
     options = {SAMPLING_PROGRESS_KEY: progress}
     actual = []
-    for step in range(8):
+    for step in range(total):
         progress.set_step(step)
-        actual.append(schedule.dense_step(options))
-    assert actual == [True, True, False, False, False, False, False, False]
-    schedule = SparkSchedule(warmup_mode="steps", warmup_steps=1, dense_suffix_steps=1)
-    assert [
-        schedule.dense_step({SAMPLING_PROGRESS_KEY: _progress(step, 8)}) for step in range(8)
-    ] == [True] + [False] * 6 + [True]
+        # Both model stages and repeated layer calls consume the same task position.
+        actual.append(schedule.is_dense(dict(options)))
+        assert schedule.is_dense(options) == actual[-1]
+    assert actual == [step < 2 or step == total - 1 for step in range(total)]
 
 
-def _progress(step, total):
-    progress = SamplingProgress(total)
-    progress.set_step(step)
-    return progress
-
-
-def test_spark_warmup_native_sigma_fallback_and_missing_progress():
-    schedule = SparkSchedule()
+def test_spark_dense_steps_native_sigma_fallback_and_missing_progress():
+    schedule = SparseSchedule(dense_prefix_steps=2, dense_suffix_steps=0,
+                              dense_prefix_layers=0, dense_suffix_layers=0)
     sigmas = torch.tensor([1.0, 0.8, 0.6, 0.4, 0.0])
     options = {"sample_sigmas": sigmas}
     for step in range(4):
         options["sigmas"] = sigmas[step : step + 1]
-        assert schedule.dense_step(options) == (step == 0)
-    assert schedule.dense_step({})
-    assert not SparkSchedule(warmup_ratio=0).dense_step({})
+        assert schedule.dense_step(options) == (step < 2)
+    assert not schedule.dense_step({})
 
 
-def test_spark_ui_has_explicit_backend_and_separate_warmup_modes():
+@pytest.mark.parametrize("removed", ["backend", "warmup_mode", "warmup_ratio", "warmup_steps", "debug_route_density"])
+def test_spark_rejects_removed_configuration(removed):
+    with pytest.raises(TypeError, match=removed):
+        make_spark_attention_override("cuda", **{removed: 0})
+
+
+def test_spark_ui_exposes_topk_and_dense_step_layer_protection():
     from comfy_api.latest import _io as io
 
     schema = AttentionStrategy.GET_SCHEMA()
     spark = next(option for option in schema.inputs[1].options if option.key == "spark")
-    backend = next(item for item in spark.inputs if item.id == "backend")
-    assert backend.options == ["w8a8", "sage", "sdpa"]
-    assert backend.default == "w8a8"
-    assert "inherit" not in backend.options
-    for mode, field in (("ratio", "warmup_ratio"), ("steps", "warmup_steps")):
-        values = {
-            "strategy": "spark",
-            "strategy.backend": "w8a8",
-            "strategy.warmup_mode": mode,
-            f"strategy.warmup_mode.{field}": 0.2 if mode == "ratio" else 4,
-        }
-        inputs, _, data = io.get_finalized_class_inputs(AttentionStrategy.INPUT_TYPES(), values)
-        active = {**inputs["required"], **inputs["optional"]}
-        assert f"strategy.warmup_mode.{field}" in active
-        other = "warmup_steps" if mode == "ratio" else "warmup_ratio"
-        assert f"strategy.warmup_mode.{other}" not in active
-        nested = io.build_nested_inputs(values, data)
-        apply = mock.Mock(return_value="patched")
-        with mock.patch.dict(_ATTENTION_STRATEGIES, {"spark": apply}):
-            assert AttentionStrategy.execute("model", nested["strategy"]).result == ("patched",)
-        assert apply.call_args.kwargs["warmup_mode"] == mode
-        assert apply.call_args.kwargs[field] == values[f"strategy.warmup_mode.{field}"]
+    defaults = {item.id: item.default for item in spark.inputs}
+    assert defaults == {"topk_ratio": 0.2, "dense_prefix_steps": 2, "dense_suffix_steps": 0,
+                        "dense_prefix_layers": 0, "dense_suffix_layers": 0}
+    values = {"strategy": "spark", **{f"strategy.{key}": value for key, value in defaults.items()}}
+    values["strategy.dense_prefix_steps"] = 3
+    _, _, data = io.get_finalized_class_inputs(AttentionStrategy.INPUT_TYPES(), values)
+    nested = io.build_nested_inputs(values, data)
+    apply = mock.Mock(return_value="patched")
+    with mock.patch.dict(_ATTENTION_STRATEGIES, {"spark": apply}):
+        assert AttentionStrategy.execute("model", nested["strategy"]).result == ("patched",)
+    apply.assert_called_once_with("model", **{**defaults, "dense_prefix_steps": 3})
 
 
 def test_spark_target_keeps_every_non_target_modality_exact():
@@ -126,7 +126,7 @@ def test_spark_reblock_is_a_permutation_and_preserves_context_and_tail(tokens):
     torch.manual_seed(tokens)
     q = torch.randn(1, 2, tokens + 17, 64, dtype=torch.float16)
     k = torch.randn_like(q)
-    permutation = reblock(q, k, grid=(1, 1, tokens), start=5, stop=5 + tokens)
+    permutation = reblock_reference(q, k, grid=(1, 1, tokens), start=5, stop=5 + tokens)
     identity = torch.arange(q.size(-2), dtype=torch.int32).expand(1, 2, -1)
     torch.testing.assert_close(permutation.sort(-1).values, identity)
     torch.testing.assert_close(permutation[..., :5], identity[..., :5])
@@ -348,16 +348,17 @@ def test_spark_fused_value_preparation_obeys_nondefault_cuda_stream():
     with torch.cuda.stream(stream):
         source = torch.randn(1, 2051, 2, 128, device="cuda", dtype=torch.bfloat16).transpose(1, 2)
         permutation = torch.stack([torch.randperm(2051, device="cuda") for _ in range(2)]).int()[None]
-        gathered = native.spark_gather_value(source, permutation)
+        gathered = source.gather(2, permutation.long()[..., None].expand_as(source))
         qi, qs, ki, ks = per_warp_int8(gathered, gathered, fuse_qk=True)
         actual, scale, *summaries = native.spark_prepare_w8a8(
             qi, ki, qs, ks, source, 5, 2047, 128**-0.5, permutation
         )
         expected, expected_scale = torch.empty_like(actual), torch.empty_like(scale)
         native.quantize_v_int8_sm75(gathered, expected, expected_scale)
-        expected_summaries = native.spark_summaries(
-            qi, ki, qs, ks, gathered, 5, 2047, 128**-0.5, expected_scale
-        )
+        identity = torch.arange(2051, device="cuda", dtype=torch.int32).expand(1, 2, -1).contiguous()
+        expected_summaries = native.spark_prepare_w8a8(
+            qi, ki, qs, ks, gathered, 5, 2047, 128**-0.5, identity
+        )[2:]
     stream.synchronize()
     for actual, expected in zip((actual, scale, *summaries), (expected, expected_scale, *expected_summaries)):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
@@ -407,26 +408,6 @@ def test_spark_cuda_landmarks_and_scores_match_reference(dim):
 
 
 @cuda
-def test_spark_cuda_gather_scatter_batch_and_noncontiguous_hnd():
-    native = load_kernel_extension("_sage_qattn_sm75")
-    q = torch.randn(2, 259, 3, 128, device="cuda", dtype=torch.bfloat16).transpose(1, 2)
-    k, v = torch.randn_like(q), torch.randn_like(q)
-    ids = (
-        torch.stack([torch.randperm(259, device="cuda") for _ in range(6)])
-        .to(torch.int32)
-        .reshape(2, 3, 259)
-    )
-    for source in (q, k, v):
-        result = native.spark_gather_value(source, ids)
-        expected = source.gather(2, ids.long()[..., None].expand(-1, -1, -1, 128))
-        torch.testing.assert_close(result, expected)
-        restored = torch.empty_like(result).scatter(
-            2, ids.long()[..., None].expand(-1, -1, -1, 128), result
-        )
-        torch.testing.assert_close(restored, source)
-
-
-@cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tokens", [1, 123, 259, 2051])
 @pytest.mark.parametrize("dim", [64, 128])
@@ -437,15 +418,16 @@ def test_spark_fused_value_pack_and_summaries_are_bitwise_gather_equivalent(dtyp
     source[..., -1] *= 100
     permutation = torch.stack([torch.randperm(tokens, device="cuda") for _ in range(6)])
     permutation = permutation.to(torch.int32).reshape(2, 3, tokens)
-    gathered = native.spark_gather_value(source, permutation)
+    gathered = source.gather(2, permutation.long()[..., None].expand_as(source))
     blocks = (tokens + 63) // 64
     expected = torch.empty(2, 3, dim, blocks * 64, device="cuda", dtype=torch.int8)
     expected_scale = torch.empty(2, 3, dim, device="cuda")
     native.quantize_v_int8_sm75(gathered, expected, expected_scale)
     qi, qs, ki, ks = per_warp_int8(gathered, gathered, fuse_qk=True)
-    expected_summaries = native.spark_summaries(
-        qi, ki, qs, ks, gathered, 0, tokens, dim**-0.5, expected_scale
-    )
+    identity = torch.arange(tokens, device="cuda", dtype=torch.int32).expand(2, 3, -1).contiguous()
+    expected_summaries = native.spark_prepare_w8a8(
+        qi, ki, qs, ks, gathered, 0, tokens, dim**-0.5, identity
+    )[2:]
     actual, actual_scale, *mapped_summaries = native.spark_prepare_w8a8(
         qi, ki, qs, ks, source, 0, tokens, dim**-0.5, permutation
     )
@@ -468,12 +450,13 @@ def test_spark_cuda_fp32_summaries_and_partial_blocks(dtype):
     torch.manual_seed(21)
     q, k, v = [torch.randn(2, 3, 259, 128, device="cuda", dtype=dtype) for _ in range(3)]
     qi, qs, ki, ks = per_warp_int8(q, k, fuse_qk=True)
-    anchor, qm, km, ak, av, lm = native.spark_summaries(
-        qi, ki, qs, ks, v, 64, 192, 128**-0.5, torch.empty(0, device="cuda")
+    identity = torch.arange(259, device="cuda", dtype=torch.int32).expand(2, 3, -1).contiguous()
+    vi, vs, anchor, qm, km, ak, av, lm = native.spark_prepare_w8a8(
+        qi, ki, qs, ks, v, 64, 192, 128**-0.5, identity
     )
     qd, kd = _dequant(qi, ki, qs, ks)
     torch.testing.assert_close(anchor, qd[..., 64:192, :].mean(-2), atol=0.00001, rtol=0.0001)
-    expected = reweight_reference(anchor, kd, v)
+    expected = reweight_reference(anchor, kd, v, value_scale=vs)
     for actual, reference in zip((ak, av, lm), expected):
         torch.testing.assert_close(
             actual[..., :5, :] if actual.ndim == 4 else actual[..., :5],
@@ -498,11 +481,10 @@ def test_spark_cuda_fp32_summaries_and_partial_blocks(dtype):
 
 @cuda
 @pytest.mark.parametrize("dim", [64, 128])
-@pytest.mark.parametrize("use_w8a8", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("score_growth", [False, True])
 def test_spark_fused_exact_and_skipped_blocks_match_fp32_oracle(
-    dim, use_w8a8, dtype, score_growth
+    dim, dtype, score_growth
 ):
     native = load_kernel_extension("_sage_qattn_sm75")
     torch.manual_seed(22)
@@ -515,28 +497,21 @@ def test_spark_fused_exact_and_skipped_blocks_match_fp32_oracle(
         q[:, 1, :, 0] = -8
         k[..., 0] = torch.linspace(-64, 64, n, device="cuda", dtype=dtype)
     qi, qs, ki, ks = per_warp_int8(q, k, fuse_qk=True)
-    anchor, qm, km, ak, av, lm = native.spark_summaries(
-        qi, ki, qs, ks, v, 64, 256, dim**-0.5, torch.empty(0, device="cuda")
+    identity = torch.arange(n, device="cuda", dtype=torch.int32).expand(1, heads, -1).contiguous()
+    vi, vs, anchor, qm, km, ak, av, lm = native.spark_prepare_w8a8(
+        qi, ki, qs, ks, v, 64, 256, dim**-0.5, identity
     )
     ids = torch.tensor([[[[1], [2], [3], [1], [2]]] * heads], device="cuda", dtype=torch.int32)
     exact = torch.tensor([1, 0, 0, 0, 1], device="cuda", dtype=torch.uint8)
     routes = native.sla_build_route_words(ids, exact, 5)
     sparse = torch.tensor([0, 1, 1, 1, 0], device="cuda", dtype=torch.uint8)
-    vi, vs = torch.empty(0, device="cuda"), torch.empty(0, device="cuda")
-    original_av = av.clone()
-    if use_w8a8:
-        vi = torch.empty(1, heads, dim, 320, device="cuda", dtype=torch.int8)
-        vs = torch.empty(1, heads, dim, device="cuda")
-        native.quantize_v_int8_sm75(v, vi, vs)
-        av = (av.float() / vs[..., None, :]).half()
     output = torch.empty_like(q)
     permutation = torch.stack([torch.randperm(n, device="cuda") for _ in range(heads)]).to(
         torch.int32
     )[None]
-    native.spark_sparse_online_attn(
+    native.spark_sparse_w8a8_attn(
         qi,
         ki,
-        v,
         vi,
         vs,
         output,
@@ -549,16 +524,7 @@ def test_spark_fused_exact_and_skipped_blocks_match_fp32_oracle(
         lm,
         permutation,
         dim**-0.5,
-        use_w8a8,
     )
-    production = output.clone()
-    cycles = native.spark_profile_online_attn(
-        qi, ki, v, vi, vs, output, qs, ks, routes, sparse, ak, av, lm,
-        permutation, dim**-0.5, use_w8a8,
-    )
-    torch.testing.assert_close(output, production, atol=0, rtol=0)
-    assert cycles.shape == (1, heads, 5, 5)
-    assert bool((cycles > 0).all())
     qd, kd = _dequant(qi, ki, qs, ks)
     scores = qd @ kd.transpose(-1, -2) / math.sqrt(dim)
     summary_scores = (
@@ -575,55 +541,50 @@ def test_spark_fused_exact_and_skipped_blocks_match_fp32_oracle(
     exact_tokens = exact_rows.repeat_interleave(64, -1)[..., :n]
     scores = scores.masked_fill(~exact_tokens, -float("inf"))
     summary_scores = summary_scores.masked_fill(exact_rows, -float("inf"))
-    values = v.float()
-    if use_w8a8:
-        # Invert the existing 16-token V storage permutation.
-        physical = torch.arange(320, device="cuda")
-        r = physical % 16
-        logical = physical // 16 * 16 + (
-            (r & 1) | (((r >> 2) & 1) << 1) | (((r >> 3) & 1) << 2) | (((r >> 1) & 1) << 3)
-        )
-        values = (
-            torch.empty_like(vi)
-            .scatter(-1, logical.expand_as(vi), vi)
-            .transpose(-1, -2)[..., :n, :]
-            .float()
-            * vs[..., None, :]
-        )
+    # Invert the existing 16-token V storage permutation.
+    physical = torch.arange(320, device="cuda")
+    r = physical % 16
+    logical = physical // 16 * 16 + (
+        (r & 1) | (((r >> 2) & 1) << 1) | (((r >> 3) & 1) << 2) | (((r >> 1) & 1) << 3)
+    )
+    values = (
+        torch.empty_like(vi)
+        .scatter(-1, logical.expand_as(vi), vi)
+        .transpose(-1, -2)[..., :n, :]
+        .float()
+        * vs[..., None, :]
+    )
     reference = torch.cat((scores, summary_scores), -1).softmax(-1) @ torch.cat(
-        (values, original_av[..., :5, :].float()), -2
+        (values, av[..., :5, :].float() * vs[..., None, :]), -2
     )
     reference = torch.empty_like(reference).scatter(
         2, permutation.long()[..., None].expand_as(reference), reference
     )
     relative = (output.float() - reference).norm() / reference.norm()
     assert torch.isfinite(output).all()
-    assert relative < (0.015 if use_w8a8 else 0.006), float(relative)
+    assert relative < 0.015, float(relative)
 
 
 @cuda
 def test_spark_end_to_end_odd_target_boundary_and_repeatability():
     torch.manual_seed(17)
     q, k, v = [torch.randn(1, 2, 540, 128, device="cuda", dtype=torch.float16) for _ in range(3)]
-    result = spark_attention(q, k, v, grid=(1, 1, 513), start=5, stop=518, use_w8a8=True)
-    again = spark_attention(q, k, v, grid=(1, 1, 513), start=5, stop=518, use_w8a8=True)
+    result = spark_attention(q, k, v, grid=(1, 1, 513), start=5, stop=518)
+    again = spark_attention(q, k, v, grid=(1, 1, 513), start=5, stop=518)
     torch.testing.assert_close(result, again, atol=0, rtol=0)
     assert result.shape == q.shape and torch.isfinite(result).all()
 
 
 @cuda
-@pytest.mark.parametrize("use_w8a8", [False, True])
-def test_spark_end_to_end_accepts_transposed_projection_layout(use_w8a8):
+def test_spark_end_to_end_accepts_transposed_projection_layout():
     torch.manual_seed(23)
     q, k, v = [torch.randn(1, 513, 3, 128, device="cuda", dtype=torch.bfloat16).transpose(1, 2)
         for _ in range(3)]
     assert not q.is_contiguous()
-    actual = spark_attention(q, k, v, grid=(1, 1, 513), start=0, stop=513, use_w8a8=use_w8a8)
+    actual = spark_attention(q, k, v, grid=(1, 1, 513), start=0, stop=513)
     expected = spark_attention(q.contiguous(), k.contiguous(), v.contiguous(),
-        grid=(1, 1, 513), start=0, stop=513, use_w8a8=use_w8a8)
+        grid=(1, 1, 513), start=0, stop=513)
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-
-
 
 
 @cuda
@@ -707,7 +668,7 @@ def test_spark_prepared_h3_preserves_rms_rope_and_consumes_inputs_once(dtype, sk
     if not skip_output_reshape:
         expected = expected.transpose(1, 2).reshape(1, 320, 128)
     expected = expected.to(dtype)
-    override = make_spark_attention_override(q.device, warmup_ratio=0, min_sequence_tokens=0)
+    override = make_spark_attention_override(q.device, dense_prefix_steps=0, min_sequence_tokens=0)
     with mock.patch(
         "comfyui_turing_utils.attention.spark._prepared_qk_transform", wraps=_prepared_qk_transform
     ) as transform:
@@ -723,7 +684,7 @@ def test_spark_prepared_h3_preserves_rms_rope_and_consumes_inputs_once(dtype, sk
 
 
 @cuda
-def test_spark_explicit_backend_does_not_require_a_turing_loader():
+def test_spark_w8a8_does_not_require_a_turing_loader():
     from comfy.model_patcher import ModelPatcher
     from comfyui_turing_utils.attention.patches import apply_spark_attention_patch
     from comfyui_turing_utils.attention.runtime import attention_runtime_config

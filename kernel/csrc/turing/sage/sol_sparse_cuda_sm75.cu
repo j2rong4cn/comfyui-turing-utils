@@ -881,7 +881,7 @@ __device__ __forceinline__ void load_quantized_value_tile_async(
 template <int HeadDim, typename T, bool UseW8A8, bool ForceDense,
           bool IsCausal, bool Varlen, int ResidualSubblocks, int KeyStages,
           bool ExternalRoute = false, bool SparseValuePipeline = false,
-          bool MappedValue = false, bool Spark = false, bool Profile = false>
+          bool MappedValue = false, bool Spark = false>
 __global__ void sparse_attention_kernel(
     const int8_t *__restrict__ query_int8,
     const int8_t *__restrict__ key_int8,
@@ -931,15 +931,6 @@ __global__ void sparse_attention_kernel(
     const float *spark_log_mass,
     const int32_t* output_permutation)
 {
-  // Diagnostic specialization only: production instantiations contain no clocks.
-  unsigned long long phase_start = 0;
-  unsigned long long *phase_cycles = nullptr;
-  if constexpr (Profile)
-  {
-    phase_start = clock64();
-    phase_cycles = selected_count +
-        ((int64_t(blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * 5;
-  }
   using G = AttentionGeometry<HeadDim>;
   using S = AttentionStorage<HeadDim, SparseValuePipeline>;
   if constexpr (ExternalRoute)
@@ -1448,13 +1439,6 @@ __global__ void sparse_attention_kernel(
   }
   }
 
-  if constexpr (Profile)
-  {
-    __syncthreads();
-    const auto now = clock64();
-    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[0] = now - phase_start;
-    phase_start = now;
-  }
   if constexpr (Spark)
   {
     // External 64x64 Top-K and weighted summaries are separate contracts:
@@ -1542,13 +1526,6 @@ __global__ void sparse_attention_kernel(
     }
   }
 
-  if constexpr (Profile)
-  {
-    __syncthreads();
-    const auto now = clock64();
-    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[1] = now - phase_start;
-    phase_start = now;
-  }
   int compact_selected_count = 0;
   int register_selected_count = 0;
   RouteWords fp16_route{};
@@ -1562,7 +1539,7 @@ __global__ void sparse_attention_kernel(
           shared_selected_blocks,
           shared_compaction_scratch,
           active_key_blocks);
-      if (!Profile && selected_count != nullptr && sparse_query &&
+      if (selected_count != nullptr && sparse_query &&
           threadIdx.x == 0 && threadIdx.y == 0)
       {
         const unsigned long long count = static_cast<unsigned long long>(
@@ -1593,7 +1570,7 @@ __global__ void sparse_attention_kernel(
         count += __shfl_down_sync(0xffffffff, count, offset);
       register_selected_count = static_cast<int>(
           __shfl_sync(0xffffffff, count, 0));
-      if (!Profile && selected_count != nullptr && sparse_query &&
+      if (selected_count != nullptr && sparse_query &&
           threadIdx.x == 0 && threadIdx.y == 0)
         atomicAdd(
             selected_count,
@@ -1687,13 +1664,6 @@ __global__ void sparse_attention_kernel(
     }
     cp_async::wait_group<0>();
     __syncthreads();
-  }
-  if constexpr (Profile)
-  {
-    __syncthreads();
-    const auto now = clock64();
-    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[2] = now - phase_start;
-    phase_start = now;
   }
   while (key_block < active_key_blocks)
   {
@@ -1891,13 +1861,6 @@ __global__ void sparse_attention_kernel(
     key_block = next_key_block;
   }
 
-  if constexpr (Profile)
-  {
-    __syncthreads();
-    const auto now = clock64();
-    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[3] = now - phase_start;
-    phase_start = now;
-  }
   if constexpr (UseW8A8)
   {
     normalize_d<1, G::kValueTiles, ComputeUnit::kCudaCore>(
@@ -1999,11 +1962,6 @@ __global__ void sparse_attention_kernel(
     output_lane += output_rows_per_warp * stride_sequence_o -
         output_column_groups * output_line_lanes * 8;
     output_row += output_rows_per_warp;
-  }
-  if constexpr (Profile)
-  {
-    __syncthreads();
-    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[4] = clock64() - phase_start;
   }
 }
 
@@ -2378,7 +2336,7 @@ void dispatch_sparse_threshold_attention(
 }
 
 template <int HeadDim, typename T, bool UseW8A8, int KeyStages,
-          bool SparseValuePipeline = false, bool Spark = false, bool Profile = false>
+          bool SparseValuePipeline = false, bool Spark = false>
 void launch_sla_attention(
     at::Tensor query_int8,
     at::Tensor key_int8,
@@ -2411,7 +2369,7 @@ void launch_sla_attention(
   dim3 attention_block(WARP_SIZE, kWarps);
   auto attention_kernel =
       sparse_attention_kernel<HeadDim, T, UseW8A8, false, false, false,
-                              1, KeyStages, true, SparseValuePipeline, false, Spark, Profile>;
+                              1, KeyStages, true, SparseValuePipeline, false, Spark>;
   configure_dynamic_shared_memory(
       attention_kernel, S::kAttentionSharedBytes, "SLA sparse attention");
   attention_kernel<<<
@@ -2964,7 +2922,7 @@ static at::Tensor routed_sparse_online_attn(
         "SLA W8A8 V shapes are incompatible");
   }
   at::Tensor selected_count = return_stats
-      ? at::zeros({spark ? int64_t(batch_size) * query_heads * query_blocks_64 * 5 : 1},
+      ? at::zeros({1},
                   output.options().dtype(at::ScalarType::Long))
       : at::empty({0}, output.options().dtype(at::ScalarType::Long));
   if (spark)
@@ -2986,24 +2944,18 @@ static at::Tensor routed_sparse_online_attn(
     TORCH_CHECK(spark_permutation.is_cuda() && spark_permutation.device() == query_int8.device() &&
         spark_permutation.is_contiguous() && spark_permutation.scalar_type() == at::kInt &&
         spark_permutation.sizes() == query_int8.sizes().slice(0, 3), "Spark output permutation invalid");
-#define SPARK_KERNEL(D, T, W8, PIPELINE, PROFILE) launch_sla_attention<D, T, W8, 1, PIPELINE, true, PROFILE>( \
+#define SPARK_LAUNCH(D, T, PIPELINE) launch_sla_attention<D, T, true, 1, PIPELINE, true>( \
     query_int8, key_int8, value, value_int8, value_scale, output, query_scale, key_scale, \
     route_words, sparse_query_blocks, selected_count, softmax_scale, nullptr, spark_ak, spark_av, spark_mass, spark_permutation)
-#define SPARK_LAUNCH(D, T, W8, PIPELINE) do { \
-    if (return_stats) { SPARK_KERNEL(D, T, W8, PIPELINE, true); } \
-    else { SPARK_KERNEL(D, T, W8, PIPELINE, false); } \
-    } while (false)
-#define SPARK_TYPE(D, T) if (use_w8a8) { \
-    if (current_cuda_device_major() >= 8) { SPARK_LAUNCH(D, T, true, true); } \
-    else { SPARK_LAUNCH(D, T, true, false); } \
-    } else { SPARK_LAUNCH(D, T, false, false); }
+#define SPARK_TYPE(D, T) if (current_cuda_device_major() >= 8) { \
+    SPARK_LAUNCH(D, T, true); \
+    } else { SPARK_LAUNCH(D, T, false); }
     if (output.scalar_type() == at::kHalf)
     { if (head_dim == 64) { SPARK_TYPE(64, half); } else { SPARK_TYPE(128, half); } }
     else
     { if (head_dim == 64) { SPARK_TYPE(64, nv_bfloat16); } else { SPARK_TYPE(128, nv_bfloat16); } }
 #undef SPARK_TYPE
 #undef SPARK_LAUNCH
-#undef SPARK_KERNEL
   }
   else
     dispatch_sla_attention(
@@ -3023,23 +2975,13 @@ at::Tensor sla_sparse_online_attn(
       sparse_queries, scale, stats, w8a8, key_tile, at::Tensor());
 }
 
-void spark_sparse_online_attn(at::Tensor q, at::Tensor k, at::Tensor v,
+void spark_sparse_w8a8_attn(at::Tensor q, at::Tensor k,
     at::Tensor vi, at::Tensor vs, at::Tensor out, at::Tensor qs, at::Tensor ks,
     at::Tensor routes, at::Tensor sparse_queries, at::Tensor ak, at::Tensor av,
-    at::Tensor lm, at::Tensor permutation, float scale, bool w8a8)
+    at::Tensor lm, at::Tensor permutation, float scale)
 {
-  routed_sparse_online_attn(q, k, v, vi, vs, out, qs, ks, routes,
-      sparse_queries, scale, 0, int(w8a8), 64, at::Tensor(), ak, av, lm, permutation);
-}
-
-at::Tensor spark_profile_online_attn(at::Tensor q, at::Tensor k, at::Tensor v,
-    at::Tensor vi, at::Tensor vs, at::Tensor out, at::Tensor qs, at::Tensor ks,
-    at::Tensor routes, at::Tensor sparse_queries, at::Tensor ak, at::Tensor av,
-    at::Tensor lm, at::Tensor permutation, float scale, bool w8a8)
-{
-  return routed_sparse_online_attn(q, k, v, vi, vs, out, qs, ks, routes,
-      sparse_queries, scale, 1, int(w8a8), 64, at::Tensor(), ak, av, lm, permutation)
-      .view({q.size(0), q.size(1), div_ceil(q.size(2), int64_t(kBlockTokens)), 5});
+  routed_sparse_online_attn(q, k, out, vi, vs, out, qs, ks, routes,
+      sparse_queries, scale, 0, 1, 64, at::Tensor(), ak, av, lm, permutation);
 }
 
 void veda_sparse_online_attn(

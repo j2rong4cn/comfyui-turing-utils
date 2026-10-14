@@ -188,7 +188,7 @@ def main() -> None:
         (dimension, pipeline): [] for dimension in (64, 128) for pipeline in (False, True)
     }
     hot_pattern = re.compile(
-        r"sparse_attention_kernelILi(64|128)E.*" r"Lb1ELb0ELb0ELb0ELi1ELi1ELb0ELb([01])ELb0ELb0ELb0EEE"
+        r"sparse_attention_kernelILi(64|128)E.*" r"Lb1ELb0ELb0ELb0ELi1ELi1ELb0ELb([01])ELb0ELb0EEE"
     )
     for line, metrics in qattn_sm86_records:
         match = hot_pattern.search(line)
@@ -220,7 +220,7 @@ def main() -> None:
     )
 
     spark_pattern = re.compile(
-        r"sparse_attention_kernelILi(64|128)E.*" r"Lb1ELb0ELb0ELb0ELi1ELi1ELb1ELb([01])ELb0ELb1ELb0EEE"
+        r"sparse_attention_kernelILi(64|128)E.*" r"Lb1ELb0ELb0ELb0ELi1ELi1ELb1ELb([01])ELb0ELb1EEE"
     )
     for architecture, arch_records, pipeline in (
         ("sm75", qattn_sm75_records, False),
@@ -251,7 +251,7 @@ def main() -> None:
             ("scatter_children", 1, 0),
             ("value_maximum_kernel", 2, 1024),
             ("value_scale_kernel", 1, 0),
-            ("summaries_kernelI", 4, 18432),
+            ("summaries_kernelI", 2, 18432),
             ("topk_routes_kernel", 1, 512),
         ):
             family = [metrics for line, metrics in arch_records if marker in line]
@@ -286,7 +286,7 @@ def main() -> None:
 
     mapped_pattern = re.compile(
         r"sparse_attention_kernelILi(64|128)E.*"
-        r"Lb0ELb0ELb0ELb0ELi([12])ELi([12])ELb0ELb0ELb1ELb0ELb0EEE"
+        r"Lb0ELb0ELb0ELb0ELi([12])ELi([12])ELb0ELb0ELb1ELb0EEE"
     )
     mapped_summary = []
     for architecture, arch_records in (

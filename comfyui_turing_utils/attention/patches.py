@@ -89,18 +89,16 @@ def attention_base_runtime(model) -> AttentionRuntimeConfig:
     )
 
 
-def apply_spark_attention_patch(model, *, backend="w8a8", **settings):
-    # Explicit selection also works with official/third-party model loaders.
-    # Resolve native integration capability, not an inherited numerical policy.
+def apply_spark_attention_patch(model, **settings):
+    # W8A8 is independent of the loader's dense numerical policy.
     runtime = attention_base_runtime(model)
-    backend = normalize_attention_backend(backend)
-    override = make_spark_attention_override(model.load_device, backend=backend, **settings)
+    override = make_spark_attention_override(model.load_device, **settings)
     dense = override.turing_utils_dense_override
-    runtime = replace(runtime, dense_backend=backend, dense_override=dense,
+    runtime = replace(runtime, dense_backend="w8a8", dense_override=dense,
                       dense_implementation=dense.turing_utils_attention_implementation)
     installed = install_attention_strategy(model, override, strategy="Spark-H3", backend="spark",
                                           implementation="bundled_spark", runtime_config=runtime)
-    LOG.info("Attention: Spark-H3 · Top-K=%.0f%% · backend=%s", settings.get("topk_ratio", 0.2) * 100, backend)
+    LOG.info("Attention: Spark-H3 W8A8 · Top-K=%.0f%%", settings.get("topk_ratio", 0.2) * 100)
     return installed.model
 
 

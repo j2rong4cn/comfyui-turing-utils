@@ -106,7 +106,7 @@ _MINIMUM_VERSIONS = {
     "dense_w8a8": (0, 23, 0),
     "sol": (0, 23, 0),
     "sla": (0, 29, 1),
-    "spark": (0, 46, 0),
+    "spark": (0, 47, 0),
     "reusable_k_anchor": (0, 30, 0),
     "ffn_channel_sharding": (0, 30, 0),
     "grouped_w6a8": (0, 45, 0),

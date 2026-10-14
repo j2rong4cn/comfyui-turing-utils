@@ -23,21 +23,15 @@ std::vector<at::Tensor> veda_gather_pool(at::Tensor, at::Tensor, at::Tensor,
 at::Tensor spark_directions(at::Tensor, at::Tensor, std::vector<int64_t>);
 void spark_fused_nodes(at::Tensor, at::Tensor, std::vector<int64_t>, std::vector<int64_t>);
 at::Tensor spark_indexed_scores(at::Tensor, at::Tensor, at::Tensor);
-at::Tensor spark_gather_value(at::Tensor, at::Tensor);
 at::Tensor spark_group_indices(at::Tensor, std::vector<int64_t>, int, std::optional<at::Tensor>);
 at::Tensor spark_partition(at::Tensor, at::Tensor, std::vector<int64_t>, int);
 at::Tensor spark_finalize_permutation(at::Tensor, int, int);
 void spark_topk_routes(at::Tensor, at::Tensor, int, int, int, int);
-std::vector<at::Tensor> spark_summaries(at::Tensor, at::Tensor, at::Tensor,
-    at::Tensor, at::Tensor, int, int, float, at::Tensor, std::optional<at::Tensor>);
 std::vector<at::Tensor> spark_prepare_w8a8(at::Tensor, at::Tensor, at::Tensor,
     at::Tensor, at::Tensor, int, int, float, at::Tensor);
-void spark_sparse_online_attn(at::Tensor, at::Tensor, at::Tensor,
+void spark_sparse_w8a8_attn(at::Tensor, at::Tensor, at::Tensor,
     at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
-    at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, float, bool);
-at::Tensor spark_profile_online_attn(at::Tensor, at::Tensor, at::Tensor,
-    at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
-    at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, float, bool);
+    at::Tensor, at::Tensor, at::Tensor, at::Tensor, float);
 void veda_pack_routes(at::Tensor, at::Tensor, at::Tensor, int64_t, at::Tensor, int64_t);
 void veda_scatter_tiles(at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor);
 at::Tensor veda_prepare_scores(at::Tensor, at::Tensor, int64_t, int64_t, int64_t);

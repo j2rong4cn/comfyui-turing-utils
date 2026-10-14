@@ -557,8 +557,8 @@ original loading functions; callers bypassing the prompt server must invoke
   the selected strategy, including reference protection and dense-step/layer
   safeguards as ordinary controls. Manual prefix length appears only for manual
   protection. The three previous Sol/SLA/Veda Configure node IDs are removed.
-  Sol/SLA/Veda inherit the loader's dense backend; Spark selects its backend
-  explicitly and requires kernel 0.46.0.
+  Sol/SLA/Veda inherit the loader's dense backend; Spark uses W8A8 independently
+  of the loader and requires kernel 0.47.0.
   See [node configuration and reusable presets](docs/node-configuration.md)
   and the [complete node inventory](docs/node-inventory.md).
 - `Video Frames Padding` shares the model `type` choices of Set Video Latent
@@ -584,26 +584,24 @@ original loading functions; callers bypassing the prompt server must invoke
   The legacy `Patch Sol/SLA Sparse Attention` nodes have been removed.
   Replace them with the `Configure` nodes in existing workflows; the dense
   backend is selected by the loader, not by the old `use_w8a8` widget.
-- Spark defaults to an explicit `w8a8` backend, even with an official or
-  third-party model loader. `sage`/`sdpa` select those dense backends and the
-  bundled INT8-QK/FP16-PV sparse core; they do not execute sparse Torch SDPA.
-  Default Top-K is 20% of complete target-video blocks, with reference blocks
-  kept exact outside that budget. Dense warmup defaults to 20% of the actual
-  task intervals; no transformer layers are permanently dense by default.
-  Warmup can instead be an explicit step count. H3 KSampler's sampling and
-  upscale stages share one timeline, so the second stage does not restart
-  warmup. Ordinary independent samplers use their local sigma timeline.
-  The algorithm uses K-derived Landmark-v2 reblocking reused by Q/V, 32 midpoint
-  landmarks, 16-way balanced splits, two centroid updates, a FP32 global query
-  anchor, and weighted K/V summaries with stored-key log-mass correction.
-  Each query merges skipped summaries and exact tokens in one online softmax;
-  no positional local band is added after permutation. Mixed boundary blocks,
-  text, reference media, and target audio remain dense/exact. Short sequences
-  below 12288 tokens, unsupported layouts/masks, and Top-K=1 use the explicitly
-  selected dense backend. Kernel failures are not caught and silently retried.
-  Kernel 0.46.0 is required, including SM75 for Turing and SM86 for A40/3070.
-  The port uses FP16 clustering projection and the existing rotated INT8
-  numerical path; it is not bitwise identical to upstream BF16 Spark.
+- Spark uses W8A8 with complete Landmark-v2 clustering down to 64-token leaves,
+  32 midpoint landmarks and two centroid updates. Exact tokens and weighted
+  skipped-block summaries share one online softmax. Only target video is
+  reblocked; text, references, target audio and mixed boundary blocks remain
+  dense/exact. No model tensors persist between calls.
+  Its five controls are `topk_ratio=0.20`, `dense_prefix_steps=2`,
+  `dense_suffix_steps=0`, `dense_prefix_layers=0`, and `dense_suffix_layers=0`.
+  Top-K counts complete target-video blocks; protected blocks are additional.
+  Dense step/layer protection follows Sol semantics: H3 KSampler counts sampling
+  and upscale as one task, while independent samplers count locally. Counts are
+  fixed, with no ratio mode or restart at the upscale stage. Zero disables the
+  corresponding protection; overlapping prefix/suffix protection keeps the
+  whole interval dense. Short sequences below 12288 tokens, unsupported
+  layouts/masks, and Top-K=1 use W8A8 dense attention. Kernel failures propagate.
+  Kernel 0.47.0 removes Spark's FP16-PV/backend choices and old warmup/debug
+  parameters. Recreate Spark nodes saved with the old schema; API callers must
+  use the five current controls. The FP16 clustering projection and rotated
+  INT8 attention are not bitwise identical to upstream BF16 Spark.
 
 The shared asymmetric-Q/K and independent-Q/K-RoPE protocol and kernel ABI
 remain model-independent; the removed H3 static-image adapter is not required.

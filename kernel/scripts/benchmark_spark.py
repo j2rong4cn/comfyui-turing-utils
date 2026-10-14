@@ -52,13 +52,9 @@ def profile_stages(function):
     native = importlib.import_module("comfyui_turing_utils_kernel._sage_qattn_sm75")
     fused = importlib.import_module("comfyui_turing_utils_kernel._sage_fused_sm75")
     events = {}
-    attention_args = None
 
     def measured(name, original):
         def call(*args, **kwargs):
-            nonlocal attention_args
-            if name == "attention":
-                attention_args = args
             start, stop = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             start.record()
             result = original(*args, **kwargs)
@@ -71,12 +67,8 @@ def profile_stages(function):
     probes = [
         (spark, "reblock", "reblock"),
         (fused, "quant_qk_per_warp_int8_rotated_permuted_cuda", "qk_pack"),
-        (native, "spark_gather_value", "value_gather"),
-        (native, "quantize_v_int8_sm75", "value_pack"),
         (native, "spark_prepare_w8a8", "value_pack_and_summaries"),
-        (native, "spark_summaries", "summaries"),
-        (native, "sla_build_route_words", "route_pack"),
-        (native, "spark_sparse_online_attn", "attention"),
+        (native, "spark_sparse_w8a8_attn", "attention"),
         (native, "spark_directions", "reblock_landmarks"),
         (native, "spark_fused_nodes", "reblock_small_fused"),
         (native, "spark_indexed_scores", "reblock_scores"),
@@ -90,20 +82,11 @@ def profile_stages(function):
             stack.enter_context(
                 patch.object(module, symbol, measured(name, getattr(module, symbol)))
             )
-        stack.enter_context(patch.object(torch.Tensor, "topk", measured("topk", torch.Tensor.topk)))
         function()
         torch.cuda.synchronize()
     result = {
         name: round(sum(a.elapsed_time(b) for a, b in pairs), 3) for name, pairs in events.items()
     }
-    cycles = native.spark_profile_online_attn(*attention_args).double().sum(dim=(0, 1, 2))
-    percentages = (100 * cycles / cycles.sum()).cpu().tolist()
-    result["main_phase_cycle_percent"] = dict(
-        zip(
-            ("setup", "summaries", "transition", "exact_tokens", "output"),
-            (round(value, 2) for value in percentages),
-        )
-    )
     return result
 
 
@@ -175,17 +158,6 @@ def main():
                 start=start,
                 stop=stop,
                 topk_ratio=args.topk,
-                use_w8a8=True,
-            ),
-            "spark_fp16_pv": lambda: spark_attention(
-                q,
-                k,
-                v,
-                grid=grid,
-                start=start,
-                stop=stop,
-                topk_ratio=args.topk,
-                use_w8a8=False,
             ),
         }
         results = measure(paths, args.repeats)
@@ -214,7 +186,6 @@ def main():
             errors = {name: error_metrics(function(), reference) for name, function in paths.items()}
             del reference
         stages = profile_stages(paths["spark_w8a8"]) if args.profile else None
-        phases = stages.pop("main_phase_cycle_percent") if stages else None
         print(
             json.dumps(
                 {
@@ -225,7 +196,6 @@ def main():
                     "exact_block_density": density,
                     "paths": results,
                     "spark_stage_ms": stages,
-                    "spark_main_phase_cycle_percent": phases,
                     "error_vs_dense_sdpa": errors,
                 }
             ),

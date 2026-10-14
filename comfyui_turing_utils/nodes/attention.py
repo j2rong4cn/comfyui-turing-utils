@@ -232,21 +232,17 @@ def spark_inputs():
     return {
         "required": {
             "model": ("MODEL",),
-            "backend": (["w8a8", "sage", "sdpa"], {
-                "default": "w8a8",
-                "tooltip": "Explicit dense backend, independent of the loader. W8A8 also uses INT8 PV in Spark; Sage/SDPA use FP16 PV in the bundled sparse kernel.",
-            }),
             "topk_ratio": ("FLOAT", {"default": 0.2, "min": 0.01, "max": 1.0, "step": 0.01,
                 "tooltip": "Exact target-video block budget. Reference blocks are additional exact sinks; 1 bypasses reblocking and runs dense attention."}),
-            "warmup_mode": (["ratio", "steps"], {"default": "ratio",
-                "tooltip": "Dense warmup over the complete sampling task. H3 KSampler shares progress across sampling and upscale stages."}),
-            "warmup_ratio": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
-            "warmup_steps": ("INT", {"default": 4, "min": 0, "max": 1000}),
-            "dense_suffix_steps": ("INT", {"default": 0, "min": 0, "max": 1000}),
-            "dense_prefix_layers": ("INT", {"default": 0, "min": 0, "max": 256}),
-            "dense_suffix_layers": ("INT", {"default": 0, "min": 0, "max": 256}),
+            "dense_prefix_steps": ("INT", {"default": 2, "min": 0, "max": 1000,
+                "tooltip": "Leading steps using W8A8 dense attention across all layers. H3 KSampler counts sampling and upscale as one task; ordinary samplers count separately. Zero disables this protection."}),
+            "dense_suffix_steps": ("INT", {"default": 0, "min": 0, "max": 1000,
+                "tooltip": "Trailing task steps using W8A8 dense attention across all layers. Zero disables this protection."}),
+            "dense_prefix_layers": ("INT", {"default": 0, "min": 0, "max": 256,
+                "tooltip": "Leading transformer layers kept dense during sparse steps."}),
+            "dense_suffix_layers": ("INT", {"default": 0, "min": 0, "max": 256,
+                "tooltip": "Trailing transformer layers kept dense during sparse steps."}),
         },
-        "optional": {"debug_route_density": ("BOOLEAN", {"default": False})},
     }
 
 
@@ -306,7 +302,6 @@ _COMMON_CONTROLS = {
     "predictor_name",
     "keep_ratio",
     "topk_ratio",
-    "backend",
 }
 
 
@@ -328,14 +323,6 @@ def _strategy_inputs(schema, *, advanced=False):
     inputs = []
     for name in specs:
         if name == "model":
-            continue
-        if "warmup_mode" in specs and name in {"warmup_ratio", "warmup_steps"}:
-            continue
-        if name == "warmup_mode":
-            inputs.append(io.DynamicCombo.Input(name, options=[
-                io.DynamicCombo.Option("ratio", [widget("warmup_ratio")]),
-                io.DynamicCombo.Option("steps", [widget("warmup_steps")]),
-            ], tooltip=specs[name][1]["tooltip"]))
             continue
         if "prefix_policy" in specs and (
             name == "manual_prefix_tokens" or name.startswith("sparse_reference_")
@@ -380,7 +367,7 @@ class AttentionStrategy(io.ComfyNode):
                 "Sol/SLA/Veda dense attention inherits the loader's backend. Sol is model-generic; "
                 "SLA needs compatible trained weights; Veda requires MiniMax H3. "
                 "Veda requires a predictor bundle. Spark-H3 reblocks target video and reweights skipped blocks; "
-                "its explicit backend defaults to W8A8 and all reference modalities remain exact."
+                "it uses W8A8, starts with two dense steps, and keeps all reference modalities exact."
             ),
             inputs=[
                 io.Model.Input("model"),
@@ -418,10 +405,4 @@ class AttentionStrategy(io.ComfyNode):
                 ):
                     if prefix.get(key) is not None:
                         settings[key] = prefix[key]
-        warmup = settings.get("warmup_mode")
-        if isinstance(warmup, dict):
-            settings["warmup_mode"] = warmup["warmup_mode"]
-            for key in ("warmup_ratio", "warmup_steps"):
-                if warmup.get(key) is not None:
-                    settings[key] = warmup[key]
         return io.NodeOutput(_ATTENTION_STRATEGIES[name](model, **settings))

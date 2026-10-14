@@ -8,11 +8,14 @@ parameter definitions. Do not patch these to implement our own visual convention
 DynamicCombo remains appropriate for genuinely mode-dependent input branches.
 
 Configure Attention Strategy selects Sol, SLA, Veda or Spark with DynamicCombo.
-Spark explicitly selects w8a8 (default), sage or sdpa independently of the loader.
-Its dense warmup branch exposes either a ratio (default 20%) or a step count;
-the exact target-video Top-K budget defaults to 20%. Reference modalities stay
-exact. All attention controls are ordinary inputs. Kernel 0.46.0 is required
-for Spark; tests/browser/spark_attention.mjs checks both renderers and reloads.
+Spark uses W8A8 independently of the loader and exposes five ordinary inputs:
+`topk_ratio=0.20`, `dense_prefix_steps=2`, `dense_suffix_steps=0`,
+`dense_prefix_layers=0`, and `dense_suffix_layers=0`. Step counts follow Sol's
+whole-task H3 timeline; they do not scale with task length. Reference modalities
+remain exact. Kernel 0.47.0 is required. The old backend, warmup and debug fields
+are removed; recreate Spark nodes saved with the previous schema. API calls with
+removed fields fail instead of changing numerical backend silently.
+`tests/browser/spark_attention.mjs` checks both renderers and value persistence.
 
 SeC positive_coords and negative_coords are optional socket-only STRING inputs,
 in that order immediately before bounding_box. Use native force_input rather

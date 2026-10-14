@@ -22,24 +22,32 @@ try {
       await tick();
     };
     await set("strategy", "spark");
-    const backend = node.widgets.find(widget => widget.name === "strategy.backend");
-    const values = typeof backend.options.values === "function" ? backend.options.values() : backend.options.values;
-    if (backend.value !== "w8a8" || values.includes("inherit")) throw Error("Incorrect Spark backend default");
-    if (node.widgets.find(widget => widget.name === "strategy.topk_ratio")?.value !== 0.2) throw Error("Incorrect Top-K default");
-    if (node.widgets.find(widget => widget.name === "strategy.dense_prefix_layers")?.value !== 0) throw Error("Sol layer defaults leaked into Spark");
-    await set("strategy.warmup_mode", "steps");
-    if (!node.widgets.some(widget => widget.name === "strategy.warmup_mode.warmup_steps") ||
-        node.widgets.some(widget => widget.name === "strategy.warmup_mode.warmup_ratio")) throw Error("Warmup branch did not switch");
-    await set("strategy.warmup_mode", "ratio");
-    if (!node.widgets.some(widget => widget.name === "strategy.warmup_mode.warmup_ratio") ||
-        node.widgets.some(widget => widget.name === "strategy.warmup_mode.warmup_steps")) throw Error("Inactive warmup controls retained");
+    const expected = {
+      topk_ratio: 0.2,
+      dense_prefix_steps: 2,
+      dense_suffix_steps: 0,
+      dense_prefix_layers: 0,
+      dense_suffix_layers: 0,
+    };
+    const names = node.widgets.filter(widget => widget.name.startsWith("strategy.")).map(widget => widget.name);
+    if (names.length !== Object.keys(expected).length) throw Error("Unexpected Spark controls: " + names);
+    for (const [key, value] of Object.entries(expected)) {
+      if (node.widgets.find(widget => widget.name === "strategy." + key)?.value !== value) throw Error("Incorrect default: " + key);
+    }
+    await set("strategy.dense_prefix_steps", 3);
+    await set("strategy.dense_suffix_steps", 1);
+    await set("strategy.topk_ratio", 0.3);
     const serialized = app.graph.serialize();
     await app.loadGraphData(serialized);
     await tick();
     const restored = app.graph._nodes.find(node => node.type === "TuringUtilsAttentionStrategy");
     if (restored.widgets.find(widget => widget.name === "strategy")?.value !== "spark") throw Error("Spark selection did not persist");
     if (restored.widgets.some(widget => widget.options?.advanced || widget.advanced)) throw Error("Unexpected advanced controls");
-    return { renderer: LiteGraph.vueNodesMode ? "vue" : "classic", backend: backend.value, roundtrip: true };
+    for (const [key, value] of Object.entries({ ...expected, dense_prefix_steps: 3, dense_suffix_steps: 1, topk_ratio: 0.3 })) {
+      if (restored.widgets.find(widget => widget.name === "strategy." + key)?.value !== value) throw Error("Value did not persist: " + key);
+    }
+    return { renderer: LiteGraph.vueNodesMode ? "vue" : "classic", controls: names, roundtrip: true };
+
   });
   assert.equal(report.roundtrip, true);
   console.log(JSON.stringify(report));
