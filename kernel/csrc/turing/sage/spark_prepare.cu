@@ -29,7 +29,7 @@ __device__ __forceinline__ float warp_sum(float value) {
 }
 
 template <class T, int Children = 16> struct DirectionWorkspace {
-  T centers[32][128];
+  __align__(16) T centers[32][128];
   // The padded row stride also makes landmark-parallel column reads
   // conflict-free. A 128-float stride made those reads 32-way bank conflicts.
   float unit[32][129];
@@ -52,12 +52,21 @@ build_directions(const T *features, const int32_t *indices,
   auto &weights = scratch.weights;
   const int lane = threadIdx.x;
   constexpr int landmarks = 32;
-  for (int i = lane; i < landmarks * dim; i += blockDim.x) {
-    const int l = i >> (31 - __clz(dim)), d = i & (dim - 1);
+  for (int i = lane; i < landmarks * dim / 8; i += blockDim.x) {
+    const int l = (i * 8) >> (31 - __clz(dim)), d = (i * 8) & (dim - 1);
     const int start = l * tokens / landmarks;
     const int stop = (l + 1) * tokens / landmarks;
     const int original = indices[(start + stop) / 2];
-    centers[l][d] = features[int64_t(original) * dim + d];
+    const T *source = features + int64_t(original) * dim + d;
+    if ((reinterpret_cast<uintptr_t>(features) & 15) == 0) {
+      *reinterpret_cast<uint4 *>(&centers[l][d]) =
+          *reinterpret_cast<const uint4 *>(source);
+    } else {
+      // Contiguous tensor views can start at an unaligned storage offset.
+#pragma unroll
+      for (int element = 0; element < 8; ++element)
+        centers[l][d + element] = source[element];
+    }
   }
   if (lane < landmarks)
     weights[0][lane] =
@@ -76,16 +85,24 @@ build_directions(const T *features, const int32_t *indices,
       unit[l][d] = float(centers[l][d]) * inverse;
   }
   __syncthreads();
-  for (int pair = warp; pair < landmarks * landmarks; pair += 4) {
-    const int a = pair / landmarks, b = pair % landmarks;
-    if (a >= b)
-      continue;
-    float dot = 0;
-    for (int d = warp_lane; d < dim; d += 32)
-      dot = fmaf(unit[a][d], unit[b][d], dot);
-    dot = warp_sum(dot);
-    if (warp_lane == 0)
-      distances[a * (2 * landmarks - a - 1) / 2 + b - a - 1] = 1 - dot;
+  // Reuse one landmark across its upper-triangle pairs without changing
+  // each dot product's FMA or warp-reduction order.
+  for (int a = 0; a < landmarks - 1; ++a) {
+    float left_unit[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i)
+      if (i < dim / 32)
+        left_unit[i] = unit[a][warp_lane + i * 32];
+    for (int b = a + 1 + ((warp - a - 1) & 3); b < landmarks; b += 4) {
+      float dot = 0;
+#pragma unroll
+      for (int i = 0; i < 4; ++i)
+        if (i < dim / 32)
+          dot = fmaf(left_unit[i], unit[b][warp_lane + i * 32], dot);
+      dot = warp_sum(dot);
+      if (warp_lane == 0)
+        distances[a * (2 * landmarks - a - 1) / 2 + b - a - 1] = 1 - dot;
+    }
   }
   __syncthreads();
   // Independent branches at a tree depth run in separate warps. Only the
@@ -246,8 +263,8 @@ template <class T, int Children, int Size> struct SmallNodeWorkspace {
     DirectionWorkspace<T, Children> directions;
     struct {
       float scores[Size * (Children - 1)];
-      __align__(32) half rows[Rows * 128];
-      __align__(32) half centers[16 * 128];
+      __align__(32) half rows[Rows * 136];
+      __align__(32) half centers[16 * 136];
       __align__(32) float products[Rows * 16];
     } scoring;
     struct {
@@ -278,10 +295,11 @@ fused_nodes_kernel(const T *source, int32_t *indices,
                                 scratch.directions_output, tokens, dim,
                                 Children, scratch.directions);
   // The landmark workspace is dead now. Only the tiny direction table survives.
-  for (int i = threadIdx.x; i < 16 * dim; i += 128)
-    scratch.scoring.centers[i] = (i >> (31 - __clz(dim))) < Children - 1
-                                     ? scratch.directions_output[i]
-                                     : __float2half(0);
+  for (int i = threadIdx.x; i < 16 * dim; i += 128) {
+    const int column = i >> (31 - __clz(dim)), d = i & (dim - 1);
+    scratch.scoring.centers[column * (dim + 8) + d] =
+        column < Children - 1 ? scratch.directions_output[i] : __float2half(0);
+  }
   __syncthreads();
   using namespace nvcuda;
   for (int start = 0; start < tokens; start += Rows) {
@@ -294,7 +312,7 @@ fused_nodes_kernel(const T *source, int32_t *indices,
       }
       const float inverse = rsqrtf(fmaxf(warp_sum(square), 1e-24f));
       for (int i = 0; i < dim / 32; ++i)
-        scratch.scoring.rows[row * dim + lane + i * 32] =
+        scratch.scoring.rows[row * (dim + 8) + lane + i * 32] =
             __float2half_rn(values[i] * inverse);
     }
     __syncthreads();
@@ -304,9 +322,9 @@ fused_nodes_kernel(const T *source, int32_t *indices,
       wmma::fragment<wmma::accumulator, 16, 16, 16, float> product;
       wmma::fill_fragment(product, 0.0f);
       for (int d = 0; d < dim; d += 16) {
-        wmma::load_matrix_sync(a, scratch.scoring.rows + warp * 16 * dim + d,
-                               dim);
-        wmma::load_matrix_sync(b, scratch.scoring.centers + d, dim);
+        wmma::load_matrix_sync(a, scratch.scoring.rows + warp * 16 * (dim + 8) + d,
+                               dim + 8);
+        wmma::load_matrix_sync(b, scratch.scoring.centers + d, dim + 8);
         wmma::mma_sync(product, a, b, product);
       }
       wmma::store_matrix_sync(scratch.scoring.products + warp * 16 * 16,
@@ -402,9 +420,13 @@ __global__ void scores_kernel(const T *source, const int32_t *indices,
                               const half *directions, float *scores,
                               int source_tokens, int nodes, int tokens, int dim,
                               int children) {
-  __shared__ __align__(32) half rows[64 * 128];
-  __shared__ __align__(32) half centers[16 * 128];
-  __shared__ __align__(32) float products[64 * 16];
+  __shared__ union {
+    __align__(32) half rows[64 * 136];
+    __align__(32) float products[64 * 16];
+  } scratch;
+  auto &rows = scratch.rows;
+  auto &products = scratch.products;
+  __shared__ __align__(32) half centers[16 * 136];
   const int head = blockIdx.z, node = blockIdx.y, lane = threadIdx.x % 32;
   const int warp = threadIdx.x / 32, first_row = blockIdx.x * 64;
   const int64_t group = int64_t(head) * nodes + node;
@@ -419,12 +441,13 @@ __global__ void scores_kernel(const T *source, const int32_t *indices,
     }
     const float inverse = rsqrtf(fmaxf(warp_sum(square), 1e-24f));
     for (int i = 0; i < dim / 32; ++i)
-      rows[row * dim + lane + i * 32] = __float2half_rn(values[i] * inverse);
+      rows[row * (dim + 8) + lane + i * 32] = __float2half_rn(values[i] * inverse);
   }
-  for (int i = threadIdx.x; i < 16 * dim; i += 128)
-    centers[i] = (i >> (31 - __clz(dim))) < children
-                     ? directions[group * children * dim + i]
-                     : __float2half(0);
+  for (int i = threadIdx.x; i < 16 * dim; i += 128) {
+    const int column = i >> (31 - __clz(dim)), d = i & (dim - 1);
+    centers[column * (dim + 8) + d] = column < children
+        ? directions[group * children * dim + i] : __float2half(0);
+  }
   __syncthreads();
   using namespace nvcuda;
   wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a;
@@ -432,10 +455,12 @@ __global__ void scores_kernel(const T *source, const int32_t *indices,
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> product;
   wmma::fill_fragment(product, 0.0f);
   for (int offset = 0; offset < dim; offset += 16) {
-    wmma::load_matrix_sync(a, rows + warp * 16 * dim + offset, dim);
-    wmma::load_matrix_sync(b, centers + offset, dim);
+    wmma::load_matrix_sync(a, rows + warp * 16 * (dim + 8) + offset, dim + 8);
+    wmma::load_matrix_sync(b, centers + offset, dim + 8);
     wmma::mma_sync(product, a, b, product);
   }
+  // All warps must finish reading rows before the output reuses that storage.
+  __syncthreads();
   wmma::store_matrix_sync(products + warp * 16 * 16, product, 16,
                           wmma::mem_row_major);
   __syncthreads();

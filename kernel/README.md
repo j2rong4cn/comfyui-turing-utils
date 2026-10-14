@@ -131,7 +131,13 @@ SM80+ overlaps summary/selected-V loads; SM75 retains the
 keeps each CTA's Q MMA fragments in registers across selected K blocks instead
 of reloading them from shared memory. Landmark centroid updates share weight
 shuffles across channels while preserving each channel's original FP32 FMA
-order. It uses
+order. Landmark loads use aligned 16-byte reads with a scalar fallback for
+unaligned contiguous views. Pairwise distances reuse each landmark's register
+values across partners without changing dot-product reduction order. Indexed
+scoring pads shared-memory rows by eight FP16 values; large-node scoring reuses
+the input tile for output after all warps finish reading it. These changes keep
+the complete clustering tree, both centroid updates, 64-token leaves, and exact
+score/ID partition rules. It uses
 either U8×S8 or FP16 PV, with no Triton/CuTe dependency or architecture-specific
 upstream wheel. Only target-video blocks are reblocked; all other modalities
 and partial boundary blocks remain exact. See `tests/test_spark_attention.py`
@@ -164,19 +170,24 @@ reported against dense PyTorch SDPA. Capture files belong in the development
 instance's diagnostic/cache directory, not in Git or another instance.
 
 Final A40 validation on 2026-10-14 used PyTorch 2.9.1+cu130, BF16 ref2va weights,
-NHD projection storage, D128, 52,800 video tokens and the unchanged 20% Top-K:
+NHD projection storage, D128, 52,800 video tokens and the unchanged 20% Top-K.
+Each backend timing is the median of seven rotating-order repetitions:
 
 | Activation replay | Spark W8A8 | Sol W8A8 | Dense W8A8 |
 |---|---:|---:|---:|
-| 14 heads, median of blocks 0/24/49 at sigma 1.0/0.7 | 52.339 ms | 45.515 ms | 143.597 ms |
-| 56 heads, block 0 at sigma 1.0 | 203.382 ms | 198.812 ms | 592.857 ms |
-| 56 heads, block 24 at sigma 1.0 | 203.360 ms | 190.464 ms | 586.683 ms |
+| 14 heads, median of blocks 0/24/49 at sigma 1.0/0.7 | 50.147 ms | 45.451 ms | 143.122 ms |
+| 56 heads, block 0 at sigma 1.0 | 195.751 ms | 195.208 ms | 587.085 ms |
+| 56 heads, block 24 at sigma 1.0 | 197.440 ms | 191.376 ms | 586.450 ms |
 
-Separate same-process alternating comparisons isolate the last preparation
-changes: summary reuse and fused routing save 0.63–1.07 ms across six 14-head
-captures and 2.55–2.70 ms across two 56-head captures, with bitwise-identical
-attention outputs. These comparisons use a different measurement sequence;
-their absolute timings must not be substituted into the backend table.
+Separate same-process comparisons against commit `54ef6f8`, alternating over
+13 repetitions, isolate the clustering changes. Complete attention saves
+1.47–1.88 ms across six 14-head captures and 5.84 ms across two 56-head captures,
+with bitwise-identical outputs at all eight sites. Full 56-head reblocking falls
+from 31.71/31.77 ms to 25.85/25.92 ms (18.4% less time), with identical token
+permutations. Another 120 direction/scoring comparisons cover FP16/BF16,
+D64/D128, tied inputs, and unaligned views with bitwise equality. These paired
+comparisons use a different measurement sequence; their absolute timings must
+not be substituted into the backend table.
 **The default faster-than-Sol objective is not met.** Reducing Top-K would change
 the quality budget and is not counted as an equivalent optimization.
 
@@ -202,7 +213,7 @@ durations. Hardware performance counters are not required.
 
 The final SM75/SM86 build passes resource checks with zero local memory and
 stack at most the existing 16-byte argument frame. The A40 development suite
-passes 1135 tests and 1468 subtests, with 104 skipped. Actual 2080 Ti/RTX 3070
+passes 1155 tests and 1468 subtests, with 104 skipped. Actual 2080 Ti/RTX 3070
 and target-OS runtime validation, plus prompt-conditioned video quality testing,
 remain necessary before claiming those deployment or quality results.
 

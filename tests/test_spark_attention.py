@@ -213,11 +213,13 @@ def test_spark_native_group_indices_and_final_context():
 @pytest.mark.parametrize("dim", [64, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("capacities", [(64, 64), (256, 128), (64, 128, 128, 64), (256,) * 4, (64,) * 8])
-def test_spark_small_node_fusion_is_exact_staged_equivalent(dim, dtype, capacities):
+@pytest.mark.parametrize("storage_offset", [0, 1])
+def test_spark_small_node_fusion_is_exact_staged_equivalent(dim, dtype, capacities, storage_offset):
     native = load_kernel_extension("_sage_qattn_sm75")
     torch.manual_seed(sum(capacities))
     tokens = sum(capacities)
-    source = torch.randn(2, tokens * 3 + 64, dim, device="cuda", dtype=dtype)
+    source = torch.randn(2 * (tokens * 3 + 64) * dim + storage_offset, device="cuda", dtype=dtype)
+    source = source[storage_offset:].view(2, tokens * 3 + 64, dim)
     offsets = [0, tokens + 64]
     positions = torch.tensor(offsets, device="cuda")[:, None] + torch.arange(tokens, device="cuda")
     for tied in (False, True):
