@@ -85,36 +85,40 @@ def select_tiles(
     ):
         raise ValueError("Veda scores do not match the video tile layout")
     blocks = [
-        (0, layout.n_ref_tiles, layout.ref_tokens, reference_keep_ratio),
-        (layout.n_ref_tiles, columns, layout.target_tokens, keep_ratio),
+        (layout.ref_candidates, layout.ref_candidate_tokens, reference_keep_ratio),
+        (layout.target_candidates, layout.target_candidate_tokens, keep_ratio),
     ]
     native = load_kernel_extension("_sage_qattn_sm75")
     indices, keeps = [], []
-    for start, stop, tokens, ratio in blocks:
-        count = stop - start
+    for candidates, tokens, ratio in blocks:
+        count = candidates.numel()
         if count == 0:
             continue
         if ratio == 1:
             indices.append(
-                torch.arange(start, stop, device=scores.device).expand(
+                candidates.expand(
                     heads, queries, count
                 )
             )
-            keeps.append(layout.kv_ok[start:stop].expand(heads, queries, count))
+            keeps.append(layout.kv_ok.index_select(0, candidates).expand(heads, queries, count))
             continue
         budget = ratio * math.ceil(tokens / TILE_SIZE) ** 2 / count
         low = min(count, max(1, math.floor(budget)))
         high = min(count, low + 1)
         fraction = round(min(max(budget - low, 0.0), 1.0), 12)
         values = native.veda_prepare_scores(
-            scores.float().contiguous(), layout.valid_count, start, stop, row_start
+            scores.float().contiguous(), layout.valid_count, candidates, row_start
         )
         best, selected = values.topk(high, dim=-1, sorted=True)
         index, keep = native.veda_finish_selection(
-            best, selected, layout.valid_count, start, row_start, low, fraction
+            best, selected, layout.valid_count, candidates, row_start, low, fraction
         )
         indices.append(index)
         keeps.append(keep)
+    if not indices:
+        shape = (heads, queries, 0)
+        return (torch.empty(shape, device=scores.device, dtype=torch.int64),
+                torch.empty(shape, device=scores.device, dtype=torch.bool))
     if len(indices) == 1:
         return indices[0], keeps[0]
     return torch.cat(indices, -1), torch.cat(keeps, -1)

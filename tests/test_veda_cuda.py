@@ -295,7 +295,8 @@ def test_veda_cuda_compact_preparation_matches_whole(dtype, use_w8a8):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("amplitude", [1.0, 0.001, 0.0])
 @pytest.mark.parametrize("use_w8a8", [False, True])
-def test_veda_cuda_partial_tiles_match_quantized_sdpa(dtype, amplitude, use_w8a8):
+@pytest.mark.parametrize("protected", [(), ((3, 4),)])
+def test_veda_cuda_partial_tiles_match_quantized_sdpa(dtype, amplitude, use_w8a8, protected):
     from comfyui_turing_utils.adapters.minimax.veda.quantization import (
         prequantize,
         finish_value,
@@ -305,7 +306,8 @@ def test_veda_cuda_partial_tiles_match_quantized_sdpa(dtype, amplitude, use_w8a8
     torch.manual_seed(71)
     device = torch.device("cuda", 0)
     layout = build_tile_layout(
-        [TiledSpan(3, (1, 7, 19), TileShape(1, 8, 16))], 143, device
+        [TiledSpan(3, (1, 7, 19), TileShape(1, 8, 16))], 143, device,
+        dense_query_ranges=protected, exact_kv_ranges=protected,
     )
     heads = torch.arange(2, device=device)
     source = [torch.randn(143, 2, 128, device=device, dtype=dtype) for _ in range(3)]
@@ -336,7 +338,7 @@ def test_veda_cuda_partial_tiles_match_quantized_sdpa(dtype, amplitude, use_w8a8
     pos = torch.arange(layout.num_slots, device=device)
     word = routes[:, :, pos // 128, :][..., (pos // 64) // 32]
     mask = ((word >> ((pos // 64) % 32)) & 1).bool()
-    mask[:, :, layout.n_video_tiles * 128 :] = True
+    mask[:, :, ~layout.sparse_query[pos // 64].bool()] = True
     mask &= layout.slot_valid[None, None, None, :].bool()
     if use_w8a8:
         # Native PV consumes a 16-token lane permutation, not plain HND V.
@@ -427,7 +429,7 @@ def test_veda_cuda_auto_score_rows_matches_128_row_baseline():
 def test_veda_cuda_real_projected_qkv_matches_full_rope(
     cached, scalar_scale, head_start
 ):
-    from comfyui_turing_utils.adapters.minimax import acceleration as a
+    from comfyui_turing_utils.adapters.minimax import attention_ops as a
     from comfyui_turing_utils.attention.protocol import (
         QKTransformSpec,
         RMSNormSpec,

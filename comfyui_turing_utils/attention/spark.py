@@ -1,4 +1,4 @@
-"""Spark-H3 W8A8 strategy with exact references and task-wide dense steps."""
+"""Spark-H3 W8A8 strategy with semantic protection and task-wide dense steps."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from .dense import make_attention_override
 from .execution import _prepared_qk_transform, _default_attention_fallback, _profiled
 from .layout import attention_semantic_layout
 from .protocol import AttentionBackendCapabilities, AttentionExecutionOutcome
-from .sparse_runtime import DenseAttentionFallback, SparseSchedule
+from .sparse_runtime import DenseAttentionFallback, SparseSchedule, SparseProtection, unprotected_intervals
 from .stable import (
     finish_turing_attention_output,
     inspect_turing_attention_call,
@@ -20,28 +20,27 @@ from .stable import (
 )
 
 
-def _target(options, tokens):
+def _regions(options, tokens, protection):
     layout = attention_semantic_layout(options)
     if layout is None or layout.validate(tokens, tokens) is not None:
         return None
     if layout.query_segments != layout.key_segments:
         return None
-    targets = [segment for segment in layout.query_segments if segment.role == "target_video"]
-    if len(targets) != 1:
-        return None
-    segment = targets[0]
-    topology = next(
-        (item for item in layout.topologies if item.topology_id == segment.topology_id), None
-    )
-    if topology is None:
-        return None
-    frames = (segment.stop - segment.start) // topology.tokens_per_frame
-    grid = (frames, topology.spatial_tokens_height, topology.spatial_tokens_width)
-    if math.prod(grid) != segment.stop - segment.start:
-        return None
-    if segment.stop // 64 - (segment.start + 63) // 64 < 2:
-        return None
-    return grid, segment.start, segment.stop
+    # One shared permutation: conservatively protect either axis before clustering.
+    protected = sorted((*protection.ranges(options, tokens),
+                        *protection.ranges(options, tokens, axis="key")))
+    spans = [(item.start, item.stop,
+              ((item.stop - item.start) // item.tokens_per_frame,
+               item.spatial_tokens_height, item.spatial_tokens_width))
+             for item in layout.topologies if item.axis in {"both", "query"}]
+    spans.extend((s.start, s.stop, (s.stop - s.start, 1, 1))
+                 for s in layout.query_segments if s.role == "reference_audio")
+    regions = []
+    for start, stop, grid in sorted(spans):
+        for first, last in unprotected_intervals(start, stop, protected):
+            if last // 64 - (first + 63) // 64 >= 2:
+                regions.append((first, last, grid, start))
+    return tuple(regions) or None
 
 
 def _workspace_bytes_per_head(query_tokens, key_tokens, head_dim, element_size):
@@ -55,12 +54,20 @@ def make_spark_attention_override(
     device,
     *,
     topk_ratio=0.2,
+    prefix_policy="auto",
+    manual_prefix_tokens=0,
+    sparse_reference_image=False,
+    sparse_reference_video=False,
+    sparse_reference_audio=False,
     dense_prefix_steps=2,
     dense_suffix_steps=0,
     dense_prefix_layers=0,
     dense_suffix_layers=0,
     min_sequence_tokens=12288,
 ):
+    protection = SparseProtection(prefix_policy, manual_prefix_tokens,
+                                  sparse_reference_image, sparse_reference_video,
+                                  sparse_reference_audio)
     if not math.isfinite(topk_ratio) or not 0 < topk_ratio <= 1:
         raise ValueError("Spark topk_ratio must be in (0, 1]")
     if min(dense_prefix_steps, dense_suffix_steps, dense_prefix_layers, dense_suffix_layers) < 0:
@@ -71,7 +78,7 @@ def make_spark_attention_override(
         raise RuntimeError("Spark requires a CUDA Tensor Core GPU, SM75 or newer")
     if not kernel_capabilities().supports("spark").supported:
         raise RuntimeError(
-            "Spark requires comfyui-turing-utils-kernel 0.47.0 or newer; rebuild the kernel for this GPU"
+            "Spark requires comfyui-turing-utils-kernel 0.48.0 or newer; rebuild the kernel for this GPU"
         )
     preflight_bundled_sparse(device)
     spark_attention = load_turing_sage().spark_attention
@@ -114,20 +121,17 @@ def make_spark_attention_override(
             or call.head_dim not in {64, 128}
         ):
             return None
-        target = _target(options, call.query_tokens)
+        target = _regions(options, call.query_tokens, protection)
         return (call, target) if target is not None else None
 
     def run(q, k, v, target, scale):
-        grid, start, stop = target
         return _profiled(
             "attention.spark",
             spark_attention,
             q,
             k,
             v,
-            grid=grid,
-            start=start,
-            stop=stop,
+            regions=target,
             topk_ratio=topk_ratio,
             sm_scale=scale,
         )

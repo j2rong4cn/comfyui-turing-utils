@@ -558,7 +558,7 @@ original loading functions; callers bypassing the prompt server must invoke
   safeguards as ordinary controls. Manual prefix length appears only for manual
   protection. The three previous Sol/SLA/Veda Configure node IDs are removed.
   Sol/SLA/Veda inherit the loader's dense backend; Spark uses W8A8 independently
-  of the loader and requires kernel 0.47.0.
+  of the loader. Spark/Veda protection requires kernel 0.48.0.
   See [node configuration and reusable presets](docs/node-configuration.md)
   and the [complete node inventory](docs/node-inventory.md).
 - `Video Frames Padding` shares the model `type` choices of Set Video Latent
@@ -586,12 +586,14 @@ original loading functions; callers bypassing the prompt server must invoke
   backend is selected by the loader, not by the old `use_w8a8` widget.
 - Spark uses W8A8 with complete Landmark-v2 clustering down to 64-token leaves,
   32 midpoint landmarks and two centroid updates. Exact tokens and weighted
-  skipped-block summaries share one online softmax. Only target video is
-  reblocked; text, references, target audio and mixed boundary blocks remain
+  skipped-block summaries share one online softmax. By default only target video is
+  reblocked. Auto protection exposes image/video/audio reference switches;
+  false keeps both Query and K/V exact. Enabling a reference switch clusters
+  that modality separately. Text, target audio and mixed boundary blocks stay
   dense/exact. No model tensors persist between calls.
-  Its five controls are `topk_ratio=0.20`, `dense_prefix_steps=2`,
+  In addition to protection controls, defaults are `topk_ratio=0.20`, `dense_prefix_steps=2`,
   `dense_suffix_steps=0`, `dense_prefix_layers=0`, and `dense_suffix_layers=0`.
-  Top-K counts complete target-video blocks; protected blocks are additional.
+  Top-K counts complete unprotected candidate blocks; protected blocks are additional.
   Dense step/layer protection follows Sol semantics: H3 KSampler counts sampling
   and upscale as one task, while independent samplers count locally. Counts are
   fixed, with no ratio mode or restart at the upscale stage. Zero disables the
@@ -599,8 +601,11 @@ original loading functions; callers bypassing the prompt server must invoke
   whole interval dense. Short sequences below 12288 tokens, unsupported
   layouts/masks, and Top-K=1 use W8A8 dense attention. Kernel failures propagate.
   Kernel 0.47.0 removes Spark's FP16-PV/backend choices and old warmup/debug
-  parameters. Recreate Spark nodes saved with the old schema; API callers must
-  use the five current controls. The FP16 clustering projection and rotated
+  parameters. Kernel 0.48.0 adds semantic/manual protection to Spark and Veda,
+  including a functional reference-audio switch. Recreate affected nodes saved
+  with the old schema. Veda keeps its trained 3D tiles and rounds protection
+  outward; reference audio uses sequential tiles when explicitly allowed.
+  That audio route needs task-specific quality evaluation and defaults off. The FP16 clustering projection and rotated
   INT8 attention are not bitwise identical to upstream BF16 Spark.
 
 The shared asymmetric-Q/K and independent-Q/K-RoPE protocol and kernel ABI

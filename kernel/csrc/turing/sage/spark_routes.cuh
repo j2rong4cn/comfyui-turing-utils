@@ -14,6 +14,7 @@ __device__ uint32_t half_rank(half value) {
 __global__ void topk_routes_kernel(const half *scores, uint32_t *routes,
                                    int rows, int columns, int query_blocks,
                                    int key_blocks, int first_block,
+                                   const int32_t *candidates, const uint8_t *sparse_key,
                                    int query_start, int keep) {
   __shared__ int histogram[4][16];
   __shared__ int rank, tie_count, cutoff;
@@ -27,7 +28,7 @@ __global__ void topk_routes_kernel(const half *scores, uint32_t *routes,
     for (int bit = 0; bit < 32; ++bit) {
       const int block = word * 32 + bit;
       if (block < key_blocks &&
-          (keep == columns || block < first_block || block >= first_block + columns))
+          (keep == columns || !sparse_key[block]))
         bits |= 1U << bit;
     }
     routes[word] = bits;
@@ -93,7 +94,12 @@ __global__ void topk_routes_kernel(const half *scores, uint32_t *routes,
     const bool selected = column < columns &&
                           (key > prefix || (key == prefix && tie_rank < rank));
     const uint32_t bits = __ballot_sync(0xffffffff, selected);
-    if (lane == 0 && bits) {
+    if (first_block < 0) {
+      if (selected) {
+        const int block = candidates[column];
+        atomicOr(routes + block / 32, 1U << (block % 32));
+      }
+    } else if (lane == 0 && bits) {
       const int block = first_block + begin + warp * 32;
       atomicOr(routes + block / 32, bits << (block % 32));
       if (block % 32 && block / 32 + 1 < words)
@@ -105,8 +111,15 @@ __global__ void topk_routes_kernel(const half *scores, uint32_t *routes,
 
 } // namespace spark_routing
 
-void spark_topk_routes(at::Tensor scores, at::Tensor routes, int first_block,
-                       int query_start, int key_blocks, int keep) {
+void spark_topk_protected_routes(at::Tensor scores, at::Tensor routes,
+    at::Tensor candidates, at::Tensor sparse_key, int query_start, int keep, int first_block) {
+  const int key_blocks = sparse_key.numel();
+  TORCH_CHECK(candidates.device() == scores.device() && candidates.is_contiguous() &&
+                  candidates.scalar_type() == at::kInt && candidates.dim() == 1 &&
+                  candidates.numel() == scores.size(3) &&
+                  sparse_key.device() == scores.device() && sparse_key.is_contiguous() &&
+                  sparse_key.scalar_type() == at::kByte && sparse_key.dim() == 1,
+              "Spark candidate blocks and sparse mask invalid");
   TORCH_CHECK(scores.is_cuda() && scores.is_contiguous() &&
                   scores.scalar_type() == at::kHalf && scores.dim() == 4 &&
                   routes.device() == scores.device() && routes.is_contiguous() &&
@@ -114,7 +127,7 @@ void spark_topk_routes(at::Tensor scores, at::Tensor routes, int first_block,
                   scores.size(0) == routes.size(0) && scores.size(1) == routes.size(1) &&
                   routes.size(3) == (key_blocks + 31) / 32 &&
                   query_start >= 0 && query_start + scores.size(2) <= routes.size(2) &&
-                  first_block >= 0 && first_block + scores.size(3) <= key_blocks &&
+                  first_block >= -1 && first_block + scores.size(3) <= key_blocks &&
                   keep >= 1 && keep <= scores.size(3),
               "Spark TopK score/route shape or budget invalid");
   c10::cuda::CUDAGuard guard(scores.device());
@@ -122,6 +135,7 @@ void spark_topk_routes(at::Tensor scores, at::Tensor routes, int first_block,
                                       128, 0, c10::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const half *>(scores.data_ptr()),
       reinterpret_cast<uint32_t *>(routes.data_ptr()), scores.size(2), scores.size(3),
-      routes.size(2), key_blocks, first_block, query_start, keep);
+      routes.size(2), key_blocks, first_block, candidates.data_ptr<int32_t>(),
+      sparse_key.data_ptr<uint8_t>(), query_start, keep);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

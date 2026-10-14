@@ -161,6 +161,12 @@ class TileLayout:
     kv_ok: torch.Tensor
     full_tile: torch.Tensor
     slot_valid: torch.Tensor
+    sparse_query: torch.Tensor
+    exact_kv: torch.Tensor
+    ref_candidates: torch.Tensor
+    target_candidates: torch.Tensor
+    ref_candidate_tokens: int
+    target_candidate_tokens: int
 
     @property
     def n_tiles(self) -> int:
@@ -172,7 +178,8 @@ class TileLayout:
 
 
 def build_tile_layout(
-    spans: Sequence[TiledSpan], seq_len: int, device: torch.device | str = "cpu"
+    spans: Sequence[TiledSpan], seq_len: int, device: torch.device | str = "cpu",
+    *, dense_query_ranges=(), exact_kv_ranges=(),
 ) -> TileLayout:
     """Builds the permutation; rows outside every span are global.
 
@@ -207,6 +214,19 @@ def build_tile_layout(
     perm = torch.cat([video.view(-1), global_tiles])
     valid_count = (perm.view(-1, TILE_SIZE) >= 0).sum(1).to(torch.int32)
     partial = torch.nonzero((valid_count > 0) & (valid_count < TILE_SIZE)).view(-1)
+    def protected_tiles(ranges):
+        rows = perm.view(-1, TILE_SIZE)
+        mask = torch.zeros(rows.shape[0], dtype=torch.bool)
+        mask[video.shape[0]:] = True
+        for first, last in ranges:
+            mask |= ((rows >= first) & (rows < last)).any(dim=1)
+        return mask
+
+    dense_query = protected_tiles(dense_query_ranges)
+    exact_kv = protected_tiles(exact_kv_ranges)
+    candidates = torch.nonzero(~exact_kv[:video.shape[0]]).flatten()
+    reference = candidates[candidates < n_ref_tiles]
+    target = candidates[candidates >= n_ref_tiles]
     return TileLayout(
         perm=perm.to(device),
         valid_count=valid_count.to(device),
@@ -224,4 +244,10 @@ def build_tile_layout(
         kv_ok=(valid_count > 0).to(device),
         full_tile=(valid_count == TILE_SIZE).to(device),
         slot_valid=(perm >= 0).to(torch.int32).to(device),
+        sparse_query=(~dense_query).repeat_interleave(2).to(device, dtype=torch.uint8),
+        exact_kv=exact_kv.to(device, dtype=torch.uint8),
+        ref_candidates=reference.to(device),
+        target_candidates=target.to(device),
+        ref_candidate_tokens=int(valid_count[reference].sum()),
+        target_candidate_tokens=int(valid_count[target].sum()),
     )

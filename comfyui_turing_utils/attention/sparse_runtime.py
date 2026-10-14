@@ -3,9 +3,51 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from .protocol import AttentionExecutionOutcome, PreparedAttention
-from .sparse import _sparse_dense_layer, _sparse_dense_schedule
+from .sparse import _sparse_dense_layer, _sparse_dense_schedule, _sparse_protected_ranges
+
+
+@dataclass(frozen=True, slots=True)
+class SparseProtection:
+    prefix_policy: str = "auto"
+    manual_prefix_tokens: int = 0
+    sparse_reference_image: bool = False
+    sparse_reference_video: bool = True
+    sparse_reference_audio: bool = False
+
+    def __post_init__(self):
+        if self.prefix_policy not in {"auto", "none", "manual"}:
+            raise ValueError("prefix_policy must be auto, none, or manual")
+        if self.manual_prefix_tokens < 0:
+            raise ValueError("manual_prefix_tokens must be non-negative")
+
+    def ranges(self, options, tokens, *, axis="query"):
+        return _sparse_protected_ranges(
+            self.prefix_policy, self.manual_prefix_tokens, options, tokens,
+            sparse_reference_image=self.sparse_reference_image,
+            sparse_reference_video=self.sparse_reference_video,
+            sparse_reference_audio=self.sparse_reference_audio,
+            axis=axis,
+        )
+
+
+def unprotected_intervals(start, stop, protected):
+    """Subtract sorted, merged protection ranges in original token coordinates."""
+    cursor = start
+    result = []
+    for first, last in protected:
+        if last <= cursor:
+            continue
+        if first >= stop:
+            break
+        if first > cursor:
+            result.append((cursor, first))
+        cursor = max(cursor, last)
+    if cursor < stop:
+        result.append((cursor, stop))
+    return tuple(result)
 
 
 class SparseSchedule:
@@ -151,4 +193,4 @@ class DenseAttentionFallback:
         )
 
 
-__all__ = ["DenseAttentionFallback", "SparseSchedule"]
+__all__ = ["DenseAttentionFallback", "SparseSchedule", "SparseProtection", "unprotected_intervals"]

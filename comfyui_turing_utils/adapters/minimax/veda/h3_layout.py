@@ -19,7 +19,7 @@ Miowtion's training layout. Veda needs, per video-like span, its token grid
     verified against them; a segment that does not verify stays global
     (dense), which is always correct, just slower.
 
-Text and every audio segment are global rows. Duck-typed on purpose: this
+Text and target audio are global rows. Reference audio uses sequential temporal tiles. Duck-typed on purpose: this
 module must not import ComfyUI.
 """
 
@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import dataclasses
 
-import torch
 
-_REFERENCE_KINDS = ("cond", "ref_img")
+from ....attention.layout import regular_position_grid
+
+_REFERENCE_KINDS = ("cond", "ref_img", "cond_audio", "ref_audio")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -62,25 +63,7 @@ class LayoutError(ValueError):
     """The layout cannot be mapped; the caller runs dense attention."""
 
 
-def _segment_grid(
-    position_ids: torch.Tensor, start: int, stop: int
-) -> tuple[int, int, int] | None:
-    """(T, H, W) of a segment if its rows are T, H, W row-major, else None.
-
-    Positions are (t, h, w) floats; a row-major grid has exactly
-    T * H * W rows whose positions are the outer product of the sorted
-    unique values per axis.
-    """
-    pos = position_ids[start:stop]
-    axes = [torch.unique(pos[:, i]) for i in range(3)]
-    t, h, w = (a.numel() for a in axes)
-    if t * h * w != stop - start:
-        return None
-    expected = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1).reshape(-1, 3)
-    if not torch.equal(expected, pos.to(expected.dtype)):
-        return None
-    return t, h, w
-
+_segment_grid = regular_position_grid
 
 def describe(layout) -> LayoutSpec:
     """Maps a ComfyUI H3 PackedLayout to a LayoutSpec.
@@ -109,9 +92,8 @@ def describe(layout) -> LayoutSpec:
     for start, stop, kind in segments:
         if kind not in _REFERENCE_KINDS:
             continue
-        span_grid = (
-            None if position_ids is None else _segment_grid(position_ids, start, stop)
-        )
+        span_grid = ((stop - start, 1, 1) if kind in {"cond_audio", "ref_audio"}
+                     else regular_position_grid(position_ids, start, stop))
         if span_grid is None:
             skipped.append(f"{kind}[{start}:{stop}] has no row-major grid")
             continue

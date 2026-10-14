@@ -1,5 +1,22 @@
 # comfyui-turing-utils-kernel
 
+Version 0.48.0 adds original-token protection to Spark and Veda. Spark clusters
+multiple disjoint eligible spans before exact Top-K; Veda retains 3D predictor
+tiles while forcing protected Query/KV blocks. Protected K/V does not consume
+the sparse budget. Reference audio can enter sequential sparse tiles when
+explicitly enabled. The route ABI changes; rebuild separately in each instance.
+
+A40 validation of 0.48.0 includes SM75/SM86 builds and spill/resource audits,
+protected Query/KV and disjoint-candidate CUDA oracles, reference-audio toggles,
+manual boundaries, chunked preparation and predictor head shards. Compared to
+0.47.0, the default Spark pipeline is bitwise identical on eight FP16/BF16
+D64/D128 boundary/layout cases and eight saved H3 activation cases. Paired
+17-repeat medians: six 14-head cases increased 0.2–1.1%; two 56-head cases
+remained effectively unchanged at 195–196 ms. These captures use real model
+activations with synthetic inputs, not prompt-conditioned video/audio quality
+validation. Reference-audio sparsity remains opt-in; actual SM75 runtime and
+Windows validation remain outstanding.
+
 Version 0.47.0 consolidates Spark-H3 into W8A8 with complete fine-grained
 clustering and a default 20% exact-block budget. It removes Spark's FP16-PV and
 phase-cycle profiling interfaces. Rebuild the independent kernel when updating.
@@ -119,8 +136,9 @@ Exact Top-K writes compact route words; ties use ascending key-block order.
 Exact tokens and per-query weighted summaries share one FP32 online softmax,
 and output stores restore the original order. SM80+ overlaps summary/selected-V
 loads; SM75 retains synchronous copies and the 32-KiB D128 attention footprint.
-Only target video is reblocked; other modalities and mixed boundary blocks stay
-exact. Spark requires kernel 0.47.0 and has no FP16-PV or diagnostic kernel branch.
+By default only target video is reblocked. Explicitly allowed references use
+separate clusters, with original-token protection applied before clustering.
+Mixed boundary blocks stay exact. Spark requires kernel 0.48.0 and has no FP16-PV or diagnostic kernel branch.
 The PyTorch mathematical oracles live in `tests/spark_reference.py`.
 
 `scripts/benchmark_spark.py --tokens 19968 52842 --heads 14 --profile`

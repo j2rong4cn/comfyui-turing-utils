@@ -55,11 +55,11 @@ __global__ void gather_pool(const T* q, const T* k, const T* v,
 }
 
 __global__ void prepare_scores(const float* scores, const int32_t* counts,
-    float* out, int64_t total, int queries, int columns, int start, int count, int row_start) {
+    float* out, int64_t total, int queries, int columns, const int64_t* candidates, int count, int row_start) {
   int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
   if(i>=total) return;
   int c=i%count, r=(i/count)%queries;
-  int col=start+c;
+  int col=candidates[c];
   // Force the diagonal after masking, matching the reference implementation.
   out[i]=(row_start+r==col)?INFINITY:
       ((counts[col]>0)?scores[(i/count)*columns+col]:-INFINITY);
@@ -67,13 +67,13 @@ __global__ void prepare_scores(const float* scores, const int32_t* counts,
 
 __global__ void finish_selection(const float* best, const int64_t* selected,
     const int32_t* counts, int64_t* indices, bool* keep, int64_t total,
-    int queries, int high, int start, int row_start, int low, double fraction) {
+    int queries, int high, const int64_t* candidates, int row_start, int low, double fraction) {
   int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
   if(i>=total) return;
   int row=row_start+(i/high)%queries, rank=i%high;
   // Separate FP64 multiplies intentionally match the Bresenham quota pattern.
   int extra=floor(double(row+1)*fraction)>floor(double(row)*fraction);
-  int64_t col=selected[i]+start;
+  int64_t col=candidates[selected[i]];
   indices[i]=col;
   keep[i]=rank<low+extra && best[i]>-INFINITY && counts[col]>0;
 }
@@ -81,7 +81,7 @@ __global__ void finish_selection(const float* best, const int64_t* selected,
 
 __global__ void routes(const int64_t* indices, const bool* keep,
     const int32_t* counts, int32_t* out, int selected, int queries,
-    int video_tiles, int tiles, int words, int out_rows, int row_start) {
+    const uint8_t* exact_kv, int tiles, int words, int out_rows, int row_start) {
   int row=blockIdx.x;
   int64_t target=int64_t(row/queries)*out_rows+row%queries+row_start;
   auto* bits=reinterpret_cast<unsigned int*>(out+target*words);
@@ -95,7 +95,8 @@ __global__ void routes(const int64_t* indices, const bool* keep,
       if(n>64) atomicOr(bits+(2*t+1)/32,1u<<((2*t+1)%32));
     }
   }
-  for(int t=video_tiles+threadIdx.x;t<tiles;t+=blockDim.x) {
+  for(int t=threadIdx.x;t<tiles;t+=blockDim.x) {
+    if(!exact_kv[t]) continue;
     int n=counts[t];
     if(n>0) atomicOr(bits+(2*t)/32,1u<<((2*t)%32));
     if(n>64) atomicOr(bits+(2*t+1)/32,1u<<((2*t+1)%32));
@@ -156,50 +157,55 @@ std::vector<torch::Tensor> veda_gather_pool(torch::Tensor q, torch::Tensor k,
 }
 
 torch::Tensor veda_prepare_scores(torch::Tensor scores, torch::Tensor counts,
-    int64_t start, int64_t stop, int64_t row_start) {
+    torch::Tensor candidates, int64_t row_start) {
   TORCH_CHECK(scores.is_cuda() && scores.dim()==3 && scores.is_contiguous() &&
     scores.scalar_type()==torch::kFloat32 && counts.scalar_type()==torch::kInt32 &&
     counts.device()==scores.device() && counts.is_contiguous() && counts.dim()==1,
     "Veda score preparation requires contiguous CUDA FP32 scores and int32 counts");
-  TORCH_CHECK(start>=0 && stop>start && stop<=scores.size(2) && counts.numel()>=scores.size(2) &&
+  TORCH_CHECK(candidates.device()==scores.device() && candidates.scalar_type()==torch::kInt64 &&
+    candidates.dim()==1 && candidates.is_contiguous() && candidates.numel()<=scores.size(2) &&
+    counts.numel()>=scores.size(2) &&
     row_start>=0 && row_start+scores.size(1)<=scores.size(2),"Veda score ranges invalid");
   c10::cuda::CUDAGuard guard(scores.device());
-  auto out=torch::empty({scores.size(0),scores.size(1),stop-start},scores.options());
+  auto out=torch::empty({scores.size(0),scores.size(1),candidates.numel()},scores.options());
   if(out.numel()) veda_prepare::prepare_scores<<<(out.numel()+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
     scores.data_ptr<float>(),counts.data_ptr<int32_t>(),out.data_ptr<float>(),out.numel(),
-    scores.size(1),scores.size(2),start,stop-start,row_start);
+    scores.size(1),scores.size(2),candidates.data_ptr<int64_t>(),candidates.numel(),row_start);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
 std::vector<torch::Tensor> veda_finish_selection(torch::Tensor best, torch::Tensor selected,
-    torch::Tensor counts, int64_t start, int64_t row_start, int64_t low, double fraction) {
+    torch::Tensor counts, torch::Tensor candidates, int64_t row_start, int64_t low, double fraction) {
   TORCH_CHECK(best.is_cuda() && best.dim()==3 && best.scalar_type()==torch::kFloat32 &&
     selected.sizes()==best.sizes() && selected.scalar_type()==torch::kInt64 &&
     counts.dim()==1 && counts.scalar_type()==torch::kInt32 && low>=1 && low<=best.size(2) &&
-    start>=0 && start<counts.numel() && row_start>=0 && fraction>=0 && fraction<=1,
+    candidates.dim()==1 && candidates.scalar_type()==torch::kInt64 &&
+    candidates.numel()>=best.size(2) && candidates.numel()<=counts.numel() &&
+    row_start>=0 && fraction>=0 && fraction<=1,
     "Veda TopK finish inputs invalid");
-  for(const auto& t:{best,selected,counts}) TORCH_CHECK(t.device()==best.device() && t.is_contiguous(),
+  for(const auto& t:{best,selected,counts,candidates}) TORCH_CHECK(t.device()==best.device() && t.is_contiguous(),
     "Veda TopK finish device/stride mismatch");
   c10::cuda::CUDAGuard guard(best.device());
   auto indices=torch::empty_like(selected), keep=torch::empty(best.sizes(),best.options().dtype(torch::kBool));
   if(best.numel()) veda_prepare::finish_selection<<<(best.numel()+255)/256,256,0,c10::cuda::getCurrentCUDAStream()>>>(
     best.data_ptr<float>(),selected.data_ptr<int64_t>(),counts.data_ptr<int32_t>(),
     indices.data_ptr<int64_t>(),keep.data_ptr<bool>(),best.numel(),best.size(1),best.size(2),
-    start,row_start,low,fraction);
+    candidates.data_ptr<int64_t>(),row_start,low,fraction);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {indices,keep};
 }
 
 
-void veda_pack_routes(torch::Tensor indices, torch::Tensor keep,
-    torch::Tensor counts,int64_t video_tiles,torch::Tensor out,int64_t row_start) {
+void veda_pack_protected_routes(torch::Tensor indices, torch::Tensor keep,
+    torch::Tensor counts,torch::Tensor exact_kv,torch::Tensor out,int64_t row_start) {
   TORCH_CHECK(indices.is_cuda() && indices.dim()==3 && indices.scalar_type()==torch::kInt64 &&
     keep.sizes()==indices.sizes() && keep.scalar_type()==torch::kBool &&
     counts.dim()==1 && counts.scalar_type()==torch::kInt32,
     "Veda route inputs invalid");
-  for(const auto& t:{indices,keep,counts,out}) TORCH_CHECK(t.device()==indices.device() && t.is_contiguous(),"Veda routes device/strides mismatch");
-  TORCH_CHECK(video_tiles>=0 && video_tiles<=counts.numel(),"Veda video tile count invalid");
+  for(const auto& t:{indices,keep,counts,out,exact_kv}) TORCH_CHECK(t.device()==indices.device() && t.is_contiguous(),"Veda routes device/strides mismatch");
+  TORCH_CHECK(exact_kv.dim()==1 && exact_kv.scalar_type()==torch::kUInt8 &&
+    exact_kv.numel()==counts.numel(),"Veda exact KV mask invalid");
   c10::cuda::CUDAGuard guard(indices.device());
   int words=(counts.numel()*2+31)/32;
   TORCH_CHECK(out.scalar_type()==torch::kInt32 && out.dim()==4 && out.size(0)==1 &&
@@ -208,6 +214,6 @@ void veda_pack_routes(torch::Tensor indices, torch::Tensor keep,
   if(indices.size(0)*indices.size(1)>0)
     veda_prepare::routes<<<indices.size(0)*indices.size(1),128,0,c10::cuda::getCurrentCUDAStream()>>>(
       indices.data_ptr<int64_t>(),keep.data_ptr<bool>(),counts.data_ptr<int32_t>(),out.data_ptr<int32_t>(),
-      indices.size(2),indices.size(1),video_tiles,counts.numel(),words,out.size(2),row_start);
+      indices.size(2),indices.size(1),exact_kv.data_ptr<uint8_t>(),counts.numel(),words,out.size(2),row_start);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

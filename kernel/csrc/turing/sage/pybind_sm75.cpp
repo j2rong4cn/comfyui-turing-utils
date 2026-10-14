@@ -78,12 +78,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
   m.def("spark_group_indices", &spark_group_indices, "Spark forward-local tree index gather/scatter");
   m.def("spark_partition", &spark_partition, "Spark exact balanced partition without host-device metadata transfers");
   m.def("spark_finalize_permutation", &spark_finalize_permutation, "Spark target permutation with identity context");
-  m.def("spark_topk_routes", &spark_topk_routes, "Spark exact TopK directly into route words");
+  m.def("spark_topk_protected_routes", &spark_topk_protected_routes, "Spark exact TopK directly into route words");
   m.def("spark_sparse_w8a8_attn", &spark_sparse_w8a8_attn, "Spark 64x64 routes and per-query weighted tails for SM75+");
-  m.def("spark_prepare_w8a8", &spark_prepare_w8a8, "Spark parallel V scale and fused V packing/weighted summaries");
+  m.def("spark_prepare_w8a8", &spark_prepare_w8a8, "Spark parallel V scale and fused V packing/weighted summaries",
+        pybind11::arg("q"), pybind11::arg("k"), pybind11::arg("qs"), pybind11::arg("ks"),
+        pybind11::arg("value"), pybind11::arg("start"), pybind11::arg("stop"),
+        pybind11::arg("scale"), pybind11::arg("permutation"),
+        pybind11::arg("anchor_indices") = pybind11::none());
   m.def("veda_sparse_online_attn", &veda_sparse_online_attn, "Veda external routing with partial-tile masks and FP16 PV for sm75+");
   m.def("veda_gather_pool", &veda_gather_pool, "Fused Veda QKV gather and FP32 TripPool");
-  m.def("veda_pack_routes", &veda_pack_routes, "Fused Veda route packing and global union");
+  m.def("veda_pack_protected_routes", &veda_pack_protected_routes, "Fused Veda route packing and global union");
   m.def("veda_scatter_tiles", &veda_scatter_tiles, "Restore Veda tile output without writing padding slots");
   m.def("veda_prepare_scores", &veda_prepare_scores, "Fused Veda score masking and forced diagonal");
   m.def("veda_finish_selection", &veda_finish_selection, "Fused Veda fractional quotas and valid tile selection");

@@ -73,7 +73,7 @@ def profile_stages(function):
         (native, "spark_fused_nodes", "reblock_small_fused"),
         (native, "spark_indexed_scores", "reblock_scores"),
         (native, "spark_partition", "reblock_partition"),
-        (native, "spark_topk_routes", "topk_and_route_pack"),
+        (native, "spark_topk_protected_routes", "topk_and_route_pack"),
     ]
     function()
     torch.cuda.synchronize()

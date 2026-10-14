@@ -7,8 +7,17 @@ bundles are not LoRAs; normal model weight patches remain independent.
 ## Node
 
 Basic inputs: model, predictor file, predictor precision (W8A8 by default).
-Advanced inputs: target/reference keep ratios, strict/nearest plan policy,
-dense layer/step schedule and debug. A ratio of 0 uses the bundle's trained
+All controls are ordinary inputs: target/reference keep ratios,
+`prefix_policy`, three reference sparse permissions (image/video/audio),
+strict/nearest plan policy, dense layer/step schedule and debug. Auto protects
+images, reference-video anchors and reference audio by default; reference-video
+body remains eligible. Manual protects the original packed prefix, while none
+removes extra protection. Text, target audio and unmapped modalities stay dense.
+Protected Query tiles see all K/V, protected K/V tiles are included for every
+query without consuming sparse quotas. Mixed 128-token tiles round protection
+outward while keeping the trained tile geometry. Reference audio can use
+sequential 128-token tiles when explicitly allowed; this extension is outside
+the [released visual predictor training contract](https://huggingface.co/Veda-Sparse/Minimax-H3-R2VA-Veda-Preview). Kernel 0.48.0 is required. A ratio of 0 uses the bundle's trained
 value. Both ratios equal to 1 use the existing dense backend with no predictor
 workspace. Scheduling never changes quality ratios.
 

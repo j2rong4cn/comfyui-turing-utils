@@ -125,7 +125,7 @@ class NodeConfigurationTest(unittest.TestCase):
         self.assertFalse(fields["predictor_precision"].advanced)
 
     def test_prefix_parameters_only_exist_in_their_active_mode(self):
-        for strategy in ("sol", "sla"):
+        for strategy in ("sol", "sla", "spark", "veda"):
             for policy in ("auto", "none", "manual"):
                 values = {"strategy": strategy, "strategy.prefix_policy": policy}
                 fields, _ = finalized(AttentionStrategy, values)
@@ -137,7 +137,7 @@ class NodeConfigurationTest(unittest.TestCase):
                     "strategy.prefix_policy.sparse_reference_image" in fields,
                     policy == "auto",
                 )
-                self.assertNotIn("strategy.predictor_name", fields)
+                self.assertEqual("strategy.predictor_name" in fields, strategy == "veda")
 
     def test_dynamic_settings_delegate_to_existing_implementations(self):
         cases = [

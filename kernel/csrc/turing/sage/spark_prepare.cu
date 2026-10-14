@@ -504,14 +504,16 @@ __global__ void finalize_permutation_kernel(const int32_t *indices,
 
 __global__ void anchor_kernel(const int8_t *q, const float *scale,
                               float *partial, int tokens, int heads, int dim,
-                              int start, int stop, int chunks, int qb,
+                              int start, int stop, int chunks, int qb, const int32_t *selected,
                               int64_t s0, int64_t s1, int64_t s2) {
   const int chunk = blockIdx.x, h = blockIdx.y, b = blockIdx.z, d = threadIdx.x;
   float sum = 0;
-  for (int t = start + chunk * 1024; t < min(stop, start + (chunk + 1) * 1024);
-       ++t)
+  for (int i = start + chunk * 1024; i < min(stop, start + (chunk + 1) * 1024);
+       ++i) {
+    const int t = selected ? selected[i] : i;
     sum = fmaf(float(q[b * s0 + h * s1 + t * s2 + d]),
                scale[(int64_t(b) * heads + h) * qb * 4 + t / 16], sum);
+  }
   partial[((int64_t(b) * heads + h) * chunks + chunk) * dim + d] =
       sum / (stop - start);
 }
@@ -940,7 +942,7 @@ at::Tensor spark_finalize_permutation(at::Tensor indices, int sequence,
 static std::vector<at::Tensor> prepare_summaries(
     at::Tensor q, at::Tensor k, at::Tensor qs, at::Tensor ks, at::Tensor value,
     int start, int stop, float scale, at::Tensor value_scale,
-    at::Tensor permutation, at::Tensor packed_value) {
+    at::Tensor permutation, at::Tensor packed_value, std::optional<at::Tensor> anchor_indices) {
   floating_input(value);
   TORCH_CHECK(q.dim() == 4 && q.sizes() == k.sizes() &&
                   q.sizes() == value.sizes() && q.scalar_type() == at::kChar &&
@@ -970,13 +972,23 @@ static std::vector<at::Tensor> prepare_summaries(
   TORCH_CHECK(qs.sizes() == at::IntArrayRef({batch, heads, blocks * 4}) &&
                   ks.sizes() == at::IntArrayRef({batch, heads, blocks}),
               "Spark scale shapes invalid");
+  const int32_t *selected = nullptr;
+  if (anchor_indices.has_value()) {
+    const auto &ids = *anchor_indices;
+    TORCH_CHECK(ids.device() == q.device() && ids.scalar_type() == at::kInt &&
+                    ids.dim() == 1 && ids.is_contiguous() && ids.numel() > 0 &&
+                    ids.numel() <= tokens, "Spark anchor indices invalid");
+    selected = ids.data_ptr<int32_t>();
+    start = 0;
+    stop = ids.numel();
+  }
   const int chunks = (stop - start + 1023) / 1024;
   auto partial =
       at::empty({batch, heads, chunks, dim}, value.options().dtype(at::kFloat));
   anchor_kernel<<<dim3(chunks, heads, batch), dim, 0,
                   c10::cuda::getCurrentCUDAStream()>>>(
       q.data_ptr<int8_t>(), qs.data_ptr<float>(), partial.data_ptr<float>(),
-      tokens, heads, dim, start, stop, chunks, blocks, q.stride(0), q.stride(1),
+      tokens, heads, dim, start, stop, chunks, blocks, selected, q.stride(0), q.stride(1),
       q.stride(2));
   auto anchor = partial.sum(2);
   auto qm =
@@ -1015,7 +1027,8 @@ std::vector<at::Tensor> spark_prepare_w8a8(at::Tensor q, at::Tensor k,
                                            at::Tensor qs, at::Tensor ks,
                                            at::Tensor value, int start,
                                            int stop, float scale,
-                                           at::Tensor permutation) {
+                                           at::Tensor permutation,
+                                           std::optional<at::Tensor> anchor_indices) {
   floating_input(value);
   TORCH_CHECK(value.dim() == 4 && value.size(2) > 0,
               "Spark V must be [B,H,N,D]");
@@ -1045,7 +1058,7 @@ std::vector<at::Tensor> spark_prepare_w8a8(at::Tensor q, at::Tensor k,
       chunks);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   auto summaries = prepare_summaries(q, k, qs, ks, value, start, stop, scale,
-                                      vs, permutation, vi);
+                                      vs, permutation, vi, anchor_indices);
   summaries.insert(summaries.begin(), {vi, vs});
   return summaries;
 }

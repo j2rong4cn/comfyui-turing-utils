@@ -8,8 +8,8 @@ from unittest import mock
 import pytest
 import torch
 
-from comfyui_turing_utils.attention.spark import make_spark_attention_override, _target
-from comfyui_turing_utils.attention.sparse_runtime import SparseSchedule
+from comfyui_turing_utils.attention.spark import make_spark_attention_override, _regions
+from comfyui_turing_utils.attention.sparse_runtime import SparseSchedule, SparseProtection
 from comfyui_turing_utils.attention.protocol import SAMPLING_PROGRESS_KEY
 from comfyui_turing_utils.attention.layout import (
     AttentionSegment,
@@ -80,7 +80,7 @@ def test_spark_ui_exposes_topk_and_dense_step_layer_protection():
 
     schema = AttentionStrategy.GET_SCHEMA()
     spark = next(option for option in schema.inputs[1].options if option.key == "spark")
-    defaults = {item.id: item.default for item in spark.inputs}
+    defaults = {item.id: item.default for item in spark.inputs if item.id != "prefix_policy"}
     assert defaults == {"topk_ratio": 0.2, "dense_prefix_steps": 2, "dense_suffix_steps": 0,
                         "dense_prefix_layers": 0, "dense_suffix_layers": 0}
     values = {"strategy": "spark", **{f"strategy.{key}": value for key, value in defaults.items()}}
@@ -107,8 +107,9 @@ def test_spark_target_keeps_every_non_target_modality_exact():
         0,
         32,
     )
-    assert _target({ATTENTION_LAYOUT_KEY: layout}, 300) == ((3, 8, 8), 64, 256)
-    assert _target({}, 300) is None
+    policy = SparseProtection(sparse_reference_video=False)
+    assert _regions({ATTENTION_LAYOUT_KEY: layout}, 300, policy) == ((64, 256, (3, 8, 8), 64),)
+    assert _regions({}, 300, policy) is None
 
 
 def test_spark_exact_capacity_ties_keep_stable_parent_order():
@@ -254,7 +255,10 @@ def test_spark_topk_routes_have_exact_budget_and_stable_ties(columns, first, dis
     words = (blocks + 31) // 32
     for keep in sorted({1, max(1, columns // 5), columns}):
         routes = torch.full((2, 3, 7, words), 0x13579bdf, dtype=torch.int32, device="cuda")
-        native.spark_topk_routes(scores, routes, first, 2, blocks, keep)
+        candidates = torch.arange(first, first + columns, device="cuda", dtype=torch.int32)
+        sparse = torch.zeros(blocks, device="cuda", dtype=torch.uint8)
+        sparse[first:first + columns] = 1
+        native.spark_topk_protected_routes(scores, routes, candidates, sparse, 2, keep, first)
         selected = scores.argsort(dim=-1, descending=True, stable=True)[..., :keep]
         expected = torch.ones(2, 3, 3, blocks, dtype=torch.bool, device="cuda")
         expected[..., first:first + columns] = False
@@ -445,17 +449,20 @@ def _dequant(qi, ki, qs, ks):
 
 @cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_spark_cuda_fp32_summaries_and_partial_blocks(dtype):
+@pytest.mark.parametrize("selected", [None, [1, 2, 64, 65, 190, 258]])
+def test_spark_cuda_fp32_summaries_and_partial_blocks(dtype, selected):
     native = load_kernel_extension("_sage_qattn_sm75")
     torch.manual_seed(21)
     q, k, v = [torch.randn(2, 3, 259, 128, device="cuda", dtype=dtype) for _ in range(3)]
     qi, qs, ki, ks = per_warp_int8(q, k, fuse_qk=True)
     identity = torch.arange(259, device="cuda", dtype=torch.int32).expand(2, 3, -1).contiguous()
+    ids = None if selected is None else torch.tensor(selected, device="cuda", dtype=torch.int32)
     vi, vs, anchor, qm, km, ak, av, lm = native.spark_prepare_w8a8(
-        qi, ki, qs, ks, v, 64, 192, 128**-0.5, identity
+        qi, ki, qs, ks, v, 64, 192, 128**-0.5, identity, ids
     )
     qd, kd = _dequant(qi, ki, qs, ks)
-    torch.testing.assert_close(anchor, qd[..., 64:192, :].mean(-2), atol=0.00001, rtol=0.0001)
+    reference_q = qd[..., 64:192, :] if ids is None else qd.index_select(-2, ids)
+    torch.testing.assert_close(anchor, reference_q.mean(-2), atol=0.00001, rtol=0.0001)
     expected = reweight_reference(anchor, kd, v, value_scale=vs)
     for actual, reference in zip((ak, av, lm), expected):
         torch.testing.assert_close(

@@ -228,12 +228,33 @@ def sla_inputs():
     }
 
 
+def _protection_inputs(*, sparse_video):
+    # The same nested controls and serialization for every sparse strategy.
+    source = sol_inputs()["required"]
+    names = ("prefix_policy", "manual_prefix_tokens", "sparse_reference_image",
+             "sparse_reference_video", "sparse_reference_audio")
+    result = {name: (source[name][0], dict(source[name][1])) for name in names}
+    result["manual_prefix_tokens"][1]["tooltip"] = (
+        "Protect the first N original packed tokens in both Query and K/V. "
+        "A block touching the boundary is protected in full."
+    )
+    for name in names[2:]:
+        result[name][1]["tooltip"] = (
+            "Allow this reference modality to participate in sparse attention. "
+            "Disabled keeps its Query dense and its K/V exact. "
+            "Image includes keyframes and reference-video anchors; audio affects reference audio only."
+        )
+    result["sparse_reference_video"][1]["default"] = sparse_video
+    return result
+
+
 def spark_inputs():
     return {
         "required": {
             "model": ("MODEL",),
             "topk_ratio": ("FLOAT", {"default": 0.2, "min": 0.01, "max": 1.0, "step": 0.01,
-                "tooltip": "Exact target-video block budget. Reference blocks are additional exact sinks; 1 bypasses reblocking and runs dense attention."}),
+                "tooltip": "Exact block budget among unprotected candidates. Protected blocks are additional; 1 runs dense attention."}),
+            **_protection_inputs(sparse_video=False),
             "dense_prefix_steps": ("INT", {"default": 2, "min": 0, "max": 1000,
                 "tooltip": "Leading steps using W8A8 dense attention across all layers. H3 KSampler counts sampling and upscale as one task; ordinary samplers count separately. Zero disables this protection."}),
             "dense_suffix_steps": ("INT", {"default": 0, "min": 0, "max": 1000,
@@ -272,6 +293,7 @@ def veda_inputs():
                     "tooltip": "0 uses the predictor's trained keep ratio; 1 keeps references dense in both directions.",
                 },
             ),
+            **_protection_inputs(sparse_video=True),
             "plan_policy": (["nearest", "strict"],),
             "dense_prefix_steps": ("INT", {"default": 0, "min": 0, "max": 10000}),
             "dense_suffix_steps": ("INT", {"default": 0, "min": 0, "max": 10000}),

@@ -86,17 +86,13 @@ def _reblock_groups(tokens: int):
     return tuple(groups)
 
 
-def reblock(query, key, *, grid, start=0, stop=None):
-    """Return one K-derived permutation reused by Q and V, including exact tails."""
-    stop = key.size(-2) if stop is None else stop
-    tokens = stop - start
-    if tuple(query.shape) != tuple(key.shape) or math.prod(grid) != tokens:
-        raise ValueError("Spark reblocking requires matching self-attention and target grid")
-    full_tokens = tokens // BLOCK * BLOCK
-    batch, heads, sequence, dim = key.shape
-    sampled = (
-        torch.tensor(_metric_indices(tuple(grid)), device=query.device, dtype=torch.long) + start
-    )
+def _cluster_indices(query, key, *, grid, start, stop, grid_start):
+    full_tokens = (stop - start) // BLOCK * BLOCK
+    batch, heads, _, dim = key.shape
+    metric = tuple(index + grid_start for index in _metric_indices(tuple(grid))
+                   if start <= index + grid_start < stop)
+    sampled = torch.tensor(metric or ((start + stop) // 2,),
+                           device=query.device, dtype=torch.long)
     opposite = query.index_select(-2, sampled).float().reshape(-1, sampled.numel(), dim)
     moment = opposite.transpose(1, 2) @ opposite / sampled.numel()
     moment = (moment + moment.transpose(1, 2)) * 0.5
@@ -135,19 +131,55 @@ def reblock(query, key, *, grid, start=0, stop=None):
             )
             native.spark_group_indices(indices, node_offsets, node_tokens, ordered)
             del node_indices, directions, scores, ordered
-    return native.spark_finalize_permutation(indices, sequence, start).reshape(
-        batch, heads, sequence
+    return indices
+
+
+def reblock(query, key, *, grid, start=0, stop=None):
+    """Return one K-derived permutation reused by Q and V, including exact tails."""
+    from .. import _sage_qattn_sm75 as native
+
+    stop = key.size(-2) if stop is None else stop
+    if tuple(query.shape) != tuple(key.shape) or math.prod(grid) != stop - start:
+        raise ValueError("Spark reblocking requires matching self-attention and target grid")
+    indices = _cluster_indices(query, key, grid=grid, start=start, stop=stop, grid_start=start)
+    return native.spark_finalize_permutation(indices, key.size(-2), start).reshape(
+        *key.shape[:3]
     )
 
 
 def spark_attention(
-    query, key, value, *, grid, start, stop, topk_ratio=0.2, sm_scale=None
+    query, key, value, *, grid=None, start=None, stop=None, regions=None,
+    topk_ratio=0.2, sm_scale=None,
 ):
-    """Reblock → quantize → weighted summaries → packed Top-K → fused attention."""
+    """Cluster disjoint unprotected spans, then route exact Top-K plus protected KV."""
     from .. import _sage_qattn_sm75 as native
     from .. import _sage_fused_sm75 as fused
 
-    permutation = reblock(query, key, grid=grid, start=start, stop=stop)
+    if regions is None:
+        regions = ((start, stop, grid, start),)
+    if query.shape != key.shape or key.shape != value.shape or not regions:
+        raise ValueError("Spark requires matching Q/K/V and nonempty sparse regions")
+    previous = 0
+    for first, last, region_grid, origin in regions:
+        if not (previous <= first < last <= query.size(-2)
+                and origin <= first and last <= origin + math.prod(region_grid)
+                and last // BLOCK - (first + BLOCK - 1) // BLOCK >= 1):
+            raise ValueError("Spark sparse regions overlap, exceed their grid or contain no full block")
+        previous = last
+    permutation = None
+    for first, last, region_grid, origin in regions:
+        indices = _cluster_indices(query, key, grid=region_grid, start=first,
+                                   stop=last, grid_start=origin)
+        if permutation is None:
+            permutation = native.spark_finalize_permutation(indices, key.size(-2), first).reshape(
+                *key.shape[:3]
+            )
+        else:
+            permutation[..., first:first + indices.size(-1)].copy_(
+                indices.reshape(*key.shape[:2], -1) + first
+            )
+    del indices
+    start, stop = regions[0][:2]
     batch, heads, tokens, dim = query.shape
     blocks = (tokens + BLOCK - 1) // BLOCK
     qi = torch.empty(query.shape, device=query.device, dtype=torch.int8)
@@ -160,27 +192,38 @@ def spark_attention(
     )
     del query, key
     scale = value.size(-1) ** -0.5 if sm_scale is None else float(sm_scale)
+    anchor_indices = None
+    if len(regions) > 1:
+        anchor_indices = torch.cat([
+            torch.arange(first, last, device=qi.device, dtype=torch.int32)
+            for first, last, _, _ in regions
+        ])
     vi, vs, anchor, qm, km, ak, av, lm = native.spark_prepare_w8a8(
-        qi, ki, qs, ks, value, start, stop, scale, permutation
+        qi, ki, qs, ks, value, start, stop, scale, permutation, anchor_indices
     )
-    del anchor
-    first_block = (start + BLOCK - 1) // BLOCK
-    last_block = stop // BLOCK
-    sparse_blocks = max(0, last_block - first_block)
-    keep = max(1, min(sparse_blocks, math.ceil(sparse_blocks * topk_ratio)))
+    del anchor, anchor_indices
+    candidate_ids = tuple(block for first, last, _, _ in regions
+                          for block in range((first + BLOCK - 1) // BLOCK, last // BLOCK))
+    candidates = torch.tensor(candidate_ids, device=ki.device, dtype=torch.int32)
+    candidate_set = set(candidate_ids)
+    sparse_query = torch.tensor([int(block in candidate_set) for block in range(blocks)],
+                                device=ki.device, dtype=torch.uint8)
+    contiguous = candidate_ids[-1] - candidate_ids[0] + 1 == len(candidate_ids)
+    first_block = candidate_ids[0] if contiguous else -1
+    keep = max(1, min(len(candidate_ids), math.ceil(len(candidate_ids) * topk_ratio)))
     routes = torch.empty(
         (batch, heads, blocks, (blocks + 31) // 32), device=ki.device, dtype=torch.int32
     )
     # Bound routing scratch independently of sequence length; never build a
     # complete H×Qblocks×Kblocks score matrix for a long video.
+    candidate_keys = (km[..., candidate_ids[0]:candidate_ids[-1] + 1, :]
+                      if contiguous else km.index_select(-2, candidates))
     for begin in range(0, qm.size(-2), 64):
-        scores = qm[..., begin : begin + 64, :] @ km[..., first_block:last_block, :].transpose(
-            -1, -2
+        scores = qm[..., begin : begin + 64, :] @ candidate_keys.transpose(-1, -2)
+        native.spark_topk_protected_routes(
+            scores, routes, candidates, sparse_query, begin, keep, first_block
         )
-        native.spark_topk_routes(scores, routes, first_block, begin, blocks, keep)
-    del qm, km
-    sparse_query = torch.zeros(qs.size(-1) // 4, device=ki.device, dtype=torch.uint8)
-    sparse_query[first_block:last_block] = 1
+    del qm, km, candidate_keys
     output = torch.empty_like(value)
     del value
     native.spark_sparse_w8a8_attn(

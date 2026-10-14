@@ -7,6 +7,7 @@ from dataclasses import dataclass, fields
 import torch
 
 from ....kernel_api import load_kernel_extension
+from ....attention.sparse_runtime import SparseProtection, unprotected_intervals
 from ....log import get_logger
 from ..memory_state import runtime_memory
 from . import h3_layout, tiling
@@ -36,6 +37,19 @@ class VedaConfig:
     reference_keep_ratio: float = 1.0
     plan_policy: str = "nearest"
     debug: bool = False
+    protection: SparseProtection = SparseProtection()
+
+
+def sparse_references(spec, config, options):
+    if config.reference_keep_ratio == 1:
+        return ()
+    query = config.protection.ranges(options, spec.seq_len)
+    key = config.protection.ranges(options, spec.seq_len, axis="key")
+    # Omit a span only if both axes are fully protected; partially protected
+    # spans retain the predictor's original tile geometry.
+    return tuple(s for s in spec.references
+                 if unprotected_intervals(s.start, s.start + s.grid[0]*s.grid[1]*s.grid[2], query)
+                 or unprotected_intervals(s.start, s.start + s.grid[0]*s.grid[1]*s.grid[2], key))
 
 
 def workspace_per_head(
@@ -47,6 +61,7 @@ def workspace_per_head(
     cache=None,
     *,
     chunk_tiles=32,
+    transformer_options=None,
 ) -> int:
     """CPU size planning before QKV projection chooses its head shard."""
     if config.keep_ratio == config.reference_keep_ratio == 1:
@@ -54,7 +69,7 @@ def workspace_per_head(
     spec = layout_spec(packed_layout, cache)
     bundle = config.bundle
     plan = bundle.plans.select(spec.target.grid).plan
-    references = spec.references if config.reference_keep_ratio < 1 else ()
+    references = sparse_references(spec, config, transformer_options)
     ref_tiles = sum(
         tiling.least_padding_shape(s.grid).num_tiles(s.grid) for s in references
     )
@@ -109,11 +124,11 @@ def pack_routes(
             device=indices.device,
             dtype=torch.int32,
         )
-    native.veda_pack_routes(
+    native.veda_pack_protected_routes(
         indices.contiguous(),
         keep.contiguous(),
         layout.valid_count,
-        layout.n_video_tiles,
+        layout.exact_kv,
         out,
         row_start,
     )
@@ -123,8 +138,7 @@ def pack_routes(
 def run_sparse_packed(packed, layout, routes, output_dtype):
     native = load_kernel_extension("_sage_qattn_sm75")
     device = packed.query_int8.device
-    sparse_queries = torch.zeros(layout.n_tiles * 2, dtype=torch.uint8, device=device)
-    sparse_queries[: layout.n_video_tiles * 2] = 1
+    sparse_queries = layout.sparse_query
     output = torch.empty(
         packed.query_int8.shape, device=device, dtype=packed.value.dtype
     )
@@ -163,6 +177,7 @@ def attend(
     prepare_chunk_tiles: int = -1,
     score_chunk_rows: int = 0,
     projector=None,
+    transformer_options=None,
 ):
     """HND tensors, already RMS-normalized and RoPE-transformed."""
     bundle = config.bundle
@@ -215,16 +230,21 @@ def attend(
         shape = plan.shapes[shape_id]
         # Keeping references dense means BOTH directions remain dense, not
         # merely allowing every video query to read the reference columns.
-        references = spec.references if config.reference_keep_ratio < 1 else ()
+        references = sparse_references(spec, config, transformer_options)
         spans = [
             tiling.TiledSpan(s.start, s.grid, tiling.least_padding_shape(s.grid))
             for s in references
         ]
         spans.append(tiling.TiledSpan(spec.target.start, spec.target.grid, shape))
-        layout_key = (shape, config.reference_keep_ratio < 1)
+        query_protected = config.protection.ranges(transformer_options, spec.seq_len)
+        key_protected = config.protection.ranges(transformer_options, spec.seq_len, axis="key")
+        layout_key = (shape, references, query_protected, key_protected)
         host_layout = None if cache is None else cache.get(layout_key)
         if host_layout is None:
-            host_layout = tiling.build_tile_layout(spans, spec.seq_len)
+            host_layout = tiling.build_tile_layout(
+                spans, spec.seq_len, dense_query_ranges=query_protected,
+                exact_kv_ranges=key_protected,
+            )
             if cache is not None:
                 cache[layout_key] = host_layout
         # Byte-bounded forward-local LRU. A single-entry cache thrashes when

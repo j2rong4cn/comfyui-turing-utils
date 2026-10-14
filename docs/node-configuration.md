@@ -8,14 +8,38 @@ parameter definitions. Do not patch these to implement our own visual convention
 DynamicCombo remains appropriate for genuinely mode-dependent input branches.
 
 Configure Attention Strategy selects Sol, SLA, Veda or Spark with DynamicCombo.
-Spark uses W8A8 independently of the loader and exposes five ordinary inputs:
-`topk_ratio=0.20`, `dense_prefix_steps=2`, `dense_suffix_steps=0`,
-`dense_prefix_layers=0`, and `dense_suffix_layers=0`. Step counts follow Sol's
-whole-task H3 timeline; they do not scale with task length. Reference modalities
-remain exact. Kernel 0.47.0 is required. The old backend, warmup and debug fields
-are removed; recreate Spark nodes saved with the previous schema. API calls with
-removed fields fail instead of changing numerical backend silently.
-`tests/browser/spark_attention.mjs` checks both renderers and value persistence.
+Spark and Veda require kernel 0.48.0 and expose the same protection controls
+as Sol/SLA: `prefix_policy=auto|none|manual`. Auto shows
+`sparse_reference_image`, `sparse_reference_video`, and `sparse_reference_audio`;
+manual shows `manual_prefix_tokens`, measured in the original packed sequence.
+False protects both Query and K/V; true permits sparse routing. Image includes
+keyframes and the first/last frames of reference video. Audio affects reference
+audio only. Text, target audio and unsupported layouts remain dense.
+
+Spark defaults to auto with all three reference switches false,
+`topk_ratio=0.20`, `dense_prefix_steps=2`, and the other dense step/layer counts
+zero. It uses W8A8 independently of the loader. Complete Landmark-v2 clustering
+is applied separately to unprotected spans; protected tokens never enter the
+clustering permutation. Mixed 64-token boundary blocks stay exact. Top-K counts
+only unprotected candidate blocks; protected K/V is additional.
+
+Veda defaults to auto with image/audio false and video true. Keep ratios of zero
+use the predictor's trained ratios, and all dense step/layer counts default to
+zero. Protection preserves the trained 3D tile geometry: touching a protected
+token protects the complete 128-token tile in both directions. Protected tiles
+are excluded from candidate budgets. `reference_keep_ratio=1` overrides sparse
+permissions and keeps every reference dense in both directions. Reference audio
+can use sequential 128-token tiles when enabled; this optional route is not a
+claim that the visual predictor was trained for audio. Keep it disabled unless
+the speed/quality tradeoff is validated for the intended audio task.
+
+None removes extra semantic protection; manual replaces auto with `[0,N)`.
+Both retain each algorithm's dense-only modalities. Dense steps follow Sol's
+whole-task H3 timeline, without ratios or a restart at upscale. The old Spark
+backend, warmup and debug fields remain removed. Recreate affected Spark/Veda
+nodes saved before the protection controls were added; no migration shim is
+installed. `tests/browser/spark_attention.mjs` covers both strategies, all three
+policies, both renderers and saved-value persistence.
 
 SeC positive_coords and negative_coords are optional socket-only STRING inputs,
 in that order immediately before bounding_box. Use native force_input rather

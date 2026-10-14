@@ -62,4 +62,11 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
     spark = [option for option in options if option["key"] == "spark"]
     assert len(spark) == 1
     options.remove(spark[0])
+    # Veda explicitly adds the same protection policy as Sol/SLA. Verify the
+    # addition before comparing all other existing serialized fields unchanged.
+    veda = next(option for option in options if option["key"] == "veda")
+    fields = veda["inputs"]["required"]
+    prefix = fields.pop("prefix_policy")
+    assert prefix[0] == "COMFY_DYNAMICCOMBO_V3"
+    assert [option["key"] for option in prefix[1]["options"]] == ["auto", "none", "manual"]
     assert actual == expected

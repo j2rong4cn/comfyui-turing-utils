@@ -595,6 +595,7 @@ def _veda_projected_head_group(
             layer=layer,
             head_start=head_start,
             cache=options.get("turing_utils_veda_forward_cache"),
+            transformer_options=options,
             projector=project,
             prepare_chunk_tiles=chunk_tiles,
         )
@@ -687,6 +688,7 @@ def _head_sharded_attention(
                             torch.cuda.get_device_capability(x.device),
                             transformer_options.get("turing_utils_veda_forward_cache"),
                             chunk_tiles=0,
+                            transformer_options=transformer_options,
                         )
                         * group
                     )
@@ -1020,6 +1022,7 @@ def _make_attention_forward(
                     x.element_size(),
                     torch.cuda.get_device_capability(x.device),
                     transformer_options.get("turing_utils_veda_forward_cache"),
+                    transformer_options=transformer_options,
                 )
         qkv_is_w8 = convrot_weight_kind(self.qkv_proj.weight) == "w8a8"
         runtime_plan = _runtime_activation_plan(base_model)

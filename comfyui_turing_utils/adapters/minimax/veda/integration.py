@@ -9,7 +9,7 @@ from ....attention.orchestration import install_attention_strategy
 from ....attention.execution import _attention_layer_metadata, _prepared_qk_transform
 from ....attention.patches import attention_base_runtime
 from ....attention.protocol import AttentionExecutionOutcome
-from ....attention.sparse_runtime import SparseSchedule
+from ....attention.sparse_runtime import SparseProtection, SparseSchedule
 from ....kernel_api import kernel_extension_has_symbol
 from ..layout import is_minimax_h3_model
 from .engine import VedaConfig, attend
@@ -74,6 +74,7 @@ def make_override(config: VedaConfig, dense_override, schedule: SparseSchedule):
                 layer=layer,
                 head_start=int(options.get("turing_utils_attention_head_start", 0)),
                 cache=options.get("turing_utils_veda_forward_cache"),
+                transformer_options=options,
             )
             cache = options.get("turing_utils_veda_forward_cache")
             if cache is not None:
@@ -179,7 +180,15 @@ def configure(
     dense_prefix_layers: int = 0,
     dense_suffix_layers: int = 0,
     debug: bool = False,
+    prefix_policy: str = "auto",
+    manual_prefix_tokens: int = 0,
+    sparse_reference_image: bool = False,
+    sparse_reference_video: bool = True,
+    sparse_reference_audio: bool = False,
 ):
+    protection = SparseProtection(prefix_policy, manual_prefix_tokens,
+                                  sparse_reference_image, sparse_reference_video,
+                                  sparse_reference_audio)
     if not is_minimax_h3_model(model):
         raise ValueError("Configure H3 Veda Sparse Attention requires MiniMax H3")
     if plan_policy not in ("nearest", "strict"):
@@ -188,7 +197,7 @@ def configure(
         "veda_sparse_online_attn",
         "veda_gather_pool",
         "veda_scatter_tiles",
-        "veda_pack_routes",
+        "veda_pack_protected_routes",
         "veda_prepare_scores",
         "veda_finish_selection",
     )
@@ -257,7 +266,7 @@ def configure(
         dense_prefix_layers=dense_prefix_layers,
         dense_suffix_layers=dense_suffix_layers,
     )
-    config = VedaConfig(bundle, keep_ratio, reference_keep_ratio, plan_policy, debug)
+    config = VedaConfig(bundle, keep_ratio, reference_keep_ratio, plan_policy, debug, protection)
     override = make_override(config, runtime.dense_override, schedule)
     installed = install_attention_strategy(
         model,

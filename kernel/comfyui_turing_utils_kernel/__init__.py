@@ -25,7 +25,7 @@ from .ops import (
 )
 from . import turing_sage
 
-__version__ = "0.47.0"
+__version__ = "0.48.0"
 
 __all__ = [
     "turing_fp16_int8_linear",

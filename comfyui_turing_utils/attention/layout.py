@@ -37,6 +37,25 @@ _ROLE_DEFAULTS = {
 }
 
 
+def regular_position_grid(position_ids, start, stop):
+    """Read a regular T/H/W grid from CPU layout metadata, never model tensors."""
+    if position_ids is None or position_ids.device.type != "cpu":
+        return None
+    pos = position_ids[start:stop]
+    if not len(pos):
+        return None
+    axes = [pos[:, axis].unique(sorted=True) for axis in range(3)]
+    t, h, w = (axis.numel() for axis in axes)
+    if t * h * w != stop - start:
+        return None
+    expected = (
+        axes[0].repeat_interleave(h * w),
+        axes[1].repeat_interleave(w).repeat(t),
+        axes[2].repeat(t * h),
+    )
+    return (t, h, w) if all(pos[:, i].equal(values) for i, values in enumerate(expected)) else None
+
+
 @dataclass(frozen=True, slots=True)
 class AttentionSegment:
     start: int

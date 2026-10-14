@@ -19,6 +19,7 @@ from ...attention.layout import (
     AttentionSemanticLayout,
     AttentionTopology,
     LayoutProviderStatus,
+    regular_position_grid,
 )
 from ..methods import OriginalMethod, weak_method
 from .memory_state import ActivationRuntimePlan
@@ -291,6 +292,31 @@ def minimax_temporal_topology(base_model, diffusion_model, mod_segments):
     }
 
 
+def _reference_topologies(base_model):
+    runtime = getattr(base_model, RUNTIME_CONTEXT_ATTR, None)
+    packed = _runtime_packed_layout(base_model)
+    if packed is None:
+        return ()
+    cached = runtime.get("reference_topologies") if isinstance(runtime, dict) else None
+    if cached is not None and cached[0] is packed:
+        return cached[1]
+    result = []
+    for start, stop, kind in packed.segments:
+        if kind not in {"cond", "ref_img"}:
+            continue
+        grid = regular_position_grid(getattr(packed, "position_ids", None), start, stop)
+        if grid is not None:
+            _, height, width = grid
+            result.append(AttentionTopology(
+                f"reference_{start}", "video_grid", start, stop,
+                height * width, height, width,
+            ))
+    result = tuple(result)
+    if isinstance(runtime, dict):
+        runtime["reference_topologies"] = (packed, result)
+    return result
+
+
 def publish_minimax_attention_layout(
     transformer_options,
     mod_segments,
@@ -314,12 +340,16 @@ def publish_minimax_attention_layout(
         }
     else:
         topology_id = "target_video"
+        references = _reference_topologies(base_model)
         segments = tuple(
             AttentionSegment.for_role(
                 start,
                 stop,
                 role,
-                topology_id=topology_id if role == "target_video" else None,
+                topology_id=topology_id if role == "target_video" else next(
+                    (item.topology_id for item in references
+                     if item.start <= start and stop <= item.stop), None
+                ),
             )
             for start, stop, role in raw_segments
         )
@@ -338,6 +368,7 @@ def publish_minimax_attention_layout(
                     int(topology["spatial_tokens_height"]),
                     int(topology["spatial_tokens_width"]),
                 ),
+                *references,
             ),
             layer_index=int(layer_index),
             layer_count=int(layer_count),
