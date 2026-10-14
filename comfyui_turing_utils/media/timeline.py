@@ -162,13 +162,11 @@ def _audio_timeline(
     return {"waveform": waveform, "sample_rate": sample_rate}, prefix_length
 
 
-def _prepare_mask(
-    mask, frames: int, height: int, width: int, default: float, device
-) -> torch.Tensor:
+def _write_mask(mask, output: torch.Tensor, default: float) -> None:
+    frames, height, width = output.shape
     if mask is None:
-        return torch.full(
-            (frames, height, width), default, device=device, dtype=torch.float32
-        )
+        output.fill_(default)
+        return
     if not torch.is_tensor(mask) or mask.ndim not in (2, 3):
         shape = tuple(mask.shape) if hasattr(mask, "shape") else type(mask).__name__
         raise ValueError(
@@ -176,22 +174,25 @@ def _prepare_mask(
         )
     if mask.ndim == 2:
         mask = mask.unsqueeze(0)
-    if int(mask.shape[0]) == 1 and frames != 1:
-        mask = mask.expand(frames, -1, -1)
-    elif int(mask.shape[0]) != frames:
+    if int(mask.shape[0]) not in (1, frames):
         raise ValueError(
             f"MASK contains {int(mask.shape[0])} frames, expected 1 or {frames}"
         )
-    if not mask.dtype.is_floating_point and mask.dtype != torch.bool:
-        mask = mask.float()
-    if not torch.isfinite(mask).all() or mask.amin() < 0 or mask.amax() > 1:
-        raise ValueError("MASK values must be finite and within [0,1]")
-    mask = mask.to(device=device, dtype=torch.float32)
-    if tuple(mask.shape[-2:]) != (height, width):
-        mask = F.interpolate(
-            mask.unsqueeze(1), size=(height, width), mode="nearest"
-        ).squeeze(1)
-    return mask.clone()
+    for index in range(mask.shape[0]):
+        frame = mask[index : index + 1]
+        if not frame.dtype.is_floating_point and frame.dtype != torch.bool:
+            frame = frame.float()
+        if not torch.isfinite(frame).all() or frame.amin() < 0 or frame.amax() > 1:
+            raise ValueError("MASK values must be finite and within [0,1]")
+        frame = frame.to(device=output.device, dtype=torch.float32)
+        if tuple(frame.shape[-2:]) != (height, width):
+            frame = F.interpolate(
+                frame.unsqueeze(1), size=(height, width), mode="nearest"
+            ).squeeze(1)
+        if mask.shape[0] == 1:
+            output.copy_(frame)
+        else:
+            output[index : index + 1].copy_(frame)
 
 
 def _trim_info_values(trim_info):
@@ -245,11 +246,9 @@ def concat_video_continuation(
             f"replace mode cannot fit {prefix_frames} prefix frames into a {int(body_frames)}-frame body"
         )
 
-    prefix_mask = _prepare_mask(
-        prefix_mask, prefix_frames, height, width, 0.0, body_images.device
-    )
-    body_mask = _prepare_mask(
-        body_mask, int(body_frames), height, width, 1.0, body_images.device
+    total_frames = int(body_frames) + (prefix_frames if mode == "concat" else 0)
+    mask = torch.empty(
+        (total_frames, height, width), device=body_images.device, dtype=torch.float32
     )
     if mode == "concat":
         images = (
@@ -257,7 +256,8 @@ def concat_video_continuation(
             if prefix_images is None
             else torch.cat((prefix_images, body_images), dim=0)
         )
-        mask = torch.cat((prefix_mask, body_mask), dim=0)
+        _write_mask(prefix_mask, mask[:prefix_frames], 0.0)
+        _write_mask(body_mask, mask[prefix_frames:], 1.0)
         trim_frames = prefix_frames
     else:
         images = (
@@ -265,9 +265,9 @@ def concat_video_continuation(
             if prefix_images is None
             else torch.cat((prefix_images, body_images[prefix_frames:]), dim=0)
         )
-        mask = body_mask.clone()
+        _write_mask(body_mask, mask, 1.0)
         if prefix_frames > 0:
-            mask[:prefix_frames] = prefix_mask
+            _write_mask(prefix_mask, mask[:prefix_frames], 0.0)
         trim_frames = prefix_frames
     audio, prefix_audio_samples = _audio_timeline(
         prefix_audio,

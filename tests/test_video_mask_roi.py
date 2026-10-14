@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 import torch
+import torch.nn.functional as F
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -18,10 +20,55 @@ from comfyui_turing_utils.nodes.video_roi import (  # noqa: E402
     VideoPadForOutpaint,
 )
 from comfyui_turing_utils.media.geometry import (
+    _blur_masks,
     crop_video_by_mask,
     pad_video_for_outpaint,
     stitch_video_crops,
 )
+
+
+def _reference_blur(masks, radius):
+    if radius <= 0:
+        return masks
+    offsets = torch.arange(-radius, radius + 1, device=masks.device, dtype=masks.dtype)
+    kernel = torch.exp(-offsets.square() / (2 * max(radius / 3, 0.5) ** 2))
+    kernel /= kernel.sum()
+    values = F.conv2d(
+        F.pad(masks[:, None], (radius, radius, 0, 0), mode="replicate"),
+        kernel.reshape(1, 1, 1, -1),
+    )
+    return F.conv2d(
+        F.pad(values, (0, 0, radius, radius), mode="replicate"),
+        kernel.reshape(1, 1, -1, 1),
+    )[:, 0]
+
+
+def _reference_stitch(base, crops, masks, boxes, radius):
+    """Original full-canvas, whole-batch implementation as a numerical oracle."""
+    frames, height, width, _ = base.shape
+    dtype = base.dtype
+    if base.device.type != "cuda" and dtype not in (torch.float32, torch.float64):
+        dtype = torch.float32
+    theta = torch.tensor(
+        [
+            [[width / w, 0, (width - 2 * x - w) / w],
+             [0, height / h, (height - 2 * y - h) / h]]
+            for x, y, w, h in boxes
+        ],
+        device=base.device,
+        dtype=dtype,
+    )
+    grid = F.affine_grid(theta, base.movedim(-1, 1).shape, align_corners=False)
+    warped = F.grid_sample(
+        crops[:frames].movedim(-1, 1).to(device=base.device, dtype=dtype),
+        grid, align_corners=False,
+    ).movedim(1, -1)
+    masks = masks[:frames].detach().float().unsqueeze(1)
+    if masks.shape[-2:] != crops.shape[1:3]:
+        masks = F.interpolate(masks, size=crops.shape[1:3], mode="bilinear", align_corners=False)
+    masks = F.grid_sample(masks.to(device=base.device, dtype=dtype), grid, align_corners=False)
+    alpha = _reference_blur(masks[:, 0].clamp(0, 1), radius).clamp(0, 1).unsqueeze(-1)
+    return (base.to(dtype=dtype) * (1 - alpha) + warped * alpha).to(base.dtype)
 
 
 def _crop(images, masks, **overrides):
@@ -38,6 +85,110 @@ def _crop(images, masks, **overrides):
 
 
 class VideoMaskRoiTest(unittest.TestCase):
+    def test_cpu_feather_matches_original_for_soft_masks_and_large_radii(self):
+        generator = torch.Generator().manual_seed(31)
+        for dtype in (torch.float32, torch.float64):
+            for shape in ((3, 23, 27), (1, 1, 9), (2, 7, 1)):
+                masks = torch.rand(shape, generator=generator, dtype=dtype)[:, ::2]
+                before = masks.clone()
+                for radius in (0, 1, 8, 32, 256):
+                    with self.subTest(dtype=dtype, shape=shape, radius=radius):
+                        actual = _blur_masks(masks, radius)
+                        expected = _reference_blur(masks, radius)
+                        tolerance = 1e-6 if dtype == torch.float32 else 1e-12
+                        torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+                self.assertTrue(torch.equal(masks, before))
+
+    def test_local_stitch_matches_original_with_motion_edges_and_resized_masks(self):
+        generator = torch.Generator().manual_seed(79)
+        boxes = [
+            (-2.25, 4.75, 13.5, 12.25),
+            (37.2, 29.3, 7.75, 19.5),
+            (80.5, 55.25, 27.5, 22.25),
+            (0.0, 0.0, 101.0, 73.0),
+            (44.25, 22.3, 2.5, 1.75),
+        ]
+        info = {"version": 1, "frames": 5, "source_size": (101, 73), "boxes": boxes}
+        for dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16):
+            base = torch.rand((5, 73, 101, 3), generator=generator, dtype=dtype)
+            crops = torch.rand((7, 19, 23, 3), generator=generator, dtype=dtype)
+            masks = torch.rand((7, 11, 13), generator=generator)
+            masks[0] = 1
+            masks[2] = 0
+            before = [value.clone() for value in (base, crops, masks)]
+            for radius in (0, 8, 24):
+                with self.subTest(dtype=dtype, radius=radius):
+                    expected = _reference_stitch(base, crops, masks, boxes, radius)
+                    actual = stitch_video_crops(base, crops, masks, info, radius)
+                    tolerance = {
+                        torch.float32: 2e-6,
+                        torch.float64: 1e-12,
+                        torch.float16: 5e-4,
+                        torch.bfloat16: 4e-3,
+                    }[dtype]
+                    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+                    self.assertTrue(torch.equal(actual[2], base[2]))
+            for value, original in zip((base, crops, masks), before):
+                self.assertTrue(torch.equal(value, original))
+
+    def test_stitch_has_no_cross_frame_dependency(self):
+        base = torch.full((3, 64, 96, 3), 0.25)
+        crops = torch.full((3, 13, 17, 3), 0.75)
+        masks = torch.ones((3, 13, 17))
+        boxes = [(27.25, 19.75, 16.5, 13.25)] * 3
+        info = {"version": 1, "frames": 3, "source_size": (96, 64), "boxes": boxes}
+        output = stitch_video_crops(base, crops, masks, info, feather=8)
+        self.assertTrue(torch.equal(output[0], output[1]))
+        self.assertTrue(torch.equal(output[1], output[2]))
+        single_info = {**info, "frames": 1, "boxes": boxes[:1]}
+        single = stitch_video_crops(base[:1], crops[:1], masks[:1], single_info, feather=8)
+        self.assertTrue(torch.equal(output[:1], single))
+        torch.testing.assert_close(output, _reference_stitch(base, crops, masks, boxes, 8))
+
+    def test_stitch_limits_sampling_to_one_frame_and_local_region(self):
+        base = torch.zeros((4, 256, 384, 3))
+        crops = torch.ones((4, 16, 16, 3))
+        masks = torch.ones((4, 16, 16))
+        boxes = [(80.25 + i, 60.75 + i, 20.5, 18.5) for i in range(4)]
+        info = {"version": 1, "frames": 4, "source_size": (384, 256), "boxes": boxes}
+        with mock.patch.object(F, "grid_sample", wraps=F.grid_sample) as sample:
+            with mock.patch.object(F, "conv2d", side_effect=AssertionError("CPU feather used conv2d")):
+                output = stitch_video_crops(base, crops, masks, info, feather=8)
+        self.assertEqual(output.shape, base.shape)
+        self.assertEqual(sample.call_count, 8)
+        for call in sample.call_args_list:
+            grid = call.args[1]
+            self.assertEqual(grid.shape[0], 1)
+            self.assertLess(grid.shape[1] * grid.shape[2], 64 * 64)
+        self.assertTrue(torch.equal(output[:, :32], base[:, :32]))
+
+    def test_stitch_handles_single_pixel_canvas_dimensions(self):
+        for height, width in ((1, 1), (1, 19), (17, 1)):
+            base = torch.zeros((1, height, width, 3))
+            crops = torch.ones((1, 3, 5, 3))
+            masks = torch.ones((1, 3, 5))
+            boxes = [(0.0, 0.0, float(width), float(height))]
+            info = {"version": 1, "frames": 1, "source_size": (width, height), "boxes": boxes}
+            with self.subTest(height=height, width=width):
+                actual = stitch_video_crops(base, crops, masks, info, feather=8)
+                torch.testing.assert_close(actual, _reference_stitch(base, crops, masks, boxes, 8))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_cuda_stitch_keeps_dtype_device_and_wide_canvas_sampling(self):
+        generator = torch.Generator(device="cuda").manual_seed(19)
+        boxes = [(5000.25, 9.75, 16.5, 12.25), (1800.75, 22.5, 27.25, 10.5)]
+        info = {"version": 1, "frames": 2, "source_size": (8192, 48), "boxes": boxes}
+        for dtype in (torch.float32, torch.float16):
+            base = torch.rand((2, 48, 8192, 3), generator=generator, device="cuda", dtype=dtype)
+            crops = torch.rand((2, 16, 32, 3), generator=generator, device="cuda", dtype=dtype)
+            masks = torch.ones((2, 16, 32), device="cuda")
+            for radius in (0, 8):
+                with self.subTest(dtype=dtype, radius=radius):
+                    actual = stitch_video_crops(base, crops, masks, info, radius)
+                    expected = _reference_stitch(base, crops, masks, boxes, radius)
+                    tolerance = 2e-6 if dtype == torch.float32 else 1e-3
+                    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+
     def test_schemas_keep_crop_info_last_and_share_one_custom_type(self):
         crop = VideoMaskGuidedCrop.define_schema()
         stitch = VideoMaskGuidedStitch.define_schema()

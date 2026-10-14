@@ -111,14 +111,21 @@ def resize_image_if_present(
             raise ValueError(
                 f"mask must be shaped [batch,height,width], got {tuple(mask.shape)}"
             )
-        if mask.shape[-2:] != image.shape[1:3]:
-            mask = _resize_tensor_mask(mask, int(image.shape[2]), int(image.shape[1]))
 
     source_height, source_width = int(image.shape[1]), int(image.shape[2])
     width, height = int(width), int(height)
     if width < 0 or height < 0:
         raise ValueError("width and height must be non-negative")
     if width == 0 and height == 0:
+        if mask is not None and mask.shape[-2:] != image.shape[1:3]:
+            output_mask = mask.new_empty((mask.shape[0], source_height, source_width))
+            for index in range(mask.shape[0]):
+                output_mask[index : index + 1].copy_(
+                    _resize_tensor_mask(
+                        mask[index : index + 1], source_width, source_height
+                    )
+                )
+            mask = output_mask
         return image, mask, source_width, source_height
 
     target_width, target_height = _resolved_size(
@@ -128,14 +135,12 @@ def resize_image_if_present(
     target_width = _align_dimension(target_width, multiple)
     target_height = _align_dimension(target_height, multiple)
 
+    crop_x = crop_y = 0
+    crop_width, crop_height = source_width, source_height
+    content_width, content_height = target_width, target_height
     if resize_mode == "stretch" or width == 0 or height == 0:
-        output = _resize_tensor_image(
-            image, target_width, target_height, upscale_method
-        )
-        output_mask = _resize_tensor_mask(mask, target_width, target_height)
-        return output, output_mask, target_width, target_height
-
-    if resize_mode == "crop":
+        resize_mode = "stretch"
+    elif resize_mode == "crop":
         source_aspect = source_width / source_height
         target_aspect = target_width / target_height
         if source_aspect > target_aspect:
@@ -144,56 +149,62 @@ def resize_image_if_present(
         else:
             crop_width = source_width
             crop_height = max(1, round(source_width / target_aspect))
-        x, y = _position_offset(
+        crop_x, crop_y = _position_offset(
             source_width - crop_width, source_height - crop_height, crop_position
         )
-        image = image[:, y : y + crop_height, x : x + crop_width]
-        if mask is not None:
-            mask = mask[:, y : y + crop_height, x : x + crop_width]
-        output = _resize_tensor_image(
-            image, target_width, target_height, upscale_method
-        )
-        output_mask = _resize_tensor_mask(mask, target_width, target_height)
-        return output, output_mask, target_width, target_height
-
-    ratio = min(target_width / source_width, target_height / source_height)
-    content_width = min(target_width, max(1, round(source_width * ratio)))
-    content_height = min(target_height, max(1, round(source_height * ratio)))
-    content_width = min(target_width, _align_dimension(content_width, multiple))
-    content_height = min(target_height, _align_dimension(content_height, multiple))
-    output = _resize_tensor_image(image, content_width, content_height, upscale_method)
-    output_mask = _resize_tensor_mask(mask, content_width, content_height)
+    else:
+        ratio = min(target_width / source_width, target_height / source_height)
+        content_width = min(target_width, max(1, round(source_width * ratio)))
+        content_height = min(target_height, max(1, round(source_height * ratio)))
+        content_width = min(target_width, _align_dimension(content_width, multiple))
+        content_height = min(target_height, _align_dimension(content_height, multiple))
     if resize_mode == "fit":
-        return output, output_mask, content_width, content_height
+        target_width, target_height = content_width, content_height
 
     extra_width = target_width - content_width
     extra_height = target_height - content_height
     x, y = _position_offset(extra_width, extra_height, crop_position)
     left, right = x, extra_width - x
     top, bottom = y, extra_height - y
-    if resize_mode == "pad_edge":
-        output = F.pad(
-            output.movedim(-1, 1), (left, right, top, bottom), mode="replicate"
-        ).movedim(1, -1)
-        if output_mask is not None:
-            output_mask = F.pad(
-                output_mask.unsqueeze(1), (left, right, top, bottom), mode="replicate"
-            ).squeeze(1)
-    else:
-        fill = _pad_color(pad_color, int(output.shape[-1]), output.device, output.dtype)
-        canvas = (
-            fill.reshape(1, 1, 1, -1)
-            .expand(output.shape[0], target_height, target_width, -1)
-            .clone()
-        )
-        canvas[:, top : top + content_height, left : left + content_width] = output
-        output = canvas
-        if output_mask is not None:
-            mask_canvas = output_mask.new_zeros(
-                (output_mask.shape[0], target_height, target_width)
-            )
-            mask_canvas[:, top : top + content_height, left : left + content_width] = (
-                output_mask
-            )
-            output_mask = mask_canvas
+    output = image.new_empty(
+        (image.shape[0], target_height, target_width, image.shape[-1])
+    )
+    needs_padding = extra_width > 0 or extra_height > 0
+    if needs_padding and resize_mode != "pad_edge":
+        output.copy_(_pad_color(pad_color, image.shape[-1], image.device, image.dtype))
+    for index in range(image.shape[0]):
+        frame = image[
+            index : index + 1,
+            crop_y : crop_y + crop_height,
+            crop_x : crop_x + crop_width,
+        ]
+        frame = _resize_tensor_image(frame, content_width, content_height, upscale_method)
+        if needs_padding and resize_mode == "pad_edge":
+            frame = F.pad(
+                frame.movedim(-1, 1), (left, right, top, bottom), mode="replicate"
+            ).movedim(1, -1)
+            output[index : index + 1].copy_(frame)
+        else:
+            output[
+                index : index + 1, top : top + content_height, left : left + content_width
+            ].copy_(frame)
+
+    output_mask = None
+    if mask is not None:
+        output_mask = mask.new_zeros((mask.shape[0], target_height, target_width))
+        for index in range(mask.shape[0]):
+            frame = mask[index : index + 1]
+            if frame.shape[-2:] != (source_height, source_width):
+                frame = _resize_tensor_mask(frame, source_width, source_height)
+            frame = frame[:, crop_y : crop_y + crop_height, crop_x : crop_x + crop_width]
+            frame = _resize_tensor_mask(frame, content_width, content_height)
+            if needs_padding and resize_mode == "pad_edge":
+                frame = F.pad(
+                    frame.unsqueeze(1), (left, right, top, bottom), mode="replicate"
+                ).squeeze(1)
+                output_mask[index : index + 1].copy_(frame)
+            else:
+                output_mask[
+                    index : index + 1, top : top + content_height, left : left + content_width
+                ].copy_(frame)
     return output, output_mask, target_width, target_height

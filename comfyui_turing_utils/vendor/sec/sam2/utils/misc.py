@@ -304,21 +304,27 @@ def load_video_frames_from_tensor(
         )
 
     video_height, video_width = int(frames.shape[1]), int(frames.shape[2])
-    images = frames[..., :3].detach().to(device="cpu", dtype=torch.float32)
-    images = images.movedim(-1, 1).contiguous()
-    images = F.interpolate(
-        images,
-        size=(image_size, image_size),
-        mode="bilinear",
-        align_corners=False,
-        antialias=True,
-    )
-
     target_device = torch.device("cpu") if offload_video_to_cpu else compute_device
-    images = images.to(target_device)
+    images = torch.empty(
+        (frames.shape[0], 3, image_size, image_size),
+        dtype=torch.float32,
+        device=target_device,
+    )
     mean = torch.tensor(img_mean, dtype=torch.float32, device=target_device)[:, None, None]
     std = torch.tensor(img_std, dtype=torch.float32, device=target_device)[:, None, None]
-    images.sub_(mean).div_(std)
+    for index in range(frames.shape[0]):
+        frame = frames[index : index + 1, ..., :3].detach().to(
+            device="cpu", dtype=torch.float32
+        )
+        frame = F.interpolate(
+            frame.movedim(-1, 1).contiguous(),
+            size=(image_size, image_size),
+            mode="bilinear",
+            align_corners=False,
+            antialias=True,
+        )
+        images[index].copy_(frame[0])
+        images[index].sub_(mean).div_(std)
     return images, video_height, video_width
 
 

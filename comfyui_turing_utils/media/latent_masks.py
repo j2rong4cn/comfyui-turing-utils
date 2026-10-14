@@ -27,7 +27,13 @@ def _video_samples(samples):
 def _validate_mask_values(mask):
     if mask.is_complex() or any(size < 1 for size in mask.shape):
         raise ValueError("MASK must contain non-empty, real-valued frames.")
-    if not torch.isfinite(mask).all() or mask.amin() < 0 or mask.amax() > 1:
+    minimum, maximum = mask.amin(), mask.amax()
+    if (
+        not torch.isfinite(minimum)
+        or not torch.isfinite(maximum)
+        or minimum < 0
+        or maximum > 1
+    ):
         raise ValueError(
             "MASK values must be finite and within [0,1]; 0 preserves and 1 redraws."
         )
@@ -53,7 +59,7 @@ def _map_video_mask(video, mask, model_type, *, hard=False):
             f"MASK batch must be 1 or match video batch {batch}; got {mask_batch}."
         )
 
-    groups = None
+    groups = (1,) * latent_frames
     if mask_frames != latent_frames:
         groups = _image_frame_groups(model_type, latent_frames)
         expected_frames = sum(groups)
@@ -64,18 +70,29 @@ def _map_video_mask(video, mask, model_type, *, hard=False):
                 "No temporal interpolation, padding, or truncation is performed."
             )
 
-    # Hard coverage is decided before float32 conversion, including tiny positive inputs.
-    mask = (mask > 0).float() if hard else mask.float()
-    # Spatial and temporal maxima commute; shrink first to avoid large temporal intermediates.
-    if (mask_height, mask_width) != (height, width):
-        mask = F.adaptive_max_pool2d(
-            mask.reshape(-1, 1, mask_height, mask_width), (height, width)
-        ).reshape(mask_batch, mask_frames, height, width)
-    if groups is not None:
-        mask = torch.stack(
-            [part.amax(dim=1) for part in mask.split(groups, dim=1)], dim=1
-        )
-    return mask.unsqueeze(1).expand(batch, 1, latent_frames, height, width).clone()
+    output = torch.empty(
+        (batch, 1, latent_frames, height, width), device=mask.device, dtype=torch.float32
+    )
+    for batch_index in range(mask_batch):
+        start = 0
+        for latent_index, count in enumerate(groups):
+            destination = output[batch_index, 0, latent_index]
+            for frame_index in range(start, start + count):
+                frame = mask[batch_index, frame_index]
+                # Decide hard coverage before float32, including tiny positive inputs.
+                frame = (frame > 0).float() if hard else frame.float()
+                if (mask_height, mask_width) != (height, width):
+                    frame = F.adaptive_max_pool2d(
+                        frame[None, None], (height, width)
+                    )[0, 0]
+                if frame_index == start:
+                    destination.copy_(frame)
+                else:
+                    destination.copy_(torch.maximum(destination, frame))
+            start += count
+    if mask_batch == 1 and batch > 1:
+        output[1:].copy_(output[:1])
+    return output
 
 
 def binary_video_latent_mask(video, mask):

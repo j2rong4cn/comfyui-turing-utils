@@ -37,8 +37,10 @@ def repeat_last_frame(tensor: torch.Tensor, count: int) -> torch.Tensor:
         return tensor
     if tensor.shape[0] < 1:
         raise ValueError("Cannot repeat the final item of an empty tensor")
-    tail = tensor[-1:].repeat(count, *([1] * (tensor.ndim - 1)))
-    return torch.cat((tensor, tail), dim=0)
+    output = tensor.new_empty((tensor.shape[0] + count, *tensor.shape[1:]))
+    output[: tensor.shape[0]].copy_(tensor)
+    output[tensor.shape[0] :].copy_(tensor[-1:])
+    return output
 
 
 def validate_frame_mask(mask, frame_count: int, height: int, width: int):

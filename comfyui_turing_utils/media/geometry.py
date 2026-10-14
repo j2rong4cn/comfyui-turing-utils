@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -25,12 +26,7 @@ def _validate_images(images: torch.Tensor, name: str) -> tuple[int, int, int, in
     return frames, height, width, channels
 
 
-def _prepare_masks(
-    masks: torch.Tensor,
-    frames: int,
-    height: int,
-    width: int,
-) -> torch.Tensor:
+def _validate_masks(masks: torch.Tensor, frames: int) -> torch.Tensor:
     if not torch.is_tensor(masks):
         raise ValueError(f"masks must be a MASK tensor, got {type(masks).__name__}")
     if masks.ndim == 2:
@@ -43,6 +39,10 @@ def _prepare_masks(
         raise ValueError(
             f"masks and images must have the same frame count; got {int(masks.shape[0])} and {frames}"
         )
+    return masks
+
+
+def _prepare_masks(masks: torch.Tensor, height: int, width: int) -> torch.Tensor:
     masks = masks.detach().float()
     if tuple(masks.shape[-2:]) != (height, width):
         masks = F.interpolate(
@@ -51,7 +51,8 @@ def _prepare_masks(
             mode="bilinear",
             align_corners=False,
         ).squeeze(1)
-    return masks.clamp_(0.0, 1.0)
+        return masks.clamp_(0.0, 1.0)
+    return masks.clamp(0.0, 1.0)
 
 
 def _mask_observations(
@@ -60,6 +61,8 @@ def _mask_observations(
     context_scale: float,
     output_ratio: float,
     max_crop_height: float,
+    source_height: int,
+    source_width: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     frames = int(masks.shape[0])
     centers_x = np.full(frames, np.nan, dtype=np.float64)
@@ -67,11 +70,15 @@ def _mask_observations(
     log_heights = np.full(frames, np.nan, dtype=np.float64)
     valid = np.zeros(frames, dtype=bool)
 
-    masks_cpu = masks.detach().cpu()
     for index in range(frames):
-        ys, xs = torch.where(masks_cpu[index] >= threshold)
-        if int(xs.numel()) < 4:
+        frame = _prepare_masks(
+            masks[index : index + 1], source_height, source_width
+        )[0].cpu()
+        coverage = frame >= threshold
+        if int(coverage.count_nonzero()) < 4:
             continue
+        ys = torch.where(coverage.any(dim=1))[0]
+        xs = torch.where(coverage.any(dim=0))[0]
         x0 = float(xs.min().item())
         x1 = float(xs.max().item()) + 1.0
         y0 = float(ys.min().item())
@@ -157,6 +164,8 @@ def mask_guided_crop_boxes(
         context_scale,
         ratio,
         max_crop_height,
+        source_height,
+        source_width,
     )
     centers_x = _smooth_series(
         _fill_missing(centers_x, valid, missing_mode), smooth_window
@@ -214,23 +223,6 @@ def _crop_theta(
     return theta
 
 
-def _stitch_theta(
-    boxes: list[tuple[float, float, float, float]],
-    source_width: int,
-    source_height: int,
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    theta = torch.zeros((len(boxes), 2, 3), device=device, dtype=dtype)
-    for index, (x, y, width, height) in enumerate(boxes):
-        theta[index, 0, 0] = source_width / width
-        theta[index, 1, 1] = source_height / height
-        theta[index, 0, 2] = (source_width - 2.0 * x - width) / width
-        theta[index, 1, 2] = (source_height - 2.0 * y - height) / height
-    return theta
-
-
 def crop_video_by_mask(
     images: torch.Tensor,
     masks: torch.Tensor,
@@ -242,7 +234,7 @@ def crop_video_by_mask(
     mask_threshold: float,
 ) -> tuple[torch.Tensor, torch.Tensor, dict]:
     frames, source_height, source_width, channels = _validate_images(images, "images")
-    masks = _prepare_masks(masks, frames, source_height, source_width)
+    masks = _validate_masks(masks, frames)
     boxes, valid = mask_guided_crop_boxes(
         masks,
         source_width,
@@ -256,7 +248,6 @@ def crop_video_by_mask(
     )
 
     sample_dtype = _sampling_dtype(images)
-    image_nchw = images.movedim(-1, 1).to(dtype=sample_dtype)
     theta = _crop_theta(
         boxes,
         source_width,
@@ -264,35 +255,38 @@ def crop_video_by_mask(
         device=images.device,
         dtype=sample_dtype,
     )
-    grid = F.affine_grid(
-        theta,
-        size=(frames, channels, int(height), int(width)),
-        align_corners=False,
+    cropped_images = images.new_empty((frames, int(height), int(width), channels))
+    cropped_masks = torch.empty(
+        (frames, int(height), int(width)), device=images.device, dtype=torch.float32
     )
-    cropped_images = (
-        F.grid_sample(
+    for index in range(frames):
+        grid = F.affine_grid(
+            theta[index : index + 1],
+            size=(1, channels, int(height), int(width)),
+            align_corners=False,
+        )
+        image_nchw = images[index : index + 1].movedim(-1, 1).to(sample_dtype)
+        cropped = F.grid_sample(
             image_nchw,
             grid,
             mode="bilinear",
             padding_mode="border",
             align_corners=False,
         )
-        .movedim(1, -1)
-        .to(dtype=images.dtype)
-    )
-    mask_nchw = masks.to(device=images.device, dtype=sample_dtype).unsqueeze(1)
-    cropped_masks = (
-        F.grid_sample(
+        cropped_images[index].copy_(cropped[0].movedim(0, -1))
+        mask_nchw = (
+            _prepare_masks(masks[index : index + 1], source_height, source_width)
+            .to(device=images.device, dtype=sample_dtype)
+            .unsqueeze(1)
+        )
+        cropped_mask = F.grid_sample(
             mask_nchw,
             grid,
             mode="bilinear",
             padding_mode="zeros",
             align_corners=False,
-        )
-        .squeeze(1)
-        .float()
-        .clamp_(0.0, 1.0)
-    )
+        )[0, 0].float().clamp_(0.0, 1.0)
+        cropped_masks[index].copy_(cropped_mask)
 
     crop_info = {
         "version": 1,
@@ -313,6 +307,20 @@ def _blur_masks(masks: torch.Tensor, radius: int) -> torch.Tensor:
     offsets = torch.arange(-radius, radius + 1, device=masks.device, dtype=masks.dtype)
     kernel = torch.exp(-(offsets**2) / (2.0 * sigma**2))
     kernel /= kernel.sum()
+    if masks.device.type == "cpu":
+        # Dedicated separable filtering avoids conv2d's CPU unfold workspace.
+        output = torch.empty_like(masks, memory_format=torch.contiguous_format)
+        coefficients = kernel.numpy()
+        for source, destination in zip(masks.numpy(), output.numpy()):
+            cv2.sepFilter2D(
+                source,
+                -1,
+                coefficients,
+                coefficients,
+                dst=destination,
+                borderType=cv2.BORDER_REPLICATE,
+            )
+        return output
     values = masks.unsqueeze(1)
     horizontal = kernel.reshape(1, 1, 1, -1)
     vertical = kernel.reshape(1, 1, -1, 1)
@@ -320,6 +328,72 @@ def _blur_masks(masks: torch.Tensor, radius: int) -> torch.Tensor:
     values = F.conv2d(values, horizontal)
     values = F.pad(values, (0, 0, radius, radius), mode="replicate")
     return F.conv2d(values, vertical).squeeze(1)
+
+
+def _stitch_video_frame(
+    output: torch.Tensor,
+    crop: torch.Tensor,
+    mask: torch.Tensor,
+    box: tuple[float, float, float, float],
+    radius: int,
+    source_x: torch.Tensor,
+    source_y: torch.Tensor,
+) -> None:
+    source_height, source_width, _ = output.shape
+    crop_height, crop_width = crop.shape[:2]
+    x, y, width, height = box
+    if width <= 0.0 or height <= 0.0:
+        raise ValueError("crop_info boxes must have positive width and height")
+
+    # Include bilinear support outside the crop and the full Gaussian halo.
+    margin_x = math.ceil(width / crop_width) + radius + 1
+    margin_y = math.ceil(height / crop_height) + radius + 1
+    left = max(0, math.floor(x - margin_x))
+    top = max(0, math.floor(y - margin_y))
+    right = min(source_width, math.ceil(x + width + margin_x))
+    bottom = min(source_height, math.ceil(y + height + margin_y))
+    if right <= left or bottom <= top:
+        return
+    region_height, region_width = bottom - top, right - left
+    device, dtype = output.device, source_x.dtype
+
+    # Slice the original canvas coordinates, so changing ROI bounds does not
+    # change the sampling lattice from frame to frame.
+    coordinates = torch.ones(
+        (1, region_height, region_width, 3), device=device, dtype=dtype
+    )
+    coordinates[..., 0] = source_x[left:right]
+    coordinates[..., 1] = source_y[top:bottom, None]
+    theta = torch.zeros((1, 2, 3), device=device, dtype=dtype)
+    theta[0, 0, 0] = source_width / width
+    theta[0, 1, 1] = source_height / height
+    theta[0, 0, 2] = (source_width - 2.0 * x - width) / width
+    theta[0, 1, 2] = (source_height - 2.0 * y - height) / height
+    grid = coordinates.view(1, -1, 3).bmm(theta.transpose(1, 2))
+    grid = grid.view(1, region_height, region_width, 2)
+    del coordinates
+
+    crop_nchw = crop.movedim(-1, 0).unsqueeze(0).to(device=device, dtype=dtype)
+    warped = F.grid_sample(
+        crop_nchw, grid, mode="bilinear", padding_mode="zeros", align_corners=False
+    )
+    warped = warped.movedim(1, -1).squeeze(0)
+    mask = mask.detach().float()[None, None]
+    if tuple(mask.shape[-2:]) != (crop_height, crop_width):
+        mask = F.interpolate(
+            mask, size=(crop_height, crop_width), mode="bilinear", align_corners=False
+        )
+    mask = mask.to(device=device, dtype=dtype)
+    alpha = F.grid_sample(
+        mask, grid, mode="bilinear", padding_mode="zeros", align_corners=False
+    )
+    alpha = alpha.squeeze(1).clamp_(0.0, 1.0)
+    del grid
+    alpha = _blur_masks(alpha, radius).clamp_(0.0, 1.0).squeeze(0).unsqueeze(-1)
+    destination = output[top:bottom, left:right]
+    base = destination.to(dtype=dtype)
+    warped.mul_(alpha).addcmul_(base, 1.0 - alpha)
+    destination.copy_(warped)
 
 
 def stitch_video_crops(
@@ -372,55 +446,29 @@ def stitch_video_crops(
         raise ValueError("crop_info boxes do not match its frame count")
     boxes = [tuple(float(value) for value in box) for box in boxes]
 
-    cropped_images = cropped_images[:frames].to(device=base_images.device)
-    cropped_masks = cropped_masks[:frames].detach().float()
-    if tuple(cropped_masks.shape[-2:]) != tuple(cropped_images.shape[1:3]):
-        cropped_masks = F.interpolate(
-            cropped_masks.unsqueeze(1),
-            size=tuple(cropped_images.shape[1:3]),
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(1)
-
     sample_dtype = _sampling_dtype(base_images)
-    crop_nchw = cropped_images.movedim(-1, 1).to(dtype=sample_dtype)
-    theta = _stitch_theta(
-        boxes,
-        source_width,
-        source_height,
-        device=base_images.device,
-        dtype=sample_dtype,
+    source_x = torch.linspace(
+        -1, 1, source_width, device=base_images.device, dtype=sample_dtype
     )
-    grid = F.affine_grid(
-        theta,
-        size=(frames, channels, source_height, source_width),
-        align_corners=False,
+    source_y = torch.linspace(
+        -1, 1, source_height, device=base_images.device, dtype=sample_dtype
     )
-    warped_images = F.grid_sample(
-        crop_nchw,
-        grid,
-        mode="bilinear",
-        padding_mode="zeros",
-        align_corners=False,
-    ).movedim(1, -1)
-    mask_nchw = cropped_masks.to(
-        device=base_images.device, dtype=sample_dtype
-    ).unsqueeze(1)
-    warped_masks = (
-        F.grid_sample(
-            mask_nchw,
-            grid,
-            mode="bilinear",
-            padding_mode="zeros",
-            align_corners=False,
+    # Match affine_grid's multiply-then-divide rounding as well as its lattice.
+    source_x.mul_(source_width - 1).div_(source_width)
+    source_y.mul_(source_height - 1).div_(source_height)
+    output = base_images.clone()
+    radius = max(0, int(feather))
+    for index, box in enumerate(boxes):
+        _stitch_video_frame(
+            output[index],
+            cropped_images[index],
+            cropped_masks[index],
+            box,
+            radius,
+            source_x,
+            source_y,
         )
-        .squeeze(1)
-        .clamp_(0.0, 1.0)
-    )
-    warped_masks = _blur_masks(warped_masks, int(feather)).clamp_(0.0, 1.0)
-    alpha = warped_masks.unsqueeze(-1)
-    base = base_images.to(dtype=sample_dtype)
-    return (base * (1.0 - alpha) + warped_images * alpha).to(dtype=base_images.dtype)
+    return output
 
 
 def _aligned_target_size(
@@ -548,42 +596,49 @@ def pad_video_for_outpaint(
     grid_y = 2.0 * (y - source_y0) / source_scaled_height - 1.0
     grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing="ij")
     grid = torch.stack((grid_x, grid_y), dim=-1).unsqueeze(0)
-    frame_grid = grid.expand(frames, -1, -1, -1)
-    source = images.movedim(-1, 1).to(dtype=sample_dtype)
-
-    if padding_mode == "edge":
-        padded = F.grid_sample(
-            source,
-            frame_grid,
-            mode="bilinear",
-            padding_mode="border",
-            align_corners=False,
-        )
-    elif padding_mode in ("neutral_gray", "black"):
-        padded = F.grid_sample(
-            source,
-            frame_grid,
+    if padding_mode not in ("edge", "neutral_gray", "black"):
+        raise ValueError(f"Unsupported padding_mode: {padding_mode!r}")
+    gray = None
+    if padding_mode == "neutral_gray":
+        validity = F.grid_sample(
+            torch.ones(
+                (1, 1, source_height, source_width),
+                device=images.device,
+                dtype=sample_dtype,
+            ),
+            grid,
             mode="bilinear",
             padding_mode="zeros",
             align_corners=False,
         )
-        if padding_mode == "neutral_gray":
-            validity = F.grid_sample(
-                torch.ones(
-                    (1, 1, source_height, source_width),
-                    device=images.device,
-                    dtype=sample_dtype,
-                ),
+        gray = (1.0 - validity) * 0.5
+    if sample_dtype == images.dtype:
+        # The grid is a broadcast view and sampling already creates the final
+        # output; only dtype conversion needs a per-frame intermediate.
+        padded = F.grid_sample(
+            images.movedim(-1, 1),
+            grid.expand(frames, -1, -1, -1),
+            mode="bilinear",
+            padding_mode="border" if padding_mode == "edge" else "zeros",
+            align_corners=False,
+        )
+        if gray is not None:
+            padded.add_(gray)
+        output_images = padded.movedim(1, -1)
+    else:
+        output_images = images.new_empty((frames, output_height, output_width, channels))
+        for index in range(frames):
+            source = images[index : index + 1].movedim(-1, 1).to(dtype=sample_dtype)
+            padded = F.grid_sample(
+                source,
                 grid,
                 mode="bilinear",
-                padding_mode="zeros",
+                padding_mode="border" if padding_mode == "edge" else "zeros",
                 align_corners=False,
             )
-            padded = padded + (1.0 - validity) * 0.5
-    else:
-        raise ValueError(f"Unsupported padding_mode: {padding_mode!r}")
-
-    output_images = padded.movedim(1, -1).to(dtype=images.dtype)
+            if gray is not None:
+                padded.add_(gray)
+            output_images[index].copy_(padded[0].movedim(0, -1))
     mask = torch.ones(
         (output_height, output_width),
         device=images.device,
