@@ -52,6 +52,9 @@ void quant_qk_per_warp_int8_cuda(
                 int key_block_size,
                 int tensor_layout);
 
+void quant_qk_per_warp_int8_rotated_permuted_cuda(at::Tensor, at::Tensor,
+    at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor);
+
 void quant_qk_per_warp_int8_rotated_cuda(
                 at::Tensor query,
                 at::Tensor key,

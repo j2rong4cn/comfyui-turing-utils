@@ -803,6 +803,36 @@ __device__ __forceinline__ void compute_int8_qk(
 #include "sparse/route_compaction.cuh"
 
 template <int HeadDim>
+__device__ __forceinline__ void compute_cached_int8_qk(
+    uint32_t query[HeadDim / 32][4],
+    const smem_t<AttentionGeometry<HeadDim>::kInt8Swizzle,
+                 AttentionGeometry<HeadDim>::kInt8Packs> &key,
+    int32_t score[1][4][8])
+{
+  using G = AttentionGeometry<HeadDim>;
+  uint32_t offset = key.get_permuted_offset(
+      threadIdx.x % 8 + (threadIdx.x / 16) * 8, (threadIdx.x / 8) % 2);
+#pragma unroll
+  for (int inner = 0; inner < HeadDim / 32; ++inner)
+  {
+#pragma unroll
+    for (int tile = 0; tile < 4; ++tile)
+    {
+      uint32_t fragment[4];
+      key.ldmatrix_m8n8x4(offset, fragment);
+      offset = key.advance_offset_by_row<16>(offset);
+      if (inner == 0)
+        mma::mma_sync_m16n16k32_row_col_s8s8s32<mma::MMAMode::kInit>(
+            score[0][tile], query[inner], fragment);
+      else
+        mma::mma_sync_m16n16k32_row_col_s8s8s32<mma::MMAMode::kInplaceUpdate>(
+            score[0][tile], query[inner], fragment);
+    }
+    offset = key.advance_offset_by_column<2>(offset - 64 * G::kInt8Packs, inner);
+  }
+}
+
+template <int HeadDim>
 __device__ __forceinline__ void load_quantized_value_tile(
     const int8_t *__restrict__ value,
     int padded_sequence_length,
@@ -851,7 +881,7 @@ __device__ __forceinline__ void load_quantized_value_tile_async(
 template <int HeadDim, typename T, bool UseW8A8, bool ForceDense,
           bool IsCausal, bool Varlen, int ResidualSubblocks, int KeyStages,
           bool ExternalRoute = false, bool SparseValuePipeline = false,
-          bool MappedValue = false>
+          bool MappedValue = false, bool Spark = false, bool Profile = false>
 __global__ void sparse_attention_kernel(
     const int8_t *__restrict__ query_int8,
     const int8_t *__restrict__ key_int8,
@@ -897,8 +927,19 @@ __global__ void sparse_attention_kernel(
     float threshold_sigma,
     float softmax_scale,
     int route_original_basis,
-    const int32_t *tile_valid_counts)
+    const int32_t *tile_valid_counts,
+    const float *spark_log_mass,
+    const int32_t* output_permutation)
 {
+  // Diagnostic specialization only: production instantiations contain no clocks.
+  unsigned long long phase_start = 0;
+  unsigned long long *phase_cycles = nullptr;
+  if constexpr (Profile)
+  {
+    phase_start = clock64();
+    phase_cycles = selected_count +
+        ((int64_t(blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * 5;
+  }
   using G = AttentionGeometry<HeadDim>;
   using S = AttentionStorage<HeadDim, SparseValuePipeline>;
   if constexpr (ExternalRoute)
@@ -1060,12 +1101,11 @@ __global__ void sparse_attention_kernel(
   {
     const int route_word_count =
         (active_key_blocks + kRouteWordBits - 1) / kRouteWordBits;
-    const int sla_query_blocks =
-        (num_query_blocks + 1) / 2;
+    const int route_query_blocks = Spark ? num_query_blocks : (num_query_blocks + 1) / 2;
     const uint32_t *route_head = external_route_words +
         ((static_cast<int64_t>(batch) * num_query_heads + query_head) *
-             sla_query_blocks +
-         query_block / 2) *
+             route_query_blocks +
+         (Spark ? query_block : query_block / 2)) *
             route_word_count;
     for (int word = linear_thread; word < route_word_count;
          word += kWarps * WARP_SIZE)
@@ -1408,6 +1448,107 @@ __global__ void sparse_attention_kernel(
   }
   }
 
+  if constexpr (Profile)
+  {
+    __syncthreads();
+    const auto now = clock64();
+    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[0] = now - phase_start;
+    phase_start = now;
+  }
+  if constexpr (Spark)
+  {
+    // External 64x64 Top-K and weighted summaries are separate contracts:
+    // every real query consumes the skipped summaries in the SAME online
+    // softmax as exact tokens. No second output/LSE or post-hoc merge pass.
+    if (sparse_query)
+    {
+      load_int8_tile_async<HeadDim>(query_int8_head_ptr, stride_sequence_q_int8,
+          query_block * kBlockTokens, query_length, shared_initial_query_int8);
+      cp_async::commit_group(); cp_async::wait_group<0>(); __syncthreads();
+      dequantize_int8_tile<HeadDim>(shared_initial_query_int8, query_scale_head,
+          query_block * kBlockTokens, query_length, shared_correction_query);
+      __syncthreads();
+      const half* ak = key_score_summary +
+          (int64_t(batch) * num_kv_heads + kv_head) * padded_residual_summaries * HeadDim;
+      const half* av = value_mean +
+          (int64_t(batch) * num_kv_heads + kv_head) * padded_residual_summaries * HeadDim;
+      const float* lm = spark_log_mass +
+          (int64_t(batch) * num_kv_heads + kv_head) * padded_residual_summaries;
+      for (int begin = 0; begin < active_key_blocks; begin += kSummaryTileTokens)
+      {
+        const int stage = (begin / kSummaryTileTokens) & 1;
+        smem_t<SwizzleMode::k128B, G::kHalfPacks> current_key(
+            SparseValuePipeline && stage ? shared_summary_key_next.base : shared_summary_key.base);
+        smem_t<SwizzleMode::k128B, G::kHalfPacks> current_value(
+            SparseValuePipeline && stage ? shared_summary_value_next.base : shared_summary_value.base);
+        if (!SparseValuePipeline || begin == 0)
+        {
+          load_half_tile_async<HeadDim, kSummaryTileTokens>(ak, HeadDim, begin,
+              active_key_blocks, current_key);
+          load_half_tile_async<HeadDim, kSummaryTileTokens>(av, HeadDim, begin,
+              active_key_blocks, current_value);
+          cp_async::commit_group(); cp_async::wait_group<0>(); __syncthreads();
+        }
+        if constexpr (SparseValuePipeline)
+        {
+          const int next = begin + kSummaryTileTokens;
+          if (next < active_key_blocks)
+          {
+            smem_t<SwizzleMode::k128B, G::kHalfPacks> next_key(
+                stage ? shared_summary_key.base : shared_summary_key_next.base);
+            smem_t<SwizzleMode::k128B, G::kHalfPacks> next_value(
+                stage ? shared_summary_value.base : shared_summary_value_next.base);
+            load_half_tile_async<HeadDim, kSummaryTileTokens>(ak, HeadDim, next,
+                active_key_blocks, next_key);
+            load_half_tile_async<HeadDim, kSummaryTileTokens>(av, HeadDim, next,
+                active_key_blocks, next_value);
+            cp_async::commit_group();
+          }
+        }
+        float score[1][1][8];
+        compute_fp16_qk<HeadDim, 1>(shared_correction_query, current_key, score);
+#pragma unroll
+        for (int element = 0; element < 8; ++element)
+        {
+          const int column = begin + 2 * (threadIdx.x % 4) + 8 * (element / 4) + element % 2;
+          const bool selected = column < active_key_blocks &&
+              ((shared_route[column / kRouteWordBits] >> (column % kRouteWordBits)) & 1U);
+          score[0][0][element] = column >= active_key_blocks || selected
+              ? -5000000.0f : score[0][0][element] * scale_log2 + lm[column] * math::log2e;
+        }
+        if constexpr (UseW8A8)
+          update_mdo<1, 1, G::kValueTiles, false, true, true>(score, output_fragment,
+              row_max, denominator, 1.0f, S_U8_OFFSET);
+        else
+          update_mdo<1, 1, G::kValueTiles, false, false, true>(score, output_fragment,
+              row_max, denominator, 1.0f);
+        uint32_t probability[1][1][4];
+        RS_32_to_16<1, 1>(score, probability);
+        if constexpr (UseW8A8)
+          accumulate_d<1, 1, ComputeUnit::kCudaCore>(score, denominator);
+        else
+          accumulate_d<1, 1, ComputeUnit::kTensorCore>(probability, denominator);
+        uint32_t offset = value_mma_offset;
+        compute_fp16_sv_permuted<4, 1, 1, 1, G::kValueTiles,
+            SwizzleMode::k128B, G::kHalfPacks, 4>(current_value,
+            probability, output_fragment, denominator, offset);
+        __syncthreads();
+        if constexpr (SparseValuePipeline)
+        {
+          if (begin + kSummaryTileTokens < active_key_blocks)
+          { cp_async::wait_group<0>(); __syncthreads(); }
+        }
+      }
+    }
+  }
+
+  if constexpr (Profile)
+  {
+    __syncthreads();
+    const auto now = clock64();
+    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[1] = now - phase_start;
+    phase_start = now;
+  }
   int compact_selected_count = 0;
   int register_selected_count = 0;
   RouteWords fp16_route{};
@@ -1421,7 +1562,7 @@ __global__ void sparse_attention_kernel(
           shared_selected_blocks,
           shared_compaction_scratch,
           active_key_blocks);
-      if (selected_count != nullptr && sparse_query &&
+      if (!Profile && selected_count != nullptr && sparse_query &&
           threadIdx.x == 0 && threadIdx.y == 0)
       {
         const unsigned long long count = static_cast<unsigned long long>(
@@ -1452,7 +1593,7 @@ __global__ void sparse_attention_kernel(
         count += __shfl_down_sync(0xffffffff, count, offset);
       register_selected_count = static_cast<int>(
           __shfl_sync(0xffffffff, count, 0));
-      if (selected_count != nullptr && sparse_query &&
+      if (!Profile && selected_count != nullptr && sparse_query &&
           threadIdx.x == 0 && threadIdx.y == 0)
         atomicAdd(
             selected_count,
@@ -1473,6 +1614,18 @@ __global__ void sparse_attention_kernel(
   cp_async::commit_group();
   cp_async::wait_group<0>();
   __syncthreads();
+  uint32_t cached_query[HeadDim / 32][4];
+  if constexpr (Spark && UseW8A8)
+  {
+    uint32_t offset = shared_query_int8.get_permuted_offset(
+        threadIdx.y * 16 + threadIdx.x % 16, threadIdx.x / 16);
+#pragma unroll
+    for (int inner = 0; inner < HeadDim / 32; ++inner)
+    {
+      shared_query_int8.ldmatrix_m8n8x4(offset, cached_query[inner]);
+      offset = shared_query_int8.advance_offset_by_column<2>(offset, inner);
+    }
+  }
   int selected_position = 0;
   int key_block = !ForceDense && sparse_query
       ? (UseW8A8
@@ -1535,6 +1688,13 @@ __global__ void sparse_attention_kernel(
     cp_async::wait_group<0>();
     __syncthreads();
   }
+  if constexpr (Profile)
+  {
+    __syncthreads();
+    const auto now = clock64();
+    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[2] = now - phase_start;
+    phase_start = now;
+  }
   while (key_block < active_key_blocks)
   {
     // Integer QK accumulators are dead before online softmax consumes the
@@ -1546,8 +1706,11 @@ __global__ void sparse_attention_kernel(
       int32_t integer[1][4][8];
       float floating[1][4][8];
     } score_storage;
-    compute_int8_qk<HeadDim>(
-        shared_query_int8, shared_key_int8, score_storage.integer);
+    if constexpr (Spark && UseW8A8)
+      compute_cached_int8_qk<HeadDim>(cached_query, shared_key_int8, score_storage.integer);
+    else
+      compute_int8_qk<HeadDim>(
+          shared_query_int8, shared_key_int8, score_storage.integer);
 #pragma unroll
     for (int key_tile = 0; key_tile < 4; ++key_tile)
     {
@@ -1728,6 +1891,13 @@ __global__ void sparse_attention_kernel(
     key_block = next_key_block;
   }
 
+  if constexpr (Profile)
+  {
+    __syncthreads();
+    const auto now = clock64();
+    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[3] = now - phase_start;
+    phase_start = now;
+  }
   if constexpr (UseW8A8)
   {
     normalize_d<1, G::kValueTiles, ComputeUnit::kCudaCore>(
@@ -1810,7 +1980,17 @@ __global__ void sparse_attention_kernel(
     for (int column_group = 0; column_group < output_column_groups; ++column_group)
     {
       if (output_row < query_length)
-        shared_output.store_128b(output_offset, output_lane);
+      {
+        T* destination = output_lane;
+        if constexpr (Spark)
+        {
+          const int original_row = output_permutation[
+              (int64_t(batch) * num_query_heads + query_head) * query_length + output_row];
+          destination = output_head_ptr + int64_t(original_row) * stride_sequence_o +
+              (threadIdx.x % output_line_lanes) * 8 + column_group * output_line_lanes * 8;
+        }
+        shared_output.store_128b(output_offset, destination);
+      }
       output_lane += output_line_lanes * 8;
       output_offset = shared_output.advance_offset_by_column<8>(output_offset);
     }
@@ -1819,6 +1999,11 @@ __global__ void sparse_attention_kernel(
     output_lane += output_rows_per_warp * stride_sequence_o -
         output_column_groups * output_line_lanes * 8;
     output_row += output_rows_per_warp;
+  }
+  if constexpr (Profile)
+  {
+    __syncthreads();
+    if (threadIdx.x == 0 && threadIdx.y == 0) phase_cycles[4] = clock64() - phase_start;
   }
 }
 
@@ -2049,6 +2234,8 @@ void launch_sparse_threshold_attention(
       threshold_sigma,
       softmax_scale,
       route_original_basis,
+      nullptr,
+      nullptr,
       nullptr);
   check_launch("sparse attention");
 }
@@ -2191,7 +2378,7 @@ void dispatch_sparse_threshold_attention(
 }
 
 template <int HeadDim, typename T, bool UseW8A8, int KeyStages,
-          bool SparseValuePipeline = false>
+          bool SparseValuePipeline = false, bool Spark = false, bool Profile = false>
 void launch_sla_attention(
     at::Tensor query_int8,
     at::Tensor key_int8,
@@ -2205,7 +2392,11 @@ void launch_sla_attention(
     at::Tensor sparse_query_blocks,
     at::Tensor selected_count,
     float softmax_scale,
-    const int32_t *tile_valid_counts)
+    const int32_t *tile_valid_counts,
+    at::Tensor spark_ak = at::Tensor(),
+    at::Tensor spark_av = at::Tensor(),
+    at::Tensor spark_mass = at::Tensor(),
+    at::Tensor spark_permutation = at::Tensor())
 {
   using G = AttentionGeometry<HeadDim>;
   using S = AttentionStorage<HeadDim, SparseValuePipeline>;
@@ -2220,7 +2411,7 @@ void launch_sla_attention(
   dim3 attention_block(WARP_SIZE, kWarps);
   auto attention_kernel =
       sparse_attention_kernel<HeadDim, T, UseW8A8, false, false, false,
-                              1, KeyStages, true, SparseValuePipeline>;
+                              1, KeyStages, true, SparseValuePipeline, false, Spark, Profile>;
   configure_dynamic_shared_memory(
       attention_kernel, S::kAttentionSharedBytes, "SLA sparse attention");
   attention_kernel<<<
@@ -2236,8 +2427,8 @@ void launch_sla_attention(
       reinterpret_cast<T *>(output.data_ptr()),
       query_scale.data_ptr<float>(),
       key_scale.data_ptr<float>(),
-      nullptr,
-      nullptr,
+      Spark ? reinterpret_cast<const half*>(spark_ak.data_ptr()) : nullptr,
+      Spark ? reinterpret_cast<const half*>(spark_av.data_ptr()) : nullptr,
       nullptr,
       nullptr,
       sparse_query_blocks.data_ptr<uint8_t>(),
@@ -2256,7 +2447,7 @@ void launch_sla_attention(
       num_kv_heads,
       num_query_blocks,
       num_key_blocks,
-      0,
+      Spark ? spark_ak.size(2) : 0,
       query_int8.stride(0),
       query_int8.stride(1),
       query_int8.stride(2),
@@ -2274,7 +2465,9 @@ void launch_sla_attention(
       0.0f,
       softmax_scale,
       0,
-      tile_valid_counts);
+      tile_valid_counts,
+      Spark ? spark_mass.data_ptr<float>() : nullptr,
+      Spark ? spark_permutation.data_ptr<int32_t>() : nullptr);
   check_launch("SLA sparse attention");
 }
 
@@ -2664,7 +2857,11 @@ static at::Tensor routed_sparse_online_attn(
     int return_stats,
     int use_w8a8,
     int key_tile_tokens,
-    at::Tensor tile_valid_counts)
+    at::Tensor tile_valid_counts,
+    at::Tensor spark_ak = at::Tensor(),
+    at::Tensor spark_av = at::Tensor(),
+    at::Tensor spark_mass = at::Tensor(),
+    at::Tensor spark_permutation = at::Tensor())
 {
   CHECK_CUDA(query_int8);
   CHECK_CUDA(key_int8);
@@ -2705,7 +2902,8 @@ static at::Tensor routed_sparse_online_attn(
   const int key_length = key_int8.size(2);
   const int head_dim = query_int8.size(3);
   const int query_blocks_64 = div_ceil(query_length, kBlockTokens);
-  const int query_blocks_128 = div_ceil(query_length, kSlaQueryBlockTokens);
+  const bool spark = spark_ak.defined();
+  const int route_query_blocks = spark ? query_blocks_64 : div_ceil(query_length, kSlaQueryBlockTokens);
   const int key_blocks = div_ceil(key_length, kBlockTokens);
   const int route_word_count = div_ceil(key_blocks, kRouteWordBits);
   if (tile_valid_counts.defined())
@@ -2746,7 +2944,7 @@ static at::Tensor routed_sparse_online_attn(
       "SLA Q/K scale shapes are incompatible");
   TORCH_CHECK(
       route_words.sizes() == at::IntArrayRef(
-          {batch_size, query_heads, query_blocks_128, route_word_count}) &&
+          {batch_size, query_heads, route_query_blocks, route_word_count}) &&
           sparse_query_blocks.numel() == query_blocks_64,
       "SLA route policy shapes are incompatible");
   if (use_w8a8)
@@ -2766,13 +2964,53 @@ static at::Tensor routed_sparse_online_attn(
         "SLA W8A8 V shapes are incompatible");
   }
   at::Tensor selected_count = return_stats
-      ? at::zeros({1}, output.options().dtype(at::ScalarType::Long))
+      ? at::zeros({spark ? int64_t(batch_size) * query_heads * query_blocks_64 * 5 : 1},
+                  output.options().dtype(at::ScalarType::Long))
       : at::empty({0}, output.options().dtype(at::ScalarType::Long));
-  dispatch_sla_attention(
-      query_int8, key_int8, value, value_int8, value_scale, output,
-      query_scale, key_scale, route_words, sparse_query_blocks,
-      selected_count, softmax_scale, use_w8a8 != 0, key_tile_tokens,
-      tile_valid_counts.defined() ? tile_valid_counts.data_ptr<int32_t>() : nullptr);
+  if (spark)
+  {
+    TORCH_CHECK(query_heads == key_heads && query_length == key_length,
+        "Spark requires matching self-attention Q/K dimensions");
+    const int padded = div_ceil(key_blocks, kSummaryTileTokens) * kSummaryTileTokens;
+    for (const auto& tensor : {spark_ak, spark_av, spark_mass})
+    {
+      TORCH_CHECK(tensor.is_cuda() && tensor.device() == query_int8.device() && tensor.is_contiguous(),
+          "Spark summary device/layout mismatch");
+    }
+    TORCH_CHECK(spark_ak.scalar_type() == at::kHalf && spark_av.scalar_type() == at::kHalf &&
+        spark_mass.scalar_type() == at::kFloat &&
+        spark_ak.sizes() == at::IntArrayRef({batch_size, key_heads, padded, head_dim}) &&
+        spark_av.sizes() == spark_ak.sizes() &&
+        spark_mass.sizes() == at::IntArrayRef({batch_size, key_heads, padded}),
+        "Spark weighted summary shapes/dtypes invalid");
+    TORCH_CHECK(spark_permutation.is_cuda() && spark_permutation.device() == query_int8.device() &&
+        spark_permutation.is_contiguous() && spark_permutation.scalar_type() == at::kInt &&
+        spark_permutation.sizes() == query_int8.sizes().slice(0, 3), "Spark output permutation invalid");
+#define SPARK_KERNEL(D, T, W8, PIPELINE, PROFILE) launch_sla_attention<D, T, W8, 1, PIPELINE, true, PROFILE>( \
+    query_int8, key_int8, value, value_int8, value_scale, output, query_scale, key_scale, \
+    route_words, sparse_query_blocks, selected_count, softmax_scale, nullptr, spark_ak, spark_av, spark_mass, spark_permutation)
+#define SPARK_LAUNCH(D, T, W8, PIPELINE) do { \
+    if (return_stats) { SPARK_KERNEL(D, T, W8, PIPELINE, true); } \
+    else { SPARK_KERNEL(D, T, W8, PIPELINE, false); } \
+    } while (false)
+#define SPARK_TYPE(D, T) if (use_w8a8) { \
+    if (current_cuda_device_major() >= 8) { SPARK_LAUNCH(D, T, true, true); } \
+    else { SPARK_LAUNCH(D, T, true, false); } \
+    } else { SPARK_LAUNCH(D, T, false, false); }
+    if (output.scalar_type() == at::kHalf)
+    { if (head_dim == 64) { SPARK_TYPE(64, half); } else { SPARK_TYPE(128, half); } }
+    else
+    { if (head_dim == 64) { SPARK_TYPE(64, nv_bfloat16); } else { SPARK_TYPE(128, nv_bfloat16); } }
+#undef SPARK_TYPE
+#undef SPARK_LAUNCH
+#undef SPARK_KERNEL
+  }
+  else
+    dispatch_sla_attention(
+        query_int8, key_int8, value, value_int8, value_scale, output,
+        query_scale, key_scale, route_words, sparse_query_blocks,
+        selected_count, softmax_scale, use_w8a8 != 0, key_tile_tokens,
+        tile_valid_counts.defined() ? tile_valid_counts.data_ptr<int32_t>() : nullptr);
   return selected_count;
 }
 
@@ -2783,6 +3021,25 @@ at::Tensor sla_sparse_online_attn(
 {
   return routed_sparse_online_attn(q, k, v, vi, vs, out, qs, ks, routes,
       sparse_queries, scale, stats, w8a8, key_tile, at::Tensor());
+}
+
+void spark_sparse_online_attn(at::Tensor q, at::Tensor k, at::Tensor v,
+    at::Tensor vi, at::Tensor vs, at::Tensor out, at::Tensor qs, at::Tensor ks,
+    at::Tensor routes, at::Tensor sparse_queries, at::Tensor ak, at::Tensor av,
+    at::Tensor lm, at::Tensor permutation, float scale, bool w8a8)
+{
+  routed_sparse_online_attn(q, k, v, vi, vs, out, qs, ks, routes,
+      sparse_queries, scale, 0, int(w8a8), 64, at::Tensor(), ak, av, lm, permutation);
+}
+
+at::Tensor spark_profile_online_attn(at::Tensor q, at::Tensor k, at::Tensor v,
+    at::Tensor vi, at::Tensor vs, at::Tensor out, at::Tensor qs, at::Tensor ks,
+    at::Tensor routes, at::Tensor sparse_queries, at::Tensor ak, at::Tensor av,
+    at::Tensor lm, at::Tensor permutation, float scale, bool w8a8)
+{
+  return routed_sparse_online_attn(q, k, v, vi, vs, out, qs, ks, routes,
+      sparse_queries, scale, 1, int(w8a8), 64, at::Tensor(), ak, av, lm, permutation)
+      .view({q.size(0), q.size(1), div_ceil(q.size(2), int64_t(kBlockTokens)), 5});
 }
 
 void veda_sparse_online_attn(

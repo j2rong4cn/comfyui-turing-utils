@@ -23,3 +23,13 @@ The vendored CUDA and Python support is kept under `csrc/turing/sage` and
 default bindings and documented under `experiments/turing_sage_variants`.
 SageAttention is licensed under the Apache License, Version 2.0; its license
 text is in `LICENSES/sageattention-LICENSE.txt`.
+
+Spark-H3's Landmark-v2 reference mathematics and global-anchor reweighting
+are adapted from the Apache-2.0 Spark-H3 source at commit
+`7c2feca0d14305d7a0f054b4d3d97b85a465ea69`:
+
+  https://github.com/zechengtang/Spark-H3
+
+The Turing implementation replaces upstream Triton/CuTe kernels with native
+CUDA preparation and the bundled INT8 attention mainloop. The upstream license
+is included in `LICENSES/spark-h3-LICENSE.txt`.

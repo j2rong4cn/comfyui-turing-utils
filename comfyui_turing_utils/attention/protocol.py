@@ -152,6 +152,12 @@ class AttentionBackendCapabilities:
     supports_causal: bool = False
     supports_semantic_sparse: bool = False
     preserves_qk_for_observers: bool = False
+    workspace_estimator: Callable[[int, int, int, int], int] | None = None
+
+    def workspace_bytes_per_head(self, query_tokens, key_tokens, head_dim, element_size):
+        if self.workspace_estimator is None:
+            return 0
+        return self.workspace_estimator(query_tokens, key_tokens, head_dim, element_size)
 
     def unsupported_reason(self, request: "PreparedAttention") -> str | None:
         if request.protocol_version != self.protocol_version:

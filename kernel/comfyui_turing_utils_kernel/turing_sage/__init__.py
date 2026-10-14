@@ -9,6 +9,7 @@ from .availability import (
     overlap_blend_available,
     sla_available,
     sparse_available,
+    spark_available,
     split_prequantization_available,
     w8a8_available,
     w8a8_varlen_available,
@@ -105,6 +106,13 @@ def sol_sparse_sageattn(*args, **kwargs):
     from .core import sol_sparse_sageattn as implementation
 
     return implementation(*args, **kwargs)
+
+
+def spark_attention(*args, **kwargs):
+    from .spark import spark_attention as implementation
+
+    with torch.cuda.device(args[0].device):
+        return implementation(*args, **kwargs)
 
 
 def sla_sparse_sageattn(*args, **kwargs):
@@ -592,6 +600,8 @@ __all__ = [
     "sol_sparse_sageattn_from_prequantized",
     "split_prequantization_available",
     "sparse_available",
+    "spark_available",
+    "spark_attention",
     "w8a8attn",
     "w8a8attn_compiled",
     "w8a8attn_varlen",

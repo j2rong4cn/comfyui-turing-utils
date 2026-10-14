@@ -541,6 +541,7 @@ if _includes_integer_attention_arch():
                     "csrc/turing/sage/sol_sparse_cuda_sm75.cu",
                     "csrc/turing/sage/quant_v_int8_cuda_sm75.cu",
                     "csrc/turing/sage/veda_prepare.cu",
+                    "csrc/turing/sage/spark_prepare.cu",
                 ],
                 define_macros=ARCHITECTURE_MACROS,
                 include_dirs=sage_include_dirs,
@@ -564,7 +565,7 @@ if _includes_integer_attention_arch():
 
 setup(
     name="comfyui-turing-utils-kernel",
-    version="0.45.0",
+    version="0.46.0",
     packages=find_packages(where=str(ROOT)),
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},

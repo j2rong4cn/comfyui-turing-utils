@@ -72,6 +72,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
   m.def("sla_qk_block_summaries", &sla_qk_block_summaries, "SLA 128x64 Q/K block summaries from quantized Sage tensors");
   m.def("sla_build_route_words", &sla_build_route_words, "Pack SLA fixed-Top-K and exact-KV policy into route words");
   m.def("sla_sparse_online_attn", &sla_sparse_online_attn, "SLA fixed-Top-K sparse attention with FP16 or W8A8 PV for sm75+");
+  m.def("spark_directions", &spark_directions, "Spark 32-landmark cosine proxy directions");
+  m.def("spark_fused_nodes", &spark_fused_nodes, "Spark small-node landmark/scoring/stable partition fusion");
+  m.def("spark_indexed_scores", &spark_indexed_scores, "Spark fused indexed cosine scoring");
+  m.def("spark_gather_value", &spark_gather_value, "Spark value permutation");
+  m.def("spark_group_indices", &spark_group_indices, "Spark forward-local tree index gather/scatter");
+  m.def("spark_partition", &spark_partition, "Spark exact balanced partition without host-device metadata transfers");
+  m.def("spark_finalize_permutation", &spark_finalize_permutation, "Spark target permutation with identity context");
+  m.def("spark_topk_routes", &spark_topk_routes, "Spark exact TopK directly into route words");
+  m.def("spark_summaries", &spark_summaries, "Spark global-anchor weighted summaries and log mass",
+      pybind11::arg("q"), pybind11::arg("k"), pybind11::arg("qs"), pybind11::arg("ks"),
+      pybind11::arg("value"), pybind11::arg("start"), pybind11::arg("stop"),
+      pybind11::arg("scale"), pybind11::arg("value_scale"),
+      pybind11::arg("permutation") = pybind11::none());
+  m.def("spark_sparse_online_attn", &spark_sparse_online_attn, "Spark 64x64 routes and per-query weighted tails for SM75+");
+  m.def("spark_profile_online_attn", &spark_profile_online_attn, "Diagnostic per-CTA phase cycles; not wall-clock latency");
+  m.def("spark_prepare_w8a8", &spark_prepare_w8a8, "Spark parallel V scale and fused V packing/weighted summaries");
   m.def("veda_sparse_online_attn", &veda_sparse_online_attn, "Veda external routing with partial-tile masks and FP16 PV for sm75+");
   m.def("veda_gather_pool", &veda_gather_pool, "Fused Veda QKV gather and FP32 TripPool");
   m.def("veda_pack_routes", &veda_pack_routes, "Fused Veda route packing and global union");

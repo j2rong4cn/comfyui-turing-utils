@@ -994,7 +994,12 @@ def _make_attention_forward(
         # K-anchor stabilization is disabled. Older kernels keep the complete
         # projection path instead of failing after committing partial output.
         stream_abi_available = reusable_k_anchor_available()
-        veda_extra_workspace = 0
+        attention_extra_workspace = 0
+        capabilities = getattr(executor, "capabilities", None)
+        if capabilities is not None:
+            attention_extra_workspace = capabilities.workspace_bytes_per_head(
+                int(x.shape[0]), int(x.shape[0]), int(self.head_dim), x.element_size()
+            )
         if transformer_options.get("turing_utils_attention_strategy") == "veda":
             # Veda TripPool needs floating post-RoPE Q/K, before the attention
             # rotation. Compact QKV would discard those values too early.
@@ -1008,7 +1013,7 @@ def _make_attention_forward(
                 and packed_layout is not None
                 and packed_layout.seq_len == x.shape[0]
             ):
-                veda_extra_workspace = veda_workspace_per_head(
+                attention_extra_workspace += veda_workspace_per_head(
                     transformer_options["turing_utils_veda"],
                     packed_layout,
                     layer,
@@ -1029,7 +1034,7 @@ def _make_attention_forward(
                 quantized_value=callable(streamed_executor),
                 runtime_plan=runtime_plan,
                 base_model=base_model,
-                extra_workspace_per_head=veda_extra_workspace,
+                extra_workspace_per_head=attention_extra_workspace,
             )
             if head_decision.sharded or transformer_options.get(
                 "turing_utils_veda_projected_qkv", False

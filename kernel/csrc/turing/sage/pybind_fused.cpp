@@ -26,6 +26,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
   m.def("quant_qk_per_warp_int8_cuda", &quant_qk_per_warp_int8_cuda, "quant_qk_per_warp_int8_cuda");
   m.def("quant_qk_per_warp_int8_rotated_cuda", &quant_qk_per_warp_int8_rotated_cuda, "Fused randomized Hadamard Q/K INT8 quantization");
   m.def("quant_qk_per_warp_int8_rotated_anchored_cuda", &quant_qk_per_warp_int8_rotated_anchored_cuda, "Fused randomized Hadamard Q/K INT8 quantization with conditional K anchoring");
+  m.def("quant_qk_per_warp_int8_rotated_permuted_cuda", &quant_qk_per_warp_int8_rotated_permuted_cuda, "Fused permutation, randomized Hadamard, and INT8 Q/K packing");
   m.def("quant_qk_rms_rope_int8_cuda", &quant_qk_rms_rope_int8_cuda, "Fused RMSNorm, RoPE, optional Hadamard/anchor stabilization, and Q/K INT8 quantization");
   m.def("quant_qk_rms_rope_int8_mapped_cuda", &quant_qk_rms_rope_int8_mapped_cuda, "Fused RMSNorm, logical RoPE, mapped physical K reads, optional Hadamard/anchor stabilization, and Q/K INT8 quantization");
   m.def("gather_value_int8_mapped_cuda", &gather_value_int8_mapped_cuda, "Gather physical INT8 V rows into a padded logical sequence");

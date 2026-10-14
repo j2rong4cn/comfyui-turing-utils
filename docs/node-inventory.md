@@ -1,6 +1,6 @@
 # Turing Utils 节点清单
 
-当前开发工作树有 **46 个公开节点、14 个隐藏内部执行节点**（不含按需注册的素材计算适配类）。
+当前开发工作树有 **46 个公开节点、15 个隐藏内部执行节点**（不含按需注册的素材计算适配类）。
 右键菜单只使用 `Turing Utils/分类` 一层子目录，搜索仍可按节点名定位。
 
 ## 完整公开清单
@@ -19,7 +19,7 @@
 
 H3 音频保护节点放在 Video，与延续拼接、截断工具相邻。
 Sigmas To String 将原生 SIGMAS 转为可复制的十进制 STRING，正向转换复用官方 ManualSigmas。
-Configure Attention Strategy 放在 Models；Sol/SLA/Veda 通过 DynamicCombo 选择，
+Configure Attention Strategy 放在 Models；Sol/SLA/Veda/Spark 通过 DynamicCombo 选择，
 只显示相关参数，参数保持普通控件；Chat 的原 Options 参数及新增 H3 KSampler
 的放大/mask 微调使用高级设置。两阶段曲线用原生 DynamicCombo 切换，仅显示当前模式参数。
 不引入全局配置、侧栏状态或额外模型缓存。
@@ -47,7 +47,7 @@ Chat 的原 Options 参数及新增 H3 KSampler 的放大/mask 微调为高级�
 不再排序、修补输入接口或迁移旧工作流。SeC/Crop 接线后的控件行为交由 ComfyUI。
 H3 Keyframe Reference 固定三组输入/输出，Stage Barrier 固定八组输入/输出；
 未连接的位置保持为空，不再动态增减输出。
-素材画布另外使用八个读写单元，以及按需计算适配类。
+素材画布另外使用八个读写单元、Canvas Chat 内部单元，以及按需计算适配类。
 旧画布专用的 H3 准备、收尾和 Refiner 单元已删除；卡片内使用普通工作流节点。
 素材节点使用普通 ComfyUI 类型，带双端点的独立工作流复制为卡片，内部可有子图；详见[画布使用说明](material-canvas.md)。
 内部单元不是正常用户入口，仅按原生开发者模式规则显示。

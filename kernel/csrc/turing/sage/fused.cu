@@ -276,7 +276,8 @@ __device__ __forceinline__ void quant_int8_tile(T *__restrict__ input,
                                                 const uint32_t stride_h_output,
                                                 const uint32_t stride_bz_scale,
                                                 const uint32_t stride_h_scale,
-                                                const int anchor_index)
+                                                const int anchor_index,
+                                                const int32_t* source_indices)
 {
   static_assert(std::is_same<T, half>::value || std::is_same<T, nv_bfloat16>::value, "Only half and bfloat16 are supported");
 
@@ -298,7 +299,7 @@ __device__ __forceinline__ void quant_int8_tile(T *__restrict__ input,
       {
         anchor_shared[channel] = input[
             batch_id * stride_bz_input + head_id * stride_h_input +
-            anchor_index * stride_seq_input + channel];
+            (source_indices == nullptr ? anchor_index : source_indices[anchor_index]) * stride_seq_input + channel];
       }
     }
     __syncthreads();
@@ -316,8 +317,10 @@ __device__ __forceinline__ void quant_int8_tile(T *__restrict__ input,
     if (pack_idx < packs_per_tile && base_token + token_offset < num_tokens)
     {
       T x_val[8];
+      const uint32_t logical_token = base_token + token_offset;
+      const uint32_t source_token = source_indices == nullptr ? logical_token : source_indices[logical_token];
       T *input_ptr = input + batch_id * stride_bz_input + head_id * stride_h_input +
-                     (base_token + token_offset) * stride_seq_input + dim_pack * pack_size;
+                     source_token * stride_seq_input + dim_pack * pack_size;
       *(float4*)(&x_val[0]) = *(float4*)(input_ptr);
 #pragma unroll
       for (uint32_t j = 0; j < 8; j++)
@@ -414,7 +417,7 @@ constexpr int K_ANCHOR_THREADS = 128;
 constexpr int K_ANCHOR_SAMPLES = 9;
 constexpr int K_ANCHOR_MAX_CHANNELS = 128;
 
-template <typename T>
+template <typename T, bool Mapped = false>
 __global__ __launch_bounds__(K_ANCHOR_THREADS) void DetectKAnchorKernel(
     const T *__restrict__ key,
     int *__restrict__ anchor_indices,
@@ -423,7 +426,8 @@ __global__ __launch_bounds__(K_ANCHOR_THREADS) void DetectKAnchorKernel(
     const int num_kv_heads,
     const int64_t stride_bz,
     const int64_t stride_h,
-    const int64_t stride_seq)
+    const int64_t stride_seq,
+    const int32_t* permutation)
 {
   const int head_id = blockIdx.x;
   const int batch_id = blockIdx.y;
@@ -446,7 +450,9 @@ __global__ __launch_bounds__(K_ANCHOR_THREADS) void DetectKAnchorKernel(
   {
     const int sample = index / head_dim;
     const int channel = index - sample * head_dim;
-    const int row = sample * (key_length - 1) / (K_ANCHOR_SAMPLES - 1);
+    int row = sample * (key_length - 1) / (K_ANCHOR_SAMPLES - 1);
+    if constexpr (Mapped)
+      row = permutation[(int64_t(batch_id) * num_kv_heads + head_id) * key_length + row];
     samples[index] = convert_to_float(
         key[bh_offset + (int64_t)row * stride_seq + channel]);
   }
@@ -574,7 +580,7 @@ __global__ __launch_bounds__(K_ANCHOR_THREADS) void DetectKAnchorKernel(
   }
 }
 
-template <uint32_t head_dim, uint32_t Q_BLOCK_SIZE, uint32_t K_BLOCK_SIZE, uint32_t THREADS_PER_BLOCK, bool ROTATE, typename T>
+template <uint32_t head_dim, uint32_t Q_BLOCK_SIZE, uint32_t K_BLOCK_SIZE, uint32_t THREADS_PER_BLOCK, bool ROTATE, typename T, bool Mapped = false>
 __global__ void QuantQKInt8Kernel(T *__restrict__ query,
                                   T *__restrict__ key,
                                   int8_t *__restrict__ query_output,
@@ -603,7 +609,8 @@ __global__ void QuantQKInt8Kernel(T *__restrict__ query,
                                   const uint32_t stride_h_q_scale,
                                   const uint32_t stride_bz_k_scale,
                                   const uint32_t stride_h_k_scale,
-                                  const int *__restrict__ anchor_indices)
+                                  const int *__restrict__ anchor_indices,
+                                  const int32_t* permutation)
 {
   const uint32_t task_id = blockIdx.x;
   const uint32_t batch_id = blockIdx.y;
@@ -617,7 +624,8 @@ __global__ void QuantQKInt8Kernel(T *__restrict__ query,
         query, query_output, query_scale, tile_id, head_id, batch_id, qo_len,
         stride_bz_q, stride_seq_q, stride_h_q,
         stride_bz_qo, stride_seq_qo, stride_h_qo,
-        stride_bz_q_scale, stride_h_q_scale, -1);
+        stride_bz_q_scale, stride_h_q_scale, -1,
+        Mapped ? permutation + (int64_t(batch_id) * num_qo_heads + head_id) * qo_len : nullptr);
   }
   else
   {
@@ -633,7 +641,8 @@ __global__ void QuantQKInt8Kernel(T *__restrict__ query,
           key, key_output, key_scale, tile_id, head_id, batch_id, kv_len,
           stride_bz_k, stride_seq_k, stride_h_k,
           stride_bz_ko, stride_seq_ko, stride_h_ko,
-          stride_bz_k_scale, stride_h_k_scale, anchor_index);
+          stride_bz_k_scale, stride_h_k_scale, anchor_index,
+          Mapped ? permutation + (int64_t(batch_id) * num_kv_heads + head_id) * kv_len : nullptr);
     }
   }
 }
@@ -1079,7 +1088,8 @@ static void quant_qk_per_warp_int8_cuda_impl(
                 int key_block_size,
                 int tensor_layout,
                 bool rotate,
-                const at::Tensor &anchor_indices)
+                const at::Tensor &anchor_indices,
+                const at::Tensor &permutation = at::Tensor())
 {
   CHECK_CUDA(query);
   CHECK_CUDA(key);
@@ -1177,9 +1187,22 @@ static void quant_qk_per_warp_int8_cuda_impl(
 
   auto input_dtype = query.scalar_type();
 
-#define LAUNCH_QK(ROTATE)                                                      \
+  const int32_t* permutation_ptr = nullptr;
+  if (permutation.defined())
+  {
+    CHECK_CUDA(permutation);
+    CHECK_CONTIGUOUS(permutation);
+    CHECK_DTYPE(permutation, at::ScalarType::Int);
+    TORCH_CHECK(tensor_layout == 1 && qo_len == kv_len && num_qo_heads == num_kv_heads &&
+        permutation.device() == query.device() &&
+        permutation.sizes() == at::IntArrayRef({batch_size, num_qo_heads, qo_len}),
+        "permuted Q/K quantization requires matching HND self-attention");
+    permutation_ptr = permutation.data_ptr<int32_t>();
+  }
+
+#define LAUNCH_QK(ROTATE, MAPPED)                                               \
   QuantQKInt8Kernel<HEAD_DIM, QUERY_WARP_BLOCK_SIZE, KEY_BLOCK_SIZE,           \
-                    THREADS_PER_BLOCK, ROTATE, c_type><<<                      \
+                    THREADS_PER_BLOCK, ROTATE, c_type, MAPPED><<<              \
       grid, block, 0, c10::cuda::getCurrentCUDAStream()>>>(                    \
     reinterpret_cast<c_type*>(query.data_ptr()),                               \
     reinterpret_cast<c_type*>(key.data_ptr()),                                 \
@@ -1195,7 +1218,7 @@ static void quant_qk_per_warp_int8_cuda_impl(
     key_output.stride(0), stride_seq_ko, stride_h_ko,                          \
     query_scale.stride(0), query_scale.stride(1),                              \
     key_scale.stride(0), key_scale.stride(1),                                \
-    anchor_ptr);
+    anchor_ptr, permutation_ptr);
 
   DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input_dtype, c_type, {
     DISPATCH_WARP_BLOCK_SIZE(query_warp_block_size, QUERY_WARP_BLOCK_SIZE, {
@@ -1208,27 +1231,42 @@ static void quant_qk_per_warp_int8_cuda_impl(
           if (anchor_ptr != nullptr)
           {
             dim3 anchor_grid(num_kv_heads, batch_size);
-            DetectKAnchorKernel<c_type><<<
+            if (permutation_ptr != nullptr)
+              DetectKAnchorKernel<c_type, true><<<
+                  anchor_grid, K_ANCHOR_THREADS, 0, c10::cuda::getCurrentCUDAStream()>>>(
+                  reinterpret_cast<c_type*>(key.data_ptr()), anchor_ptr, kv_len,
+                  HEAD_DIM, num_kv_heads, key.stride(0), stride_h_k, stride_seq_k, permutation_ptr);
+            else
+              DetectKAnchorKernel<c_type><<<
                 anchor_grid, K_ANCHOR_THREADS, 0,
                 c10::cuda::getCurrentCUDAStream()>>>(
                 reinterpret_cast<c_type*>(key.data_ptr()), anchor_ptr,
                 kv_len, HEAD_DIM, num_kv_heads,
-                key.stride(0), stride_h_k, stride_seq_k);
+                key.stride(0), stride_h_k, stride_seq_k, nullptr);
           }
 
           if (rotate)
           {
-            LAUNCH_QK(true)
+            if (permutation_ptr != nullptr) { LAUNCH_QK(true, true) }
+            else { LAUNCH_QK(true, false) }
           }
           else
           {
-            LAUNCH_QK(false)
+            LAUNCH_QK(false, false)
           }
         });
       });
     });
   });
 #undef LAUNCH_QK
+}
+
+void quant_qk_per_warp_int8_rotated_permuted_cuda(at::Tensor q, at::Tensor k,
+    at::Tensor qi, at::Tensor ki, at::Tensor qs, at::Tensor ks,
+    at::Tensor permutation, at::Tensor anchors)
+{
+  quant_qk_per_warp_int8_cuda_impl(q, k, qi, ki, qs, ks, 64, 16, 64, 1,
+      true, anchors, permutation);
 }
 
 void quant_qk_per_warp_int8_cuda(

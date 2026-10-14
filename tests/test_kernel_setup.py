@@ -152,7 +152,7 @@ class KernelSetupTest(unittest.TestCase):
         self.assertIn(
             "csrc/turing/sage/overlap_blend.cu", extensions[2].kwargs["sources"]
         )
-        self.assertEqual(setup.call_args.kwargs["version"], "0.45.0")
+        self.assertEqual(setup.call_args.kwargs["version"], "0.46.0")
         self.assertEqual(
             set(setup.call_args.kwargs["packages"]),
             {
@@ -354,7 +354,7 @@ class KernelSetupTest(unittest.TestCase):
         metadata = tomllib.loads(
             (PLUGIN_ROOT / "kernel" / "pyproject.toml").read_text(encoding="utf-8")
         )
-        self.assertEqual(metadata["project"]["version"], "0.45.0")
+        self.assertEqual(metadata["project"]["version"], "0.46.0")
 
     def test_overlap_epilogue_is_self_contained_and_deterministic_by_design(self):
         source = (
@@ -446,7 +446,7 @@ class KernelSetupTest(unittest.TestCase):
         # Retired Sage1/Sage2 launch sites are not part of the production
         # source count; every remaining fused family still names the current
         # PyTorch stream explicitly.
-        self.assertEqual(fused.count(current_stream), 8)
+        self.assertEqual(fused.count(current_stream), 9)
         self.assertNotIn("<<<grid, block>>>", fused)
 
     def test_fused_qk_abi_exposes_independent_rope_schema(self):

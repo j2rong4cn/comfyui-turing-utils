@@ -3,7 +3,7 @@
 Compatibility and performance extensions for CUDA Tensor Core GPUs. The plugin
 currently provides ConvRot W8A8/W4A8/W4A4 support, exact-sm75 BF16 activation
 storage, bundled sm75+ W8A8 attention, exact-sm75 Sage, native sm75+ Sol and
-fixed-Top-K SLA sparse attention, and focused Krea2/Wan/Bernini utilities.
+fixed-Top-K SLA and Spark-H3 sparse attention, and focused Krea2/Wan/Bernini utilities.
 
 ## Requirements
 
@@ -464,7 +464,7 @@ original loading functions; callers bypassing the prompt server must invoke
     Without a second latent, its curve and connected second conditions are ignored.
     A resolution-changing restart is not equivalent to uninterrupted sampling.
   - Attention and preview progress belong to **one task** across both stages.
-    Sol/SLA/Veda dense prefix/suffix step protection applies to the total number
+    Sol/SLA/Veda/Spark dense prefix/suffix step protection applies to the total number
     of intervals: a 4+2 run with prefix=1/suffix=1 protects only step 1 and step 6,
     not the end of the first stage or the start of the second. Layer protection
     is unchanged. Predictor/corrector evaluations share their
@@ -551,13 +551,14 @@ original loading functions; callers bypassing the prompt server must invoke
   poster only until playback is requested. Creating a project requires an empty
   folder; opening one requires its valid `canvas.json`. The standalone page is removed.
   See [Material Workspace](docs/material-canvas.md) for usage and validation limits.
-- `Configure Attention Strategy` is the unified entry for Sol, SLA, and Veda.
+- `Configure Attention Strategy` is the unified entry for Sol, SLA, Veda, and Spark.
   H3 Image Sol and Static Virtual KV have been removed, including their node IDs.
   Its dynamic selector exposes only
-  the selected strategy; advanced inputs contain reference protection and
-  dense-step/layer safeguards. Manual prefix length appears only for manual
-  protection. The three previous Sol/SLA/Veda Configure node IDs are removed. Dense backend selection stays in the loader, and this
-  change does not alter kernels or introduce additional model copies/caches.
+  the selected strategy, including reference protection and dense-step/layer
+  safeguards as ordinary controls. Manual prefix length appears only for manual
+  protection. The three previous Sol/SLA/Veda Configure node IDs are removed.
+  Sol/SLA/Veda inherit the loader's dense backend; Spark selects its backend
+  explicitly and requires kernel 0.46.0.
   See [node configuration and reusable presets](docs/node-configuration.md)
   and the [complete node inventory](docs/node-inventory.md).
 - `Video Frames Padding` shares the model `type` choices of Set Video Latent
@@ -583,6 +584,26 @@ original loading functions; callers bypassing the prompt server must invoke
   The legacy `Patch Sol/SLA Sparse Attention` nodes have been removed.
   Replace them with the `Configure` nodes in existing workflows; the dense
   backend is selected by the loader, not by the old `use_w8a8` widget.
+- Spark defaults to an explicit `w8a8` backend, even with an official or
+  third-party model loader. `sage`/`sdpa` select those dense backends and the
+  bundled INT8-QK/FP16-PV sparse core; they do not execute sparse Torch SDPA.
+  Default Top-K is 20% of complete target-video blocks, with reference blocks
+  kept exact outside that budget. Dense warmup defaults to 20% of the actual
+  task intervals; no transformer layers are permanently dense by default.
+  Warmup can instead be an explicit step count. H3 KSampler's sampling and
+  upscale stages share one timeline, so the second stage does not restart
+  warmup. Ordinary independent samplers use their local sigma timeline.
+  The algorithm uses K-derived Landmark-v2 reblocking reused by Q/V, 32 midpoint
+  landmarks, 16-way balanced splits, two centroid updates, a FP32 global query
+  anchor, and weighted K/V summaries with stored-key log-mass correction.
+  Each query merges skipped summaries and exact tokens in one online softmax;
+  no positional local band is added after permutation. Mixed boundary blocks,
+  text, reference media, and target audio remain dense/exact. Short sequences
+  below 12288 tokens, unsupported layouts/masks, and Top-K=1 use the explicitly
+  selected dense backend. Kernel failures are not caught and silently retried.
+  Kernel 0.46.0 is required, including SM75 for Turing and SM86 for A40/3070.
+  The port uses FP16 clustering projection and the existing rotated INT8
+  numerical path; it is not bitwise identical to upstream BF16 Spark.
 
 The shared asymmetric-Q/K and independent-Q/K-RoPE protocol and kernel ABI
 remain model-independent; the removed H3 static-image adapter is not required.

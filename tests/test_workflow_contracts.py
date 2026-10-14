@@ -56,4 +56,10 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
             "STRING",
             {"default": ""},
         ]
+    # Adding a strategy does not change the serialized inputs of any existing
+    # mode. Check Spark separately and keep the old-mode snapshot frozen.
+    options = actual["TuringUtilsAttentionStrategy"]["inputs"]["required"]["strategy"][1]["options"]
+    spark = [option for option in options if option["key"] == "spark"]
+    assert len(spark) == 1
+    options.remove(spark[0])
     assert actual == expected

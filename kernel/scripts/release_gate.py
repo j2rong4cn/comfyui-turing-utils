@@ -14,7 +14,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 KERNEL = ROOT / "kernel"
 COMFYUI_ROOT = ROOT.parents[1]
-EXPECTED_VERSION = "0.45.0"
+EXPECTED_VERSION = "0.46.0"
 
 
 def _run(command: list[str], *, cwd: Path = ROOT, env=None) -> None:

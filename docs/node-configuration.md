@@ -7,6 +7,13 @@ serialization, search and menus. Backend schemas are the single source of
 parameter definitions. Do not patch these to implement our own visual conventions.
 DynamicCombo remains appropriate for genuinely mode-dependent input branches.
 
+Configure Attention Strategy selects Sol, SLA, Veda or Spark with DynamicCombo.
+Spark explicitly selects w8a8 (default), sage or sdpa independently of the loader.
+Its dense warmup branch exposes either a ratio (default 20%) or a step count;
+the exact target-video Top-K budget defaults to 20%. Reference modalities stay
+exact. All attention controls are ordinary inputs. Kernel 0.46.0 is required
+for Spark; tests/browser/spark_attention.mjs checks both renderers and reloads.
+
 SeC positive_coords and negative_coords are optional socket-only STRING inputs,
 in that order immediately before bounding_box. Use native force_input rather
 than JavaScript widget hiding; their JSON point format is unchanged.

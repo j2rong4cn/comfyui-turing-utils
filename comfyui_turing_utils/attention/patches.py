@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+from dataclasses import replace
 from .integration import ensure_prepared_attention_sites
 from .orchestration import install_attention_strategy
 from .runtime import (
@@ -38,6 +39,7 @@ from .sol import (
 from .sla import (
     make_sla_attention_override,
 )
+from .spark import make_spark_attention_override
 
 
 def _bootstrap_attention_integrations() -> None:
@@ -85,6 +87,21 @@ def attention_base_runtime(model) -> AttentionRuntimeConfig:
         dense_override=current,
         native_runtime=False,
     )
+
+
+def apply_spark_attention_patch(model, *, backend="w8a8", **settings):
+    # Explicit selection also works with official/third-party model loaders.
+    # Resolve native integration capability, not an inherited numerical policy.
+    runtime = attention_base_runtime(model)
+    backend = normalize_attention_backend(backend)
+    override = make_spark_attention_override(model.load_device, backend=backend, **settings)
+    dense = override.turing_utils_dense_override
+    runtime = replace(runtime, dense_backend=backend, dense_override=dense,
+                      dense_implementation=dense.turing_utils_attention_implementation)
+    installed = install_attention_strategy(model, override, strategy="Spark-H3", backend="spark",
+                                          implementation="bundled_spark", runtime_config=runtime)
+    LOG.info("Attention: Spark-H3 · Top-K=%.0f%% · backend=%s", settings.get("topk_ratio", 0.2) * 100, backend)
+    return installed.model
 
 
 def apply_sparse_attention_patch(

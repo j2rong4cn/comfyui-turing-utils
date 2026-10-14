@@ -323,6 +323,8 @@ class TuringSageQuantContractTest(unittest.TestCase):
                 "sol_sparse_sageattn_from_prequantized",
                 "split_prequantization_available",
                 "sparse_available",
+                "spark_available",
+                "spark_attention",
                 "w8a8attn",
                 "w8a8attn_compiled",
                 "w8a8attn_varlen",

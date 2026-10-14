@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sysconfig
 
-
 KERNEL = Path(__file__).resolve().parents[1]
 SM75_REGISTER_LIMIT = 255
 SM75_SHARED_MEMORY_LIMIT = 64 * 1024
@@ -41,16 +40,13 @@ def _resource_output(path: Path) -> str:
 
 def _metrics(line: str) -> dict[str, int]:
     return {
-        name: int(value)
-        for name, value in re.findall(r"\b(REG|STACK|SHARED|LOCAL):(\d+)", line)
+        name: int(value) for name, value in re.findall(r"\b(REG|STACK|SHARED|LOCAL):(\d+)", line)
     }
 
 
 def _sm75_section(output: str, marker: str | None = None) -> str:
     for section in output.split("Fatbin elf code:"):
-        if re.search(r"\barch\s*=\s*sm_75\b", section) and (
-            marker is None or marker in section
-        ):
+        if re.search(r"\barch\s*=\s*sm_75\b", section) and (marker is None or marker in section):
             return section
     suffix = f" containing {marker!r}" if marker else ""
     raise RuntimeError(f"built extension does not contain an exact sm75 cubin{suffix}")
@@ -63,9 +59,7 @@ def _arch_records(output: str, architecture: str) -> list[tuple[str, dict[str, i
         if re.search(rf"\barch\s*=\s*{re.escape(architecture)}\b", section)
     ]
     if not sections:
-        raise RuntimeError(
-            f"built extension does not contain an exact {architecture} cubin"
-        )
+        raise RuntimeError(f"built extension does not contain an exact {architecture} cubin")
     return [record for section in sections for record in _function_records(section)]
 
 
@@ -118,9 +112,7 @@ def _attention_dimensions(
 
 
 def main() -> None:
-    w4a8_source = (KERNEL / "csrc" / "turing" / "w4a8.cu").read_text(
-        encoding="utf-8"
-    )
+    w4a8_source = (KERNEL / "csrc" / "turing" / "w4a8.cu").read_text(encoding="utf-8")
     if "__dp4a" in w4a8_source or "w4a8_compatibility_kernel" in w4a8_source:
         raise RuntimeError(
             "legacy W4A8 edge shapes must stay on predicated/padded Tensor Core paths"
@@ -158,8 +150,7 @@ def main() -> None:
             varlen_value_records.append(metrics)
     if len(varlen_value_records) != 2:
         raise RuntimeError(
-            "expected FP16/BF16 packed-V quantizers, "
-            f"found {len(varlen_value_records)}"
+            "expected FP16/BF16 packed-V quantizers, " f"found {len(varlen_value_records)}"
         )
     for metrics in varlen_value_records:
         if (
@@ -194,13 +185,10 @@ def main() -> None:
     for dimension, metrics in sm86_attention:
         _validate_attention_resource(f"SM86 D{dimension} attention", metrics)
     hot_variants: dict[tuple[int, bool], list[dict[str, int]]] = {
-        (dimension, pipeline): []
-        for dimension in (64, 128)
-        for pipeline in (False, True)
+        (dimension, pipeline): [] for dimension in (64, 128) for pipeline in (False, True)
     }
     hot_pattern = re.compile(
-        r"sparse_attention_kernelILi(64|128)E.*"
-        r"Lb1ELb0ELb0ELb0ELi1ELi1ELb0ELb([01])ELb0EEE"
+        r"sparse_attention_kernelILi(64|128)E.*" r"Lb1ELb0ELb0ELb0ELi1ELi1ELb0ELb([01])ELb0ELb0ELb0EEE"
     )
     for line, metrics in qattn_sm86_records:
         match = hot_pattern.search(line)
@@ -224,18 +212,81 @@ def main() -> None:
                 f"baseline=r{baseline}/{baseline_ctas}ctas "
                 f"pipeline=r{pipelined}/{pipelined_ctas}ctas"
             )
-        ampere_hot_summary.append(
-            f"D{dimension}:r{baseline}->r{pipelined}/{pipelined_ctas}ctas"
-        )
+        ampere_hot_summary.append(f"D{dimension}:r{baseline}->r{pipelined}/{pipelined_ctas}ctas")
     print(
         "Ampere sparse attention pipeline audit passed: "
         + " ".join(ampere_hot_summary)
         + " local=0 stack<=16 dynamic_shared=pipeline-D64:20480/pipeline-D128:40960"
     )
 
+    spark_pattern = re.compile(
+        r"sparse_attention_kernelILi(64|128)E.*" r"Lb1ELb0ELb0ELb0ELi1ELi1ELb1ELb([01])ELb0ELb1ELb0EEE"
+    )
+    for architecture, arch_records, pipeline in (
+        ("sm75", qattn_sm75_records, False),
+        ("sm86", qattn_sm86_records, True),
+    ):
+        spark = [
+            (match, metrics)
+            for line, metrics in arch_records
+            if (match := spark_pattern.search(line)) is not None
+            and (match.group(2) == "1") == pipeline
+        ]
+        if len(spark) != 4:
+            raise RuntimeError(
+                f"expected four {architecture} Spark W8A8 variants, found {len(spark)}"
+            )
+        for match, metrics in spark:
+            _validate_attention_resource(f"{architecture} Spark D{match.group(1)}", metrics)
+        for marker, expected, shared_limit in (
+            ("directions_kernel", 2, 32768),
+            ("fused_nodes_kernel", 16, 32768),
+            ("scores_kernel", 2, 24576),
+            ("group_indices_kernel", 2, 0),
+            ("select_cutoffs", 1, 13312),
+            ("selection_histograms", 1, 9216),
+            ("selection_prefix", 1, 1024),
+            ("label_and_count", 1, 512),
+            ("prefix_counts", 1, 4096),
+            ("scatter_children", 1, 0),
+            ("value_maximum_kernel", 2, 1024),
+            ("value_scale_kernel", 1, 0),
+            ("summaries_kernelI", 4, 18432),
+            ("topk_routes_kernel", 1, 512),
+        ):
+            family = [metrics for line, metrics in arch_records if marker in line]
+            if len(family) != expected:
+                raise RuntimeError(
+                    f"expected {expected} {architecture} Spark {marker}, found {len(family)}"
+                )
+            for metrics in family:
+                _validate_attention_resource(f"{architecture} Spark {marker}", metrics)
+                if metrics.get("SHARED", shared_limit + 1) > shared_limit:
+                    raise RuntimeError(
+                        f"{architecture} Spark {marker} shared-memory regression: {metrics}"
+                    )
+                if marker == "select_cutoffs" and architecture == "sm75":
+                    registers = ((metrics["REG"] + 7) // 8) * 8 * 256
+                    shared = ((metrics["SHARED"] + 255) // 256) * 256
+                    resident = min(4, 65536 // registers, 65536 // shared)
+                    if resident < 4:
+                        raise RuntimeError(
+                            f"SM75 Spark selection loses four-CTA residency: {metrics}"
+                        )
+        selection_resources = next(
+            metrics for line, metrics in arch_records if "select_cutoffs" in line
+        )
+        print(
+            f"Spark {architecture} resource audit passed: "
+            f"attention_registers={[metrics['REG'] for _, metrics in spark]} "
+            f"selector_registers={selection_resources['REG']} "
+            f"selector_shared={selection_resources['SHARED']} "
+            "landmark_shared<=32KiB score_shared<=24KiB local=0 stack<=16"
+        )
+
     mapped_pattern = re.compile(
         r"sparse_attention_kernelILi(64|128)E.*"
-        r"Lb0ELb0ELb0ELb0ELi([12])ELi([12])ELb0ELb0ELb1EEE"
+        r"Lb0ELb0ELb0ELb0ELi([12])ELi([12])ELb0ELb0ELb1ELb0ELb0EEE"
     )
     mapped_summary = []
     for architecture, arch_records in (
@@ -253,12 +304,8 @@ def main() -> None:
                 f"found {len(mapped)}"
             )
         for match, metrics in mapped:
-            _validate_attention_resource(
-                f"{architecture} mapped Sol D{match.group(1)}", metrics
-            )
-        mapped_summary.append(
-            f"{architecture}:r{max(metrics['REG'] for _, metrics in mapped)}"
-        )
+            _validate_attention_resource(f"{architecture} mapped Sol D{match.group(1)}", metrics)
+        mapped_summary.append(f"{architecture}:r{max(metrics['REG'] for _, metrics in mapped)}")
     print(
         "mapped FP16/BF16 Sol resource audit passed: "
         + " ".join(mapped_summary)
@@ -324,15 +371,13 @@ def main() -> None:
         ("ConvRot staged INT4 output", "quantize_int4_from_partials_kernel", 2, 64),
         ("segmented RMSNorm+AdaLN", "segmented_rms_adaln_kernel", 3, 96),
         ("LayerNorm+AdaLN", "layer_norm_adaln_kernel", 3, 96),
-        ("codebook W4 decoder", "decode_codebook_w4_to_s8", 1, 64),
+        ("packed W4/W6 decoder", "decode_codebook_w4_to_s8", 4, 64),
     )
     family_summary = []
     for label, marker, expected, register_limit in expected_families:
         family = [metrics for name, metrics in core_records if marker in name]
         if len(family) != expected:
-            raise RuntimeError(
-                f"expected {expected} {label} SM75 kernels, found {len(family)}"
-            )
+            raise RuntimeError(f"expected {expected} {label} SM75 kernels, found {len(family)}")
         maximum = max(metrics["REG"] for metrics in family)
         if maximum > register_limit:
             raise RuntimeError(
@@ -346,15 +391,12 @@ def main() -> None:
         + f" total={len(core_records)} local=0 stack=0"
     )
 
-    w4_section_records = _function_records(
-        _sm75_section(core_output, "TuringCodebookGemmKernel")
-    )
+    w4_section_records = _function_records(_sm75_section(core_output, "TuringCodebookGemmKernel"))
     long_shapes = ("GemmShapeILi128ELi256ELi64",)
     inline = [
         metrics
         for name, metrics in w4_section_records
-        if "TuringCodebookGemmKernel" in name
-        and any(shape in name for shape in long_shapes)
+        if "TuringCodebookGemmKernel" in name and any(shape in name for shape in long_shapes)
     ]
     raw_w8 = [
         metrics
@@ -364,9 +406,9 @@ def main() -> None:
         and "integer_subbyte" not in name
         and any(shape in name for shape in long_shapes)
     ]
-    if len(inline) != 1 or len(raw_w8) != 1:
+    if len(inline) != 2 or len(raw_w8) != 4:
         raise RuntimeError(
-            "expected one inline-codebook and one raw-W8 deterministic SM75 kernel, "
+            "expected two inline-codebook and four raw-W8 output variants on SM75, "
             f"found inline={len(inline)} raw_w8={len(raw_w8)}"
         )
     for name, records in (("inline codebook W4A8", inline), ("raw W8A8", raw_w8)):
@@ -392,9 +434,9 @@ def main() -> None:
         for name, metrics in _arch_records(core_output, "sm_86")
         if "DefaultGemmWithVisitor" in name and "4Sm80" in name
     ]
-    if len(ampere) != 1:
+    if len(ampere) != 6:
         raise RuntimeError(
-            "expected one CUTLASS SM80 W8A8 schedule in the exact sm86 cubin, "
+            "expected six CUTLASS SM80 W8A8 output/tile variants in the exact sm86 cubin, "
             f"found {len(ampere)}"
         )
     ampere_summary = []

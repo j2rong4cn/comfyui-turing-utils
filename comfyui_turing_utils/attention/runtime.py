@@ -50,6 +50,7 @@ class AttentionRuntimeConfig:
         if strategy not in {
             "dense",
             "sol",
+            "spark",
             "sla",
             "veda",
         }:
