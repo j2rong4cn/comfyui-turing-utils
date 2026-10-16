@@ -457,21 +457,21 @@ def test_progressive_video_boundary_uses_last_clean_prediction_at_next_sigma(pat
     source = latent()
     curve = torch.tensor([0.9, 0.7, 0.5, 0.2, 0])
     states = []
-    real = comfy.sample.sample_custom
+    real = comfy.samplers.sample
 
     def observe(*args, **kwargs):
         callback = kwargs.get("callback")
 
         def capture(i, x0, x, n):
             states.append(
-                (args[4].clone(), i, x0.unbind()[0].clone(), x.unbind()[0].clone())
+                (args[7].clone(), i, x0.unbind()[0].clone(), x.unbind()[0].clone())
             )
             callback(i, x0, x, n)
 
         return real(*args, **{**kwargs, "callback": capture})
 
     with (
-        mock.patch.object(comfy.sample, "sample_custom", side_effect=observe),
+        mock.patch.object(comfy.samplers, "sample", side_effect=observe),
         mock.patch.object(
             sampling, "upscale_h3_video_to_size", side_effect=nearest_lift
         ),
@@ -830,3 +830,167 @@ def test_same_resolution_progressive_does_not_replace_video_noise(patcher):
         mode={"mode": "progressive", "lowres_scale": 1, "lowres_steps": 2},
     )
     assert_streams(actual["samples"], expected, atol=2e-6, rtol=2e-6)
+
+
+@pytest.mark.parametrize("kind", ["single", "progressive", "two_pass"])
+def test_same_grid_reuses_masks_and_conditioning_without_loading_upscaler(
+    patcher, kind
+):
+    source = latent()
+    video, audio = source["samples"].unbind()
+    source["noise_mask"] = NestedTensor(
+        (torch.ones_like(video[:, :1]), torch.zeros_like(audio))
+    )
+    with (
+        mock.patch.object(sampling, "_masks", wraps=sampling._masks) as masks,
+        mock.patch.object(
+            sampling, "close_patch_mask", wraps=sampling.close_patch_mask
+        ) as close,
+        mock.patch.object(sampling, "resize_conditioning") as resize,
+        mock.patch.object(sampling, "upscale_h3_video_to_size") as lift,
+        mock.patch.object(
+            comfy.samplers, "sample", wraps=comfy.samplers.sample
+        ) as sample,
+        mock.patch.object(
+            patcher.model.diffusion_model,
+            "preprocess_text_embeds",
+            wraps=patcher.model.diffusion_model.preprocess_text_embeds,
+        ) as preprocess,
+    ):
+        sampling.sample_h3(
+            patcher,
+            conditioning(8, 12),
+            source,
+            mode={"mode": kind, "lowres_scale": 1},
+        )
+    assert masks.call_count == close.call_count == 1
+    assert sample.call_count == preprocess.call_count == (1 if kind == "single" else 2)
+    resize.assert_not_called()
+    lift.assert_not_called()
+
+
+def test_shared_keyframe_latents_are_resized_once_and_same_grid_is_unchanged():
+    cond = conditioning(8, 12)
+    keyframe = cond[0][1]["minimax_keyframes"][0]
+    cond.append([cond[0][0], {"minimax_keyframes": [keyframe.copy()]}])
+    assert sampling.resize_conditioning(cond, 8, 12) is cond
+    with mock.patch.object(
+        sampling, "resize_video", wraps=sampling.resize_video
+    ) as resize:
+        result = sampling.resize_conditioning(cond, 4, 6)
+    assert resize.call_count == 1
+    assert (
+        result[0][1]["minimax_keyframes"][0]["latent"]
+        is result[1][1]["minimax_keyframes"][0]["latent"]
+    )
+    assert cond[0][1]["minimax_keyframes"][0]["latent"].shape[-2:] == (8, 12)
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        (9, 13, 4, 6),
+        (13, 17, 8, 12),
+        (12, 18, 10, 14),
+        (12, 18, 12, 16),
+        (18, 12, 16, 12),
+    ],
+)
+@pytest.mark.parametrize("grow", [0, 1, 2])
+def test_low_mask_covers_all_high_edit_pixels_under_fractional_trilinear_upscale(
+    size, grow
+):
+    height, width, low_h, low_w = size
+    mask = torch.zeros(1, 1, 6, height, width, dtype=torch.bool)
+    for frame, (y, x) in enumerate(
+        [
+            (0, 0),
+            (0, width - 1),
+            (height - 1, 0),
+            (height - 1, width - 1),
+            (height // 2, width // 2),
+            (height // 2 + 1, width // 2 - 1),
+        ]
+    ):
+        mask[0, 0, frame, y, x] = True
+    high = sampling.close_patch_mask(mask, (2, 2), grow)
+    original = high.clone()
+    low = sampling.low_resolution_mask(high, low_h, low_w, (2, 2))
+    coverage = F.interpolate(
+        low.float(), size=(6, height, width), mode="trilinear", align_corners=False
+    )
+    torch.testing.assert_close(
+        coverage[high], torch.ones_like(coverage[high]), atol=1e-6, rtol=0
+    )
+    assert low.shape == (1, 1, 6, low_h, low_w)
+    torch.testing.assert_close(high, original, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("kind", ["progressive", "two_pass"])
+@pytest.mark.parametrize("grow", [0, 1])
+def test_low_to_high_inpaint_covers_patch_edges_without_expanding_final_mask(
+    patcher, kind, grow
+):
+    source = latent(height=9, width=13, frames=4)
+    video, audio = source["samples"].unbind()
+    mask = torch.zeros_like(video[:, :1])
+    mask[:, :, 0, 4, 6] = 1e-8
+    mask[:, :, 1, 8, 12] = 0.01
+    mask[:, :, 2, 0, 0] = 1
+    source["noise_mask"] = NestedTensor((mask, torch.zeros_like(audio)))
+    stage_masks = []
+    native_sample = comfy.samplers.sample
+
+    def observe(*args, **kwargs):
+        stage_masks.append(kwargs["denoise_mask"].unbind()[0].clone())
+        return native_sample(*args, **kwargs)
+
+    with (
+        mock.patch.object(comfy.samplers, "sample", side_effect=observe),
+        mock.patch.object(
+            sampling, "upscale_h3_video_to_size", side_effect=nearest_lift
+        ),
+    ):
+        result = sampling.sample_h3(
+            patcher,
+            conditioning(),
+            source,
+            upscale_model=object(),
+            mode={"mode": kind, "lowres_scale": 0.6, "mask_grow": grow},
+        )
+    expected = sampling.close_patch_mask(mask, (2, 2), grow)
+    torch.testing.assert_close(
+        result["noise_mask"].unbind()[0], expected.float(), rtol=0, atol=0
+    )
+    torch.testing.assert_close(stage_masks[1], expected.float(), rtol=0, atol=0)
+    coverage = F.interpolate(
+        stage_masks[0], size=(4, 9, 13), mode="trilinear", align_corners=False
+    )
+    torch.testing.assert_close(
+        coverage[expected], torch.ones_like(coverage[expected]), atol=1e-6, rtol=0
+    )
+    keep = ~expected.expand_as(video)
+    out_v, out_a = result["samples"].unbind()
+    torch.testing.assert_close(out_v[keep], video[keep], rtol=0, atol=0)
+    torch.testing.assert_close(out_a, audio.float(), rtol=0, atol=0)
+    assert not stage_masks[0][:, :, 3].any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_fractional_low_mask_projection_agrees_between_cpu_and_cuda():
+    torch.manual_seed(43)
+    mask = torch.rand(2, 1, 4, 13, 17) > 0.97
+    cpu = sampling.low_resolution_mask(mask, 8, 12, (2, 2))
+    gpu = sampling.low_resolution_mask(mask.cuda(), 8, 12, (2, 2))
+    torch.testing.assert_close(cpu, gpu.cpu(), rtol=0, atol=0)
+
+
+def test_large_mask_growth_fills_only_frames_with_selected_pixels():
+    mask = torch.zeros(2, 1, 4, 9, 13)
+    mask[0, 0, 1, 0, 0] = 0.01
+    mask[1, 0, 3, -1, -1] = 0.01
+    result = sampling.close_patch_mask(mask, (2, 2), 4096)
+    expected = torch.zeros_like(mask, dtype=torch.bool)
+    expected[0, 0, 1] = True
+    expected[1, 0, 3] = True
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)

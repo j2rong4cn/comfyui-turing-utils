@@ -66,6 +66,22 @@ class _FakePatcher:
 
 
 class MiniMaxH3LatentUpscaleTest(unittest.TestCase):
+    def test_shared_video_and_keyframe_are_upscaled_once(self):
+        patcher = _FakePatcher()
+        source = torch.randn(1, 24, 1, 4, 6)
+        with mock.patch("comfy.model_management.load_models_gpu"):
+            output = _upscale_tensors(patcher, [source, source], 2.0, 8, 12)
+        self.assertEqual(len(output), 1)
+        self.assertEqual(patcher.model.calls, [((1, 24, 1, 4, 6), 2.0, (1, 8, 12))])
+        torch.testing.assert_close(
+            output[id(source)],
+            F.interpolate(
+                source, size=(1, 8, 12), mode="trilinear", align_corners=False
+            ),
+            rtol=0,
+            atol=0,
+        )
+
     def test_mask_resize_matches_positive_area_intersections(self):
         for source_size, target_size in (
             ((2, 6), (4, 10)),

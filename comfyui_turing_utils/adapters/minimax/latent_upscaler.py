@@ -546,6 +546,7 @@ def _upscale_tensors(
     target_height: int,
     target_width: int,
 ) -> dict[int, torch.Tensor]:
+    tensors = list({id(tensor): tensor for tensor in tensors}.values())
     model = upscale_model.model
     dtype = upscale_model.model_dtype()
     channels = int(model.conv_in.out_channels)

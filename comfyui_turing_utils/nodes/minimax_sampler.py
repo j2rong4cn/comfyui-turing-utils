@@ -123,6 +123,7 @@ def _mode_input(internal=False):
                 default=0,
                 min=0,
                 max=4096,
+                tooltip="Grow the final high-resolution mask by patch rings. Low-resolution coverage includes this expanded region when resizing.",
             ),
         ]
 

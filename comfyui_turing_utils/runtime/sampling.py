@@ -7,7 +7,7 @@ several native runs without resetting its attention policy or preview progress.
 from __future__ import annotations
 
 from bisect import bisect_right
-from types import FunctionType, CellType
+from types import FunctionType, CellType, CodeType
 
 import comfy.samplers
 from comfy.k_diffusion import sampling as k_diffusion
@@ -36,10 +36,14 @@ def _bind_function(function, namespace, originals, bound):
     closure = function.__closure__
     if closure:
         closure = tuple(
-            CellType(_bind_function(cell.cell_contents, namespace, originals, bound))
-            if isinstance(cell.cell_contents, FunctionType)
-            and cell.cell_contents in originals
-            else cell
+            (
+                CellType(
+                    _bind_function(cell.cell_contents, namespace, originals, bound)
+                )
+                if isinstance(cell.cell_contents, FunctionType)
+                and cell.cell_contents in originals
+                else cell
+            )
             for cell in closure
         )
     globals_ = (
@@ -53,10 +57,23 @@ def _bind_function(function, namespace, originals, bound):
     result.__kwdefaults__ = function.__kwdefaults__
     result.__dict__.update(function.__dict__)
     bound[function] = result
+    if globals_ is namespace:
+        codes = [function.__code__]
+        while codes:
+            code = codes.pop()
+            for name in code.co_names:
+                dependency = function.__globals__.get(name)
+                if isinstance(dependency, FunctionType) and dependency in originals:
+                    namespace[name] = _bind_function(
+                        dependency, namespace, originals, bound
+                    )
+            codes.extend(
+                value for value in code.co_consts if isinstance(value, CodeType)
+            )
     return result
 
 
-def _loop_namespace(module, steps):
+def _loop_namespace(module, steps, sampler_function):
     """Local view of a native solver module with an observable step iterator.
 
     ComfyUI's callback is *not* a before-step hook: Heun calls it before the
@@ -79,15 +96,14 @@ def _loop_namespace(module, steps):
             for function in chain:
                 originals[function] = module.__dict__
     bound = {}
-    for name, function in module.__dict__.items():
-        if isinstance(function, FunctionType) and function in originals:
-            namespace[name] = _bind_function(function, namespace, originals, bound)
+    namespace[sampler_function.__name__] = _bind_function(
+        sampler_function, namespace, originals, bound
+    )
     if module is uni_pc:
         # Only sample() owns the loop; all numerical updates stay inherited.
         sample = uni_pc.UniPC.sample
-        sample = FunctionType(
-            sample.__code__, namespace, sample.__name__, sample.__defaults__
-        )
+        originals[sample] = module.__dict__
+        sample = _bind_function(sample, namespace, originals, bound)
         namespace["UniPC"] = type("TaskUniPC", (uni_pc.UniPC,), {"sample": sample})
     return namespace
 
@@ -150,7 +166,7 @@ class NativeStepSampler(comfy.samplers.KSAMPLER):
             )
         else:
             module = uni_pc if self.sampler_name.startswith("uni_pc") else k_diffusion
-            namespace = _loop_namespace(module, steps)
+            namespace = _loop_namespace(module, steps, self.sampler_function)
             native = comfy.samplers.KSAMPLER(
                 namespace[self.sampler_function.__name__],
                 self.extra_options,

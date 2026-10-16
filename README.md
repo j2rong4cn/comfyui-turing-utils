@@ -454,9 +454,12 @@ original loading functions; callers bypassing the prompt server must invoke
     interpolation or Qwen re-encoding occurs. Ref2VA references retain independent
     geometry. Low keyframes retain their per-channel/frame mean. A low-resolution
     latent resize is not guaranteed equivalent to downscaling pixels and VAE-encoding.
-  - Each stage's mask derives directly from the final-canvas mask with conservative
-    coverage and DiT patch closure. The high mask is never a round trip through
-    the low grid. `mode.mask_grow` adds high-resolution spatial patch rings (default 0).
+  - The final mask is patch-closed once on the original canvas; `mode.mask_grow`
+    adds high-resolution spatial patch rings (default 0). The low mask covers
+    every low-grid sample contributing to that final region through the learned
+    resizer's half-pixel interpolation, then closes low-resolution patches.
+    This includes expanded high-resolution borders and fractional resize edges.
+    The final mask never makes a round trip through the low grid.
     Protected video uses the true original final-size latent, not an upscaled low
     approximation. Audio masks pass through without growth. VAE decoding can still
     change pixel boundaries; final pixel compositing belongs to the stitch stage.
