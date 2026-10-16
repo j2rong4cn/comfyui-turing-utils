@@ -67,7 +67,7 @@ try {
     const { output } = await app.graphToPrompt();
     check(output[id].inputs["mode.lowres_scale"] === .5, "Scale failed roundtrip");
     const modeWidget = node.widgets.find(w => w.name === "mode");
-    check(modeWidget.label === "采样模式", "Mode label is unclear");
+    check(modeWidget.label === "sampling mode", "Mode label is unclear");
     return { cases, roundtrip: true, finalCanvas: true, mainPresetRemoved: true };
   });
   assert.equal(result.cases, 10);

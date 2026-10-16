@@ -92,7 +92,7 @@
           "link": null
         },
         {
-          "localized_name": "主曲线",
+          "localized_name": "main curve",
           "name": "sigmas",
           "type": "COMFY_DYNAMICCOMBO_V3",
           "widget": {
@@ -101,7 +101,7 @@
           "link": null
         },
         {
-          "localized_name": "采样模式",
+          "localized_name": "sampling mode",
           "name": "mode",
           "type": "COMFY_DYNAMICCOMBO_V3",
           "widget": {
@@ -233,7 +233,7 @@
           "link": null
         },
         {
-          "localized_name": "主曲线",
+          "localized_name": "main curve",
           "name": "sigmas",
           "type": "COMFY_DYNAMICCOMBO_V3",
           "widget": {
@@ -242,7 +242,7 @@
           "link": null
         },
         {
-          "localized_name": "采样模式",
+          "localized_name": "sampling mode",
           "name": "mode",
           "type": "COMFY_DYNAMICCOMBO_V3",
           "widget": {
@@ -418,7 +418,7 @@
           "link": null
         },
         {
-          "localized_name": "主曲线",
+          "localized_name": "main curve",
           "name": "sigmas",
           "type": "COMFY_DYNAMICCOMBO_V3",
           "widget": {
@@ -427,7 +427,7 @@
           "link": null
         },
         {
-          "localized_name": "采样模式",
+          "localized_name": "sampling mode",
           "name": "mode",
           "type": "COMFY_DYNAMICCOMBO_V3",
           "widget": {

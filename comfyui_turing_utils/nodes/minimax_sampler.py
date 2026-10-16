@@ -21,7 +21,7 @@ from ..adapters.minimax.sampling import (
 def _curve_input(name, *, second=False):
     return io.DynamicCombo.Input(
         name,
-        display_name="第二段曲线" if second else "主曲线",
+        display_name="second curve" if second else "main curve",
         options=(
             [
                 io.DynamicCombo.Option(
@@ -29,10 +29,10 @@ def _curve_input(name, *, second=False):
                     [
                         io.Combo.Input(
                             "preset",
-                            display_name="动态预设",
+                            display_name="dynamic preset",
                             options=[name for name, _ in SECOND_PASS_PRESETS],
                             default=SECOND_PASS_PRESETS[0][0],
-                            tooltip="按当前 MODEL 的 video shift 映射。LBH 示例保留原作者手工配方的基础坐标。",
+                            tooltip="Remapped to the current MODEL's video shift. LBH examples retain the author's recipe in base time.",
                         )
                     ],
                 )
@@ -46,7 +46,7 @@ def _curve_input(name, *, second=False):
                 [
                     io.Int.Input(
                         "steps",
-                        display_name="基础步数",
+                        display_name="base steps",
                         default=3 if second else 4,
                         min=1,
                         max=10000,
@@ -58,7 +58,7 @@ def _curve_input(name, *, second=False):
                     ),
                     io.Float.Input(
                         "denoise",
-                        display_name="去噪强度",
+                        display_name="denoise",
                         default=0.5 if second else 1.0,
                         min=0,
                         max=1,
@@ -66,11 +66,11 @@ def _curve_input(name, *, second=False):
                     ),
                     io.Int.Input(
                         "tail_steps",
-                        display_name="末段低噪补点",
+                        display_name="low-noise tail steps",
                         default=0 if second else 1,
                         min=0,
                         max=1000,
-                        tooltip="原生调度后，在最后一个非零点与零之间按基础坐标等分补点；0 保持原生曲线。",
+                        tooltip="Add evenly spaced points in base time between the last nonzero sigma and zero. Set to 0 to keep the native schedule.",
                     ),
                 ],
             ),
@@ -82,7 +82,7 @@ def _curve_input(name, *, second=False):
                         display_name="sigmas",
                         multiline=True,
                         default=DEFAULT_SECOND_SIGMAS if second else DEFAULT_SIGMAS,
-                        tooltip="完整绝对 sigma 曲线，以零结束；不追加 shift、补点或重排。",
+                        tooltip="Complete absolute sigma curve ending at zero. No shift, extra points or reordering are applied.",
                     )
                 ],
             ),
@@ -95,12 +95,12 @@ def _mode_input(internal=False):
         return [
             io.Float.Input(
                 "lowres_scale",
-                display_name="低清宽高比例",
+                display_name="lowres scale",
                 default=0.75,
                 min=0.05,
                 max=1,
                 step=0.05,
-                tooltip="相对最终画布的宽高比例；时间和音频不缩放。",
+                tooltip="Width and height scale relative to the final canvas. Time and audio are not resized.",
             ),
             *(
                 []
@@ -108,7 +108,7 @@ def _mode_input(internal=False):
                 else [
                     io.Combo.Input(
                         "model_name",
-                        display_name="放大模型",
+                        display_name="upscaler model",
                         default="none",
                         options=[
                             "none",
@@ -119,7 +119,7 @@ def _mode_input(internal=False):
             ),
             io.Int.Input(
                 "mask_grow",
-                display_name="高清遮罩扩展（patch圈）",
+                display_name="highres mask grow (patch rings)",
                 default=0,
                 min=0,
                 max=4096,
@@ -131,24 +131,24 @@ def _mode_input(internal=False):
         1,
         io.Int.Input(
             "lowres_steps",
-            display_name="低清步数",
+            display_name="lowres steps",
             default=3,
             min=1,
             max=10000,
-            tooltip="主曲线前多少步在低清运行，至少留一步高清。当前要求 Euler。",
+            tooltip="Run this many initial main-curve steps at low resolution, leaving at least one high-resolution step. Requires Euler.",
         ),
     )
     two_pass = stage_inputs()
     two_pass.insert(1, _curve_input("second_sigmas", second=True))
     return io.DynamicCombo.Input(
         "mode",
-        display_name="采样模式",
+        display_name="sampling mode",
         options=[
             io.DynamicCombo.Option("single", []),
             io.DynamicCombo.Option("progressive", progressive),
             io.DynamicCombo.Option("two_pass", two_pass),
         ],
-        tooltip="single 单段；progressive 渐进：同一曲线切换分辨率；two_pass 二采：主曲线结束后独立重绘。",
+        tooltip="single: one stage; progressive: change resolution within one curve; two_pass: complete the main curve, then independently re-noise and refine.",
     )
 
 
@@ -179,7 +179,7 @@ def _schema(internal):
             io.Conditioning.Input("conditioning"),
             io.Latent.Input(
                 "latent",
-                tooltip="最终尺寸的原始画布，同时拥有时间线、音频和规范遮罩；低清阶段内部派生。",
+                tooltip="Original final-size canvas with the timeline, audio and canonical mask. Low-resolution stages are derived internally.",
             ),
             io.Int.Input(
                 "seed",
