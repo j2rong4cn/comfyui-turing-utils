@@ -794,7 +794,7 @@ app.registerExtension({
     };
   },
   beforeConfigureGraph(workflow) {
-    for (const node of app.rootGraph?._nodes || []) node.releasePlayer?.();
+    stopActivePreview();
     if (workflow.extra?.turing_editor || workflow.extra?.turing_card) {
       // Native extension hooks swallow thrown errors. Show the invalid file
       // explicitly and leave it open for repair; snapshotCard blocks its Save.

@@ -8,6 +8,12 @@ app.registerExtension({
       ...data.input?.required,
       ...data.input?.optional,
     }).some((spec) => ["COMFY_AUTOGROW_V3", "COMFY_DYNAMICCOMBO_V3"].includes(spec[0]));
+    // Fixed-layout third-party nodes own their configure/migration behavior.
+    // Only native V3 dynamic schemas and our nodes need this adapter.
+    const owned = ["TuringUtils", "TuringCanvas", "TuringMaterial"].some((prefix) =>
+      data.name.startsWith(prefix),
+    );
+    if (!dynamic && !owned) return;
     preserveInputLayout(nodeType.prototype, dynamic);
   },
   nodeCreated(node) {

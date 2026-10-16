@@ -2,9 +2,11 @@
 // only hit the socket dot. Bridge endpoint NAME context menus in both renderers
 // to the shared action model; sockets and all other nodes stay native.
 // No drag state, per-node listeners or per-frame DOM traversal.
+import { INPUTS, OUTPUTS } from "./canvas_ports.js";
+
 function alignEndpointRows(app, element) {
   const node = app.canvas.graph.getNodeById(element.dataset.nodeId);
-  if (!node?.endpointMenu || node.type !== "TuringCanvasInputs" || node.flags.collapsed)
+  if (!node?.endpointMenu || node.type !== INPUTS || node.flags.collapsed)
     return;
   const rows = element.querySelectorAll(".lg-slot--input");
   const output = element.querySelector(".lg-slot--output");
@@ -54,6 +56,7 @@ export function installEndpointDomEvents(app) {
       if (event.type === "dblclick" || event.target !== app.canvas.canvas) return;
       const pos = app.canvas.convertEventToCanvasOffset(event);
       const node = app.canvas.graph.getNodeOnPos(...pos);
+      if (![INPUTS, OUTPUTS].includes(node?.type)) return;
       const id = node?.endpointMenu?.portAt([
         pos[0] - node.pos[0],
         pos[1] - node.pos[1],
@@ -70,7 +73,7 @@ export function installEndpointDomEvents(app) {
     const element = row.closest("[data-node-id]");
     const id = element?.dataset.nodeId;
     const node = app.canvas.graph.getNodeById(id);
-    if (!node?.endpointMenu) return;
+    if (![INPUTS, OUTPUTS].includes(node?.type) || !node.endpointMenu) return;
     const key = row.querySelector("[data-slot-key]")?.dataset.slotKey;
     const match = key?.match(/-(in|out)-(\d+)$/);
     if (!match) return;

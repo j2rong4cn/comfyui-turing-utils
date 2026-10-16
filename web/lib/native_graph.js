@@ -67,7 +67,7 @@ export function preserveInputLayout(owner, dynamic = false) {
   const configure = owner.configure;
   owner.configure = function (data, ...args) {
     const slots = data.inputs?.map(({ name, link }) => ({ name, link }));
-    // JS-based dynamic nodes do not advertise a V3 schema. Extra/reordered
+    // Our JS-based dynamic nodes may not advertise a V3 schema. Extra/reordered
     // persisted names identify that case; fixed layouts keep the native path.
     if (
       !slots ||

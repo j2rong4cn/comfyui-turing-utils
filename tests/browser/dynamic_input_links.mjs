@@ -114,9 +114,9 @@ try {
       for (const name of ["image_target", "image_ref", "source_stats.target_index", "strength"])
         connect(node, name);
     }));
-    // Classic third-party JS nodes often grow slots without an io.Autogrow
-    // declaration. The same saved-name mapping must cover that layout too.
-    const legacy = "DynamicSlotFixture";
+    // Our JS nodes can also grow slots without an io.Autogrow declaration.
+    // Undeclared third-party layouts retain their own configure behavior.
+    const legacy = "TuringUtilsDynamicSlotFixture";
     await app.registerNodeDef(legacy, {
       name: legacy, display_name: legacy, category: "test",
       python_module: "tests.dynamic_fixture", description: "",

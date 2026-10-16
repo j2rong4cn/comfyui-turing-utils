@@ -1,4 +1,6 @@
 /** Native title buttons, with a scoped DOM bridge for Nodes 2.0 headers. */
+const titleActions = new WeakMap();
+
 export function titleAction(node, name, callback) {
   const views = new Set();
   const native = node.addTitleButton({ name, text: "▶", fontSize: 16, height: 24 });
@@ -70,8 +72,8 @@ export function titleAction(node, name, callback) {
     if (button !== native) return click.call(this, button, ...args);
     if (!action.disabled) return action.run();
   };
-  node.titleActions ||= [];
-  node.titleActions.push(action);
+  if (!titleActions.has(node)) titleActions.set(node, []);
+  titleActions.get(node).push(action);
   return action;
 }
 
@@ -85,14 +87,15 @@ export function installTitleActionDom(app) {
   };
   const mount = (element) => {
     const node = app.canvas.graph.getNodeById(element.dataset.nodeId);
-    if (!node?.titleActions?.length) return;
+    const actions = titleActions.get(node);
+    if (!actions?.length) return;
     if (node.flags.collapsed) {
       for (const button of element.querySelectorAll("[data-turing-title-action]"))
         button.remove();
       return;
     }
     const header = element.querySelector(".lg-node-header > div");
-    if (header) for (const action of node.titleActions) action.mount(header);
+    if (header) for (const action of actions) action.mount(header);
   };
   // Only structural changes: no per-frame scans or observer feedback from state.
   new MutationObserver((records) => {
