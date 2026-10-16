@@ -38,14 +38,22 @@ def compile_shared_loaders(prompt):
             continue
         loader, worker, socket, defaults = spec
         inputs = dict(node.get("inputs", {}))
-        if "model_name" not in inputs:
-            continue  # Let normal prompt validation report the missing input.
-        if (
-            node.get("class_type") == "TuringUtilsMiniMaxH3KSampler"
-            and inputs["model_name"] == "none"
+        h3_sampler = node.get("class_type") == "TuringUtilsMiniMaxH3KSampler"
+        if h3_sampler and (
+            {"latent_second", "conditioning_second", "second_sigmas", "model_name"}
+            & inputs.keys()
+            or inputs.get("sigmas") == "preset"
         ):
+            raise ValueError(
+                "H3 sampler workflow needs migration: connect the final-size original LATENT, "
+                "select single/progressive/two_pass, and replace first presets with scheduler + tail_steps."
+            )
+        model_key = "mode.model_name" if h3_sampler else "model_name"
+        if model_key not in inputs:
+            continue  # Let normal prompt validation report the missing input.
+        if h3_sampler and inputs[model_key] == "none":
             continue  # The optional, lazy upscaler must not validate a nonexistent file.
-        loading = {"model_name": inputs.pop("model_name")}
+        loading = {"model_name": inputs.pop(model_key)}
         loading.update(
             {name: inputs.pop(name, default) for name, default in defaults.items()}
         )

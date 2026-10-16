@@ -47,18 +47,20 @@ than JavaScript widget hiding; their JSON point format is unchanged.
 
 Only Multimodal Prompt Chat's former Options parameters are advanced;
 system_prompt and existing ordinary-node inputs remain ordinary.
-H3 KSampler uses native DynamicCombo branches: sigmas preset/scheduler/manual
-(default: preset 4+1), upscale sigmas preset/manual (default: 3 steps).
-Preset names describe base steps plus supplemental points within a complete
-first curve; they are not an upscale split. Only scheduler mode exposes steps,
-scheduler and denoise; only manual branches expose sigma text. Manual defaults
-are the 4+1 first curve and the 3-step second curve. Both curves
-finish independently at zero. The upscaler model and mask grow are ordinary
-inputs; upscaler precision is fixed to auto, without a precision control.
-H3 has no advanced, negative or CFG inputs. Upscale sockets are displayed as
-upscale condition and upscale latent; their saved IDs remain unchanged.
-The five fixed model/condition/latent inputs keep their
-order when switching modes. No Refiner or combined-step split is retained.
+H3 KSampler keeps model/conditioning/final-size latent, seed/sampler and the
+main curve before its native DynamicCombo mode selector. Main curves use
+scheduler/manual only. Default simple steps=4 plus tail_steps=1 replaces 4+1;
+0 tail steps preserves native scheduling exactly. Tail points subdivide the
+last interval in the unshifted clock and follow the current model's shift.
+Modes are single (no additional controls), progressive (lowres scale/steps,
+upscaler and high mask growth), and two_pass (lowres scale, second curve,
+upscaler and high mask growth). Second curves use shift-aware LBH examples,
+scheduler, or absolute manual values. Upscaler precision is auto. The worker's
+lazy loader socket stays top-level because ComfyUI's dependency planner does
+not discover lazy flags nested inside DynamicCombo inputs; this internal socket
+is not part of the public UI. H3 has no advanced, negative, CFG, second latent,
+second condition or high-resolution MODEL inputs. Old workflows need the explicit
+final-canvas migration described in README; no global widget hooks are added.
 web/chat_advanced.js opts only Multimodal Prompt Chat into the small
 enableAdvancedLayout helper in web/lib/advanced_layout.js. On classic frontend
 1.53.6, construction sets options.advanced but drawing reads widget.advanced;

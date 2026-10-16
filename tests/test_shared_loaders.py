@@ -19,11 +19,25 @@ class SharedLoaderTest(unittest.TestCase):
         return {
             "a": {
                 "class_type": application,
-                "inputs": {"model_name": "test.safetensors", **(options or {})},
+                "inputs": {
+                    (
+                        "mode.model_name"
+                        if application == "TuringUtilsMiniMaxH3KSampler"
+                        else "model_name"
+                    ): "test.safetensors",
+                    **(options or {}),
+                },
             },
             "b": {
                 "class_type": application,
-                "inputs": {"model_name": "test.safetensors", **(options or {})},
+                "inputs": {
+                    (
+                        "mode.model_name"
+                        if application == "TuringUtilsMiniMaxH3KSampler"
+                        else "model_name"
+                    ): "test.safetensors",
+                    **(options or {}),
+                },
             },
         }
 
@@ -49,7 +63,11 @@ class SharedLoaderTest(unittest.TestCase):
             self.assertEqual(
                 compile_shared_loaders(prompt)[loader_id], compiled[loader_id]
             )
-            parameter = next(iter(defaults))
+            parameter = (
+                "mode.model_name"
+                if app == "TuringUtilsMiniMaxH3KSampler"
+                else next(iter(defaults))
+            )
             prompt["b"]["inputs"][parameter] = "different"
             different = compile_shared_loaders(prompt)
             self.assertNotEqual(

@@ -20,8 +20,8 @@
 H3 音频保护节点放在 Video，与延续拼接、截断工具相邻。
 Sigmas To String 将原生 SIGMAS 转为可复制的十进制 STRING，正向转换复用官方 ManualSigmas。
 Configure Attention Strategy 放在 Models；Sol/SLA/Veda/Spark 通过 DynamicCombo 选择，
-只显示相关参数，参数保持普通控件；Chat 的原 Options 参数及新增 H3 KSampler
-的放大/mask 微调使用高级设置。两阶段曲线用原生 DynamicCombo 切换，仅显示当前模式参数。
+只显示相关参数，参数保持普通控件。Chat 的原 Options 参数使用高级设置；
+H3 KSampler 的主曲线 scheduler/manual 和单段/渐进/二采使用原生 DynamicCombo。
 不引入全局配置、侧栏状态或额外模型缓存。
 
 ## 已删除的公开入口
@@ -42,7 +42,7 @@ Configure Attention Strategy 放在 Models；Sol/SLA/Veda/Spark 通过 DynamicCo
 普通工作流保留六个内部单元：Stage Path、SeC Loader/Apply、H3 Upscale Loader/Apply、H3 KSampler Apply。
 内部单元使用原生开发者模式标记隐藏；开启开发者模式后允许显示。
 显示名统一以 (Internal) 结尾，节点说明标注内部用途，公开入口保留原名。
-Chat 的原 Options 参数及新增 H3 KSampler 的放大/mask 微调为高级参数；
+Chat 的原 Options 参数为高级参数；H3 KSampler 的采样模式和曲线使用原生动态分支；
 其余普通节点完全使用原生参数布局，
 不再排序、修补输入接口或迁移旧工作流。SeC/Crop 接线后的控件行为交由 ComfyUI。
 H3 Keyframe Reference 固定三组输入/输出，Stage Barrier 固定八组输入/输出；

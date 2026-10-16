@@ -411,95 +411,71 @@ original loading functions; callers bypassing the prompt server must invoke
   first/last keyframes must still be single-frame latents matching the target
   spatial grid. Semantic embeddings and their token tags are kept unchanged;
   reference meaning and ordering are controlled by the workflow.
-- `MiniMax H3 KSampler` combines native KSampler controls, explicit sigma curves,
-  and an optional learned spatial-upscale second pass. Connect
-  `model`, `conditioning`, and `latent`; without `upscale latent` it is single-pass.
-  Scheduler mode uses the same schedule, noise, sampler and denoise semantics
-  as native KSampler at CFG=1. H3 uses one condition per stage; no negative or CFG
-  controls are exposed. Existing LoRA, shift and attention patches on MODEL
-  are respected; the node does not load or repatch the DiT.
-  Standalone video latents get an implicit empty audio stream internally because
-  the native H3 DiT requires both streams; that generated stream is carried through
-  both passes but omitted from the final standalone-video output.
-  - `sigmas` selects **preset** (default: `4+1`), **scheduler**, or **manual**.
-    Scheduler shows native `steps` (default 8), `scheduler` and `denoise`; these
-    control only the complete first pass. Preset and manual use an exact curve;
-    manual initially shows the `4+1` curve. The first-pass presets are:
-    - `3+1`: `1.000000, 0.960058, 0.857510, 0.706380, 0.000000`
-    - `4+1`: `1.000000, 0.972973, 0.923077, 0.800000, 0.631579, 0.000000`
-    - `4+2`: `1.000000, 0.972973, 0.923077, 0.800000, 0.705882, 0.521739, 0.000000`
-    - `6+2`: `1.000000, 0.983684, 0.960058, 0.923077, 0.857510, 0.706380, 0.600539, 0.414306, 0.000000`
+- `MiniMax H3 KSampler` takes **one final-size original LATENT and one CONDITIONING**.
+  The latent owns output H/W, batch, time, original protected content and audio masks.
+  Model LoRA, shift and attention settings remain on the incoming MODEL; CFG is fixed to 1.
+  Its native DynamicCombo `mode` shows only the active controls:
 
-    These names describe base steps plus supplemental points within one full
-    first-pass curve, not an upscale split. No extra points are inserted.
-    `upscale sigmas`
-    selects **preset** (default) or **manual**, never a split of a combined schedule.
-    Both passes finish at zero. Shared seed/sampler apply to both passes.
-    Manual curves are FP32, accept commas/whitespace/newlines/scientific notation,
-    and require positive descending points followed by one terminal zero. They
-    are not sorted, deduplicated, refined, or processed by scheduler/denoise or
-    the scheduler-mode sampler-specific penultimate-discard rule. Logs report intervals
-    (`len(sigmas)-1`); a solver can perform multiple model evaluations per interval.
-  - Second-pass presets are explicit curves: 3 steps (default)
-    `0.9035, 0.6316, 0.3158, 0`;
-    4 steps `0.9035, 0.8, 0.6316, 0.3158, 0`; 5 steps
-    `0.9231, 0.8780, 0.8, 0.6316, 0.3158, 0`. These are editable alternatives
-    derived from the upscaler author's example workflow, not quality guarantees.
-    Second-pass manual mode initially shows the same 3-step default curve.
-    Switch to manual to change the curve. Use `Sigmas To String` with core
-    `Preview Any` to copy a native scheduler curve into either text field; core
-    `ManualSigmas` converts the exported plain-decimal string back to SIGMAS.
-  - Connecting `upscale latent` enables second sampling. Its exact latent H/W
-    define the output canvas, while time, batch and audio come from the first
-    latent. Its samples/mask/audio are otherwise ignored unless the first video
-    mask protects some pixels. `upscale condition` defaults to conditioning;
-    mismatching FL2VA keyframes require an explicit matching second condition.
-    Ref2VA reference images/videos may have their own size. Both stages' guide
-    time indexes are checked against the **first** latent before sampling.
-  - The first sampler completes its **entire curve** before its final latent is
-    upscaled. The second sampler re-noises using its own starting sigma and native
-    H3 audio scaling. For example, scheduler steps=4 and the 3-step second
-    preset execute 4+3 intervals, not 4+2 with an implicit extra step. Automatic
-    denoise=0 in scheduler mode skips only the first sampler; an enabled second pass still samples.
-    Without a second latent, its curve and connected second conditions are ignored.
-    A resolution-changing restart is not equivalent to uninterrupted sampling.
-  - Attention and preview progress belong to **one task** across both stages.
-    Sol/SLA/Veda/Spark dense prefix/suffix step protection applies to the total number
-    of intervals: a 4+2 run with prefix=1/suffix=1 protects only step 1 and step 6,
-    not the end of the first stage or the start of the second. Layer protection
-    is unchanged. Predictor/corrector evaluations share their
-    interval index. Each stage keeps its own native sigma curve, solver history,
-    H3 PDD/audio scaling, conditioning layout and model/offload lifecycle.
-    State is execution-local; MODEL options are not modified or retained.
-    `dpm_fast`/`dpm_adaptive` retain their native non-schedule integration grid;
-    their protection follows requested sigma intervals rather than counting
-    evaluations/rejected trials. Their reported steps are a schedule budget,
-    not an accepted-integration-step count.
-  - Choose `upscaler model` from models/latent_upscale_models only when H/W
-    change. Its loader is lazy and shared with other samplers/upscale applications
-    through ComfyUI's node/model cache, not a separate persistent weight cache.
-    Upscaler precision is automatically selected (`auto`), with no precision control.
-    Same-size second passes and all-zero video masks need no upscaler. The learned
-    model executes the whole temporal volume. Unequal H/W multipliers stretch
-    spatial content (not crop/outpaint); quality at changed aspect ratios needs
-    manual verification.
-  - A first video mask is binary by positive coverage, unioned across channels
-    and closed to the actual DiT spatial patches before first sampling. The
-    second mask conservatively covers every overlapping low-resolution cell,
-    closes high-resolution patches, then optionally grows by `mask grow`
-    patch rings (default 0). No temporal interpolation/growth is used. If the
-    first mask has any zeros, second-pass base T must match the first T, and its
-    batch must be 1 or match the first batch. Upscaled clean predictions replace
-    only selected areas; the same final mask drives second denoising and restores
-    protected base pixels afterwards. All-zero is **not** absent. The second
-    latent's mask is ignored. Audio masks are inherited unchanged, without
-    spatial resampling, binarization or growth. Latent protection does not promise
-    pixel-identical decoded boundaries through a VAE.
-  - There is one final LATENT output, no cached first-pass output. All parameters,
-    including the upscaler model and `mask grow`, are ordinary inputs on the
-    classic canvas and Nodes 2.0; there are no advanced parameters. Upscale
-    inputs are named `upscale condition`, `upscale latent` and `upscale sigmas`
-    in the UI, retaining their saved IDs for workflow links and serialization.
+  | Mode | Behavior | Controls |
+  | --- | --- | --- |
+  | `single` (default) | Complete the main curve at input size | None |
+  | `progressive` | Low-resolution prefix, then finish the same curve at target size | `lowres_scale` (0.75), `lowres_steps` (3), upscaler, patch-mask growth |
+  | `two_pass` | Complete the low-resolution main curve, upscale, then independently re-noise/refine | `lowres_scale` (0.75), second curve, upscaler, patch-mask growth |
+
+  - The main `sigmas` source is **scheduler** or **manual**. Scheduler defaults to
+    `simple`, `steps=4`, `denoise=1`, `tail_steps=1`: the former 4+1 recipe,
+    now generated from the current MODEL's video shift. There is no first-preset menu.
+    `tail_steps=0` matches native KSampler scheduling exactly, including denoise and
+    sampler-specific penultimate rules. Extra points subdivide only the final
+    nonzero-to-zero interval in the **unshifted base clock**, not sigma space.
+    Thus simple 4+2 means `steps=4, tail_steps=2`, not a new six-step simple grid.
+    Do not apply shift a second time to the native base curve.
+  - Second curves (`mode.second_sigmas`) support **preset**, **scheduler**, and
+    **manual**. `LBH 3` (default), `LBH 4`, and `LBH 5` remap the upscaler author's
+    shift-12 example shapes through base time to the current video shift. They
+    are example recipes, not a universal scheduler or quality guarantee.
+    The three original examples are respectively
+    `0.9035,.6316,.3158,0`, `0.9035,.8,.6316,.3158,0`, and
+    `.9231,.8780,.8,.6316,.3158,0`. Scheduler controls have the same meaning as
+    the main curve (second defaults: 3 steps, simple, denoise=0.5, no tail points).
+  - Manual curves are complete absolute FP32 sigmas ending at zero. They accept
+    whitespace, commas and scientific notation; no shift, refinement, sorting or
+    scheduler-specific point removal is applied. Use manual values to reproduce
+    the old rounded curves exactly. Audio still follows the current MODEL's
+    video/audio clock mapping.
+  - Progressive mode initially requires **Euler** and `1 <= lowres_steps < actual
+    total intervals`, with a transition sigma strictly between 0 and 1. It lifts
+    the last low-resolution clean prediction and initializes the high-resolution
+    video noise at the next sigma, while audio completes the same native Euler
+    interval and continues without an independent restart. It adds no DiT calls.
+    This new path needs per-model visual validation; numeric tests are not a
+    claim of facial identity or generation-quality acceptance.
+  - Low-resolution video and FL2VA keyframes are derived spatially; no frame/time
+    interpolation or Qwen re-encoding occurs. Ref2VA references retain independent
+    geometry. Low keyframes retain their per-channel/frame mean. A low-resolution
+    latent resize is not guaranteed equivalent to downscaling pixels and VAE-encoding.
+  - Each stage's mask derives directly from the final-canvas mask with conservative
+    coverage and DiT patch closure. The high mask is never a round trip through
+    the low grid. `mode.mask_grow` adds high-resolution spatial patch rings (default 0).
+    Protected video uses the true original final-size latent, not an upscaled low
+    approximation. Audio masks pass through without growth. VAE decoding can still
+    change pixel boundaries; final pixel compositing belongs to the stitch stage.
+  - A compatible H3 latent upscaler is required only for an actual spatial
+    enlargement with a nonempty video generation region. `lowres_scale=1` needs
+    no upscaler. Loader nodes remain lazy and shared with standalone latent upscale.
+    Video-only inputs get a temporary internal audio stream, removed from output.
+    The only public output is the final LATENT.
+  - Attention and preview progress span the complete task. Dense prefix/suffix
+    protection does not restart at the high-resolution stage. Logs show actual
+    stage sizes, intervals, shifts, resolved curves and stage wall times; advanced
+    profiling remains available through the existing workflow profiler.
+  - **Migration:** reconnect old workflows to a final-size original latent and
+    final-size conditioning. Remove `latent_second`, `conditioning_second`, old
+    top-level second controls and upscaler name; select `mode` and its controls.
+    Replace first preset 4+1 with scheduler `steps=4, tail_steps=1`, and similarly
+    for other N+M recipes. The prompt compiler rejects the obsolete contract rather
+    than silently treating an old low-resolution input as the final canvas.
+    See [the mode examples](examples/h3_sampler_modes.json).
 - `MiniMax H3 Latent Upscale` includes model/precision selection and loads the attention-free 3D learned latent
   upscaler through ComfyUI's normal offload lifecycle. Place compatible weights
   from [LBH-123-AI/Minimax_h3_latent_Upscaler](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler)

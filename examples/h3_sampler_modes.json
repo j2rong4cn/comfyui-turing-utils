@@ -1,0 +1,570 @@
+{
+  "id": "07f8f70e-80ef-44f2-b9c0-3925baec3cc1",
+  "revision": 0,
+  "last_node_id": 4,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "TuringUtilsMiniMaxH3KSampler",
+      "pos": [
+        0,
+        320
+      ],
+      "size": [
+        460,
+        290
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "conditioning",
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": null
+        },
+        {
+          "localized_name": "latent",
+          "name": "latent",
+          "type": "LATENT",
+          "link": null
+        },
+        {
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "sampler_name",
+          "name": "sampler_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "sampler_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "steps",
+          "name": "sigmas.steps",
+          "type": "INT",
+          "widget": {
+            "name": "sigmas.steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "scheduler",
+          "name": "sigmas.scheduler",
+          "type": "COMBO",
+          "widget": {
+            "name": "sigmas.scheduler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "denoise",
+          "name": "sigmas.denoise",
+          "type": "FLOAT",
+          "widget": {
+            "name": "sigmas.denoise"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "tail_steps",
+          "name": "sigmas.tail_steps",
+          "type": "INT",
+          "widget": {
+            "name": "sigmas.tail_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "主曲线",
+          "name": "sigmas",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "采样模式",
+          "name": "mode",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "mode"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "latent",
+          "name": "latent",
+          "type": "LATENT",
+          "links": null
+        }
+      ],
+      "title": "单段 · 最终尺寸画布",
+      "properties": {
+        "Node name for S&R": "TuringUtilsMiniMaxH3KSampler"
+      },
+      "widgets_values": [
+        0,
+        "randomize",
+        "euler",
+        "scheduler",
+        4,
+        "simple",
+        1,
+        1,
+        "single"
+      ],
+      "widgets_values_named": {
+        "seed": 0,
+        "control_after_generate": "randomize",
+        "sampler_name": "euler",
+        "sigmas": "scheduler",
+        "sigmas.steps": 4,
+        "sigmas.scheduler": "simple",
+        "sigmas.denoise": 1,
+        "sigmas.tail_steps": 1,
+        "mode": "single"
+      }
+    },
+    {
+      "id": 2,
+      "type": "TuringUtilsMiniMaxH3KSampler",
+      "pos": [
+        520,
+        320
+      ],
+      "size": [
+        460,
+        386
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "conditioning",
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": null
+        },
+        {
+          "localized_name": "latent",
+          "name": "latent",
+          "type": "LATENT",
+          "link": null
+        },
+        {
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "sampler_name",
+          "name": "sampler_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "sampler_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "steps",
+          "name": "sigmas.steps",
+          "type": "INT",
+          "widget": {
+            "name": "sigmas.steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "scheduler",
+          "name": "sigmas.scheduler",
+          "type": "COMBO",
+          "widget": {
+            "name": "sigmas.scheduler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "denoise",
+          "name": "sigmas.denoise",
+          "type": "FLOAT",
+          "widget": {
+            "name": "sigmas.denoise"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "tail_steps",
+          "name": "sigmas.tail_steps",
+          "type": "INT",
+          "widget": {
+            "name": "sigmas.tail_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "主曲线",
+          "name": "sigmas",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "采样模式",
+          "name": "mode",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "lowres_scale",
+          "name": "mode.lowres_scale",
+          "type": "FLOAT",
+          "widget": {
+            "name": "mode.lowres_scale"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "lowres_steps",
+          "name": "mode.lowres_steps",
+          "type": "INT",
+          "widget": {
+            "name": "mode.lowres_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "model_name",
+          "name": "mode.model_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "mode.model_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "mask_grow",
+          "name": "mode.mask_grow",
+          "type": "INT",
+          "widget": {
+            "name": "mode.mask_grow"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "latent",
+          "name": "latent",
+          "type": "LATENT",
+          "links": null
+        }
+      ],
+      "title": "渐进 · 最终尺寸画布",
+      "properties": {
+        "Node name for S&R": "TuringUtilsMiniMaxH3KSampler"
+      },
+      "widgets_values": [
+        0,
+        "randomize",
+        "euler",
+        "scheduler",
+        4,
+        "simple",
+        1,
+        1,
+        "progressive",
+        0.75,
+        3,
+        "none",
+        0
+      ],
+      "widgets_values_named": {
+        "seed": 0,
+        "control_after_generate": "randomize",
+        "sampler_name": "euler",
+        "sigmas": "scheduler",
+        "sigmas.steps": 4,
+        "sigmas.scheduler": "simple",
+        "sigmas.denoise": 1,
+        "sigmas.tail_steps": 1,
+        "mode": "progressive",
+        "mode.lowres_scale": 0.75,
+        "mode.lowres_steps": 3,
+        "mode.model_name": "none",
+        "mode.mask_grow": 0
+      }
+    },
+    {
+      "id": 3,
+      "type": "TuringUtilsMiniMaxH3KSampler",
+      "pos": [
+        1040,
+        320
+      ],
+      "size": [
+        460,
+        410
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "conditioning",
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": null
+        },
+        {
+          "localized_name": "latent",
+          "name": "latent",
+          "type": "LATENT",
+          "link": null
+        },
+        {
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "sampler_name",
+          "name": "sampler_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "sampler_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "steps",
+          "name": "sigmas.steps",
+          "type": "INT",
+          "widget": {
+            "name": "sigmas.steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "scheduler",
+          "name": "sigmas.scheduler",
+          "type": "COMBO",
+          "widget": {
+            "name": "sigmas.scheduler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "denoise",
+          "name": "sigmas.denoise",
+          "type": "FLOAT",
+          "widget": {
+            "name": "sigmas.denoise"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "tail_steps",
+          "name": "sigmas.tail_steps",
+          "type": "INT",
+          "widget": {
+            "name": "sigmas.tail_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "主曲线",
+          "name": "sigmas",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "sigmas"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "采样模式",
+          "name": "mode",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "lowres_scale",
+          "name": "mode.lowres_scale",
+          "type": "FLOAT",
+          "widget": {
+            "name": "mode.lowres_scale"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "preset",
+          "name": "mode.second_sigmas.preset",
+          "type": "COMBO",
+          "widget": {
+            "name": "mode.second_sigmas.preset"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "second_sigmas",
+          "name": "mode.second_sigmas",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "mode.second_sigmas"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "model_name",
+          "name": "mode.model_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "mode.model_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "mask_grow",
+          "name": "mode.mask_grow",
+          "type": "INT",
+          "widget": {
+            "name": "mode.mask_grow"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "latent",
+          "name": "latent",
+          "type": "LATENT",
+          "links": null
+        }
+      ],
+      "title": "独立二采 · 最终尺寸画布",
+      "properties": {
+        "Node name for S&R": "TuringUtilsMiniMaxH3KSampler"
+      },
+      "widgets_values": [
+        0,
+        "randomize",
+        "euler",
+        "scheduler",
+        4,
+        "simple",
+        1,
+        1,
+        "two_pass",
+        0.75,
+        "preset",
+        "LBH 3",
+        "none",
+        0
+      ],
+      "widgets_values_named": {
+        "seed": 0,
+        "control_after_generate": "randomize",
+        "sampler_name": "euler",
+        "sigmas": "scheduler",
+        "sigmas.steps": 4,
+        "sigmas.scheduler": "simple",
+        "sigmas.denoise": 1,
+        "sigmas.tail_steps": 1,
+        "mode": "two_pass",
+        "mode.lowres_scale": 0.75,
+        "mode.second_sigmas": "preset",
+        "mode.second_sigmas.preset": "LBH 3",
+        "mode.model_name": "none",
+        "mode.mask_grow": 0
+      }
+    },
+    {
+      "id": 4,
+      "type": "MarkdownNote",
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        990,
+        250
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "H3 三种采样模式",
+      "properties": {},
+      "widgets_values": [
+        "每个采样器是一个独立用法，复制所需节点后连接 MODEL、最终尺寸 CONDITIONING 和最终尺寸原始 LATENT。\n\n主曲线默认 simple 4 步＋末段低噪补 1 点；补点数 0 即原生调度。渐进共用一条曲线，二采使用另一条完整曲线。\n\n渐进/二采请先选择本地已有的 H3 latent 放大模型；不下载权重。低清比例设为 1 时不需要放大模型。\n\n局部重绘的 noise_mask 与音频保护均来自唯一 LATENT；8K 原片由裁剪/贴回工具保留，不直接作为 H3 整帧生成尺寸。\n\n这是接线示例，需要接入你自己的编码与解码节点。"
+      ],
+      "widgets_values_named": {
+        "text": "每个采样器是一个独立用法，复制所需节点后连接 MODEL、最终尺寸 CONDITIONING 和最终尺寸原始 LATENT。\n\n主曲线默认 simple 4 步＋末段低噪补 1 点；补点数 0 即原生调度。渐进共用一条曲线，二采使用另一条完整曲线。\n\n渐进/二采请先选择本地已有的 H3 latent 放大模型；不下载权重。低清比例设为 1 时不需要放大模型。\n\n局部重绘的 noise_mask 与音频保护均来自唯一 LATENT；8K 原片由裁剪/贴回工具保留，不直接作为 H3 整帧生成尺寸。\n\n这是接线示例，需要接入你自己的编码与解码节点。"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.6,
+      "offset": [
+        30,
+        30
+      ]
+    }
+  },
+  "version": 0.4
+}
