@@ -414,32 +414,25 @@ class AttentionStrategy(io.ComfyNode):
                         for name, node in _ATTENTION_INPUTS.items()
                     ] + [io.DynamicCombo.Option("none", [])],
                 ),
-                io.DynamicCombo.Input(
-                    "reference_video_compression",
+                io.Combo.Input(
+                    "vpack",
                     optional=True,
-                    options=[
-                        io.DynamicCombo.Option("off", []),
-                        io.DynamicCombo.Option("vpack", [
-                            io.Combo.Input(
-                                "compression_ratio",
-                                options=list(COMPRESSION_PHASES),
-                                default="2/5",
-                                tooltip=(
-                                    "Drop 1, 2 or 3 of each five H3 reference-video latent frames. "
-                                    "Original first/last anchors are retained, so actual reduction varies. "
-                                    "Sparse protection applies to retained tokens; target video and mask are unchanged."
-                                ),
-                            ),
-                        ]),
-                    ],
-                    tooltip="H3 Ref2VA reference-video compression, independent of strategy. Off by default; images and keyframes are unchanged.",
+                    options=["5/5", *COMPRESSION_PHASES],
+                    default="5/5",
+                    tooltip=(
+                        "Fraction of H3 reference-video latent frames to keep. "
+                        "5/5 disables VPack; 4/5, 3/5 and 2/5 progressively reduce the reference. "
+                        "Original first/last anchors are retained, so the actual kept fraction may be higher. "
+                        "Independent of strategy; protection applies to retained tokens. "
+                        "Target video, mask, images, audio and Qwen results are unchanged."
+                    ),
                 ),
             ],
             outputs=[io.Model.Output("model")],
         )
 
     @classmethod
-    def execute(cls, model, strategy, reference_video_compression=None):
+    def execute(cls, model, strategy, vpack="5/5"):
         # ComfyUI materializes missing optional dynamic inputs as None.
         settings = {key: value for key, value in strategy.items() if value is not None}
         name = settings.pop("strategy")
@@ -460,4 +453,4 @@ class AttentionStrategy(io.ComfyNode):
                     if prefix.get(key) is not None:
                         settings[key] = prefix[key]
         patched = _ATTENTION_STRATEGIES[name](model, **settings)
-        return io.NodeOutput(configure_reference_compression(patched, reference_video_compression))
+        return io.NodeOutput(configure_reference_compression(patched, vpack))

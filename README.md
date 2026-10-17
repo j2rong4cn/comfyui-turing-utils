@@ -541,8 +541,8 @@ original loading functions; callers bypassing the prompt server must invoke
   `none` adds no strategy and preserves upstream execution, including Kitchen
   and any strategy already applied upstream. Spark requires W8A8 and rejects
   incompatible explicit backends before sampling. Spark/Veda protection requires kernel 0.48.0.
-  The independent `reference_video_compression` control defaults to `off`.
-  `vpack` exposes `compression_ratio` (`1/5`, `2/5` default, or `3/5`) and drops
+  The independent `vpack` control selects the reference-frame fraction to keep:
+  `5/5` (default, disabled), `4/5`, `3/5`, or `2/5`. It drops
   selected H3 Ref2VA reference-video latent frames before sampling memory
   estimation. It preserves spatial resolution, original first/last anchors and
   temporal RoPE coordinates, including guide/target and reference-audio timing.
@@ -554,8 +554,9 @@ original loading functions; callers bypassing the prompt server must invoke
   progressive and two-pass sampling share the same preparation path, without
   repeatedly compressing a previous stage's references. The schedule follows
   [Spark-VPack](https://github.com/zechengtang/Spark-H3), with endpoint retention
-  added for our existing anchor protection; actual reduction may be smaller
-  than the selected nominal ratio. Its Apache-2.0 license is included in
+  added for our existing anchor protection; the actual kept fraction may be higher
+  than selected. Old off/drop-ratio workflows migrate to the matching keep ratio.
+  Its Apache-2.0 license is included in
   [kernel/LICENSES/spark-h3-LICENSE.txt](kernel/LICENSES/spark-h3-LICENSE.txt).
   See [node configuration and reusable presets](docs/node-configuration.md)
   and the [complete node inventory](docs/node-inventory.md).

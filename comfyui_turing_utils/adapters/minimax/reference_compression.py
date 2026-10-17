@@ -14,7 +14,7 @@ from ...log import get_logger
 
 
 LOG = get_logger("minimax.vpack")
-COMPRESSION_PHASES = {"1/5": (0, 1, 2, 3), "2/5": (0, 1, 3), "3/5": (0, 3)}
+COMPRESSION_PHASES = {"4/5": (0, 1, 2, 3), "3/5": (0, 1, 3), "2/5": (0, 3)}
 _WRAPPER_KEY = "turing_utils_h3_vpack"
 _DENSE_T = "compact_ref2va_dense_latent_t"
 _DENSE_INDICES = "compact_ref2va_dense_indices"
@@ -75,7 +75,7 @@ def compress_conditions(conditions, ratio: str):
             packed_entries.append(dict(entry, minimax_refs=packed_refs) if changed else entry)
         packed_conditions[name] = packed_entries
     if original_frames:
-        LOG.info("H3 VPack %s: reference latent frames %d -> %d (anchors retained)",
+        LOG.info("H3 VPack keep %s: reference latent frames %d -> %d (anchors retained)",
                  ratio, original_frames, kept_frames)
     else:
         LOG.info("H3 VPack skipped: no uncompressed reference video to reduce")
@@ -131,28 +131,25 @@ def restore_reference_times(layout, refs):
     return layout
 
 
-def configure_reference_compression(model, selection=None):
+def configure_reference_compression(model, ratio="5/5"):
     """Keep one branch-local preparation wrapper, independent of attention."""
-    mode = selection.get("reference_video_compression", "off") if selection else "off"
-    if mode == "off" and not getattr(model, "model_options", {}).get(_WRAPPER_KEY):
+    ratio = "5/5" if ratio is None else ratio
+    if ratio not in {"5/5", *COMPRESSION_PHASES}:
+        raise ValueError(f"H3 vpack must be one of {('5/5', *COMPRESSION_PHASES)}")
+    if ratio == "5/5" and not getattr(model, "model_options", {}).get(_WRAPPER_KEY):
         return model
-    if mode not in {"off", "vpack"}:
-        raise ValueError(f"Unknown H3 reference video compression: {mode!r}")
     import comfy.patcher_extension
     from .layout import ensure_minimax_attention_layout_provider, is_minimax_h3_model
 
-    if mode == "vpack" and not is_minimax_h3_model(model):
+    if ratio != "5/5" and not is_minimax_h3_model(model):
         LOG.warning_once("VPack skipped: reference compression requires MiniMax H3")
         return model
     patched = model.clone()
     wrapper_type = comfy.patcher_extension.WrappersMP.PREPARE_SAMPLING
     patched.remove_wrappers_with_key(wrapper_type, _WRAPPER_KEY)
     patched.model_options.pop(_WRAPPER_KEY, None)
-    if mode == "off":
+    if ratio == "5/5":
         return patched
-    ratio = selection.get("compression_ratio", "2/5")
-    if ratio not in COMPRESSION_PHASES:
-        raise ValueError(f"H3 VPack compression_ratio must be one of {tuple(COMPRESSION_PHASES)}")
     status = ensure_minimax_attention_layout_provider(patched)
     if not status.installed:
         raise RuntimeError(f"H3 VPack cannot restore reference times: {status.reason}")

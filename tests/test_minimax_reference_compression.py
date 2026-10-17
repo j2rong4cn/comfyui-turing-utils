@@ -44,7 +44,7 @@ def video_reference(frames=12, *, audio_frames=0):
     }
 
 
-def packed_refs(refs, ratio="2/5"):
+def packed_refs(refs, ratio="3/5"):
     return vpack.compress_conditions({"positive": [{"minimax_refs": refs}]}, ratio)["positive"][0]["minimax_refs"]
 
 
@@ -53,9 +53,9 @@ def native_layout(refs, keyframes=None):
 
 
 @pytest.mark.parametrize("ratio,expected", [
-    ("1/5", [0, 1, 2, 3, 5, 6, 7, 8, 10, 11]),
-    ("2/5", [0, 1, 3, 5, 6, 8, 10, 11]),
-    ("3/5", [0, 3, 5, 8, 10, 11]),
+    ("4/5", [0, 1, 2, 3, 5, 6, 7, 8, 10, 11]),
+    ("3/5", [0, 1, 3, 5, 6, 8, 10, 11]),
+    ("2/5", [0, 3, 5, 8, 10, 11]),
 ])
 def test_exact_retained_content_and_original_anchors(ratio, expected):
     original = video_reference()
@@ -73,7 +73,7 @@ def test_shared_positive_negative_reference_is_packed_once_without_changing_inpu
     image = {"kind": "image", "latent": torch.zeros(1, 24, 1, 16, 16), "latent_h": 16, "latent_w": 16}
     entry = {"minimax_refs": [reference, image], "cross_attn": torch.randn(1, 8, 4)}
     conditions = {"positive": [entry], "negative": [entry]}
-    result = vpack.compress_conditions(conditions, "2/5")
+    result = vpack.compress_conditions(conditions, "3/5")
     a, b = (result[name][0]["minimax_refs"][0] for name in conditions)
     assert a["latent"] is b["latent"]
     assert a["audio_latent"] is reference["audio_latent"]
@@ -180,12 +180,8 @@ def test_disabled_is_identity_and_changing_settings_does_not_stack_or_leak():
     assert vpack.configure_reference_compression(model) is model
     assert not model.get_all_wrappers(WrappersMP.PREPARE_SAMPLING)
     with mock.patch("comfy.ldm.minimax.model.MiniMaxH3Model", Diffusion):
-        enabled = vpack.configure_reference_compression(model, {
-            "reference_video_compression": "vpack", "compression_ratio": "2/5",
-        })
-        branch = vpack.configure_reference_compression(enabled, {
-            "reference_video_compression": "vpack", "compression_ratio": "3/5",
-        })
+        enabled = vpack.configure_reference_compression(model, "3/5")
+        branch = vpack.configure_reference_compression(enabled, "2/5")
         disabled = vpack.configure_reference_compression(branch)
     assert len(enabled.get_all_wrappers(WrappersMP.PREPARE_SAMPLING)) == 1
     assert len(branch.get_all_wrappers(WrappersMP.PREPARE_SAMPLING)) == 1
@@ -206,7 +202,7 @@ def test_disabled_is_identity_and_changing_settings_does_not_stack_or_leak():
 def test_sampling_preparation_sees_smaller_memory_plan_before_loading():
     model = patcher()
     with mock.patch("comfy.ldm.minimax.model.MiniMaxH3Model", Diffusion):
-        enabled = vpack.configure_reference_compression(model, {"reference_video_compression": "vpack"})
+        enabled = vpack.configure_reference_compression(model, "3/5")
     conditions = {"positive": [{"minimax_refs": [video_reference()], "cross_attn": torch.zeros(1, 65, 8)}]}
     shape = [(1, 24, 7, 16, 16), (1, 32, 2, 11)]
     diffusion = SimpleNamespace(patch_size=(1, 2, 2), hidden_size=128, latents_dim=24, audio_latents_dim=32)
@@ -227,7 +223,7 @@ def test_existing_h3_forward_bridge_restores_payload_before_model_and_layout_obs
     refs = packed_refs([video_reference()])
     payload = {"refs": refs}
     with mock.patch("comfy.ldm.minimax.model.MiniMaxH3Model", Diffusion):
-        vpack.configure_reference_compression(model, {"reference_video_compression": "vpack"})
+        vpack.configure_reference_compression(model, "3/5")
         h3_layout.ensure_minimax_attention_layout_provider(model)
     forward = model.object_patches["diffusion_model.forward"]
     result = forward(
@@ -245,36 +241,50 @@ def test_single_progressive_and_two_pass_conditions_reuse_original_reference_tim
     condition = [[torch.zeros(1, 65, 8), {"minimax_refs": [source]}]]
     for _ in range(2):
         for stage in (condition, resize_conditioning(condition, 8, 8)):
-            packed = vpack.compress_conditions({"positive": [stage[0][1]]}, "2/5")
+            packed = vpack.compress_conditions({"positive": [stage[0][1]]}, "3/5")
             assert packed["positive"][0]["minimax_refs"][0]["latent_t"] == 8
     assert source["latent_t"] == 12
 
 
-def test_native_dynamic_schema_defaults_off_and_only_exposes_active_ratio():
+def test_single_vpack_schema_defaults_disabled_for_all_strategies():
     for strategy in ("sol", "sla", "veda", "spark", "none"):
-        for mode in ("off", "vpack"):
-            values = {"strategy": strategy, "reference_video_compression": mode}
+        for ratio in ("5/5", *vpack.COMPRESSION_PHASES):
+            values = {"strategy": strategy, "vpack": ratio}
             inputs, _, _ = io.get_finalized_class_inputs(AttentionStrategy.INPUT_TYPES(), values)
             fields = {**inputs["required"], **inputs["optional"]}
-            key = "reference_video_compression.compression_ratio"
-            assert (key in fields) == (mode == "vpack")
+            assert "vpack" in fields
+            assert not any(name.startswith("reference_video_compression") for name in fields)
     field = AttentionStrategy.GET_SCHEMA().inputs[-1]
     assert field.optional
-    assert [option.key for option in field.options] == ["off", "vpack"]
-    assert field.options[1].inputs[0].default == "2/5"
+    assert field.options == ["5/5", "4/5", "3/5", "2/5"]
+    assert field.default == "5/5"
 
 
 @pytest.mark.parametrize("strategy", ["sol", "sla", "veda", "spark", "none"])
 def test_common_node_compression_does_not_change_attention_settings(strategy):
     from comfyui_turing_utils.nodes import attention
     model, configured, compressed = object(), object(), object()
-    selection = {"reference_video_compression": "vpack", "compression_ratio": "1/5"}
+    selection = "4/5"
     with mock.patch.dict(attention._ATTENTION_STRATEGIES, {strategy: mock.Mock(return_value=configured)}) as strategies:
         with mock.patch.object(attention, "configure_reference_compression", return_value=compressed) as configure:
             output = AttentionStrategy.execute(model, {"strategy": strategy}, selection)
         strategies[strategy].assert_called_once_with(model)
         configure.assert_called_once_with(configured, selection)
         assert output.result == (compressed,)
+
+
+@pytest.mark.parametrize("ratio", [None, "5/5"])
+def test_disabled_vpack_does_not_probe_model_or_install_wrappers(ratio):
+    model = patcher()
+    with mock.patch.object(h3_layout, "is_minimax_h3_model", side_effect=AssertionError("disabled VPack probed the model")):
+        assert vpack.configure_reference_compression(model, ratio) is model
+    assert not model.get_all_wrappers(WrappersMP.PREPARE_SAMPLING)
+
+
+@pytest.mark.parametrize("ratio", ["1/5", "off", "none", "vpack"])
+def test_invalid_keep_ratio_fails_before_configuring_model(ratio):
+    with pytest.raises(ValueError, match="H3 vpack"):
+        vpack.configure_reference_compression(patcher(), ratio)
 
 
 @pytest.mark.skipif(os.environ.get("VEDA_TEST_CUDA") != "1", reason="opt-in GPU check")
@@ -290,7 +300,7 @@ def test_vpack_cuda_attention_respects_reference_protection(strategy, policy, re
     from comfyui_turing_utils.adapters.minimax.veda.tiling import TileShape
 
     torch.manual_seed(122)
-    refs = packed_refs([video_reference(audio_frames=9)], "3/5")
+    refs = packed_refs([video_reference(audio_frames=9)], "2/5")
     layout = native_layout(refs)
     vpack.restore_reference_times(layout, refs)
     options = semantic_options(refs, layout)
