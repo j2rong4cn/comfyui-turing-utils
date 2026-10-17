@@ -175,6 +175,13 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
         prompt["3"]["inputs"]["text"] = ["compute", 0]
         if graph:
             graph(prompt)
+        # Existing dependency/continuation cases explicitly request refresh.
+        for node in prompt.values():
+            if node["class_type"].startswith("TuringMaterial") and any(
+                isinstance(node["inputs"].get(name), list)
+                for name in ("value", "images", "text")
+            ):
+                node["inputs"].setdefault("run_on_dependency", True)
         identity = workflow_files.add_instance(
             self.project.root, workflow_files.pack(workflow, prompt), "Test"
         )
@@ -238,12 +245,65 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                 class_type="TaskJoin", inputs={"a": ["5", 0], "b": ["4", 0]}
             )
             graph["4"]["inputs"]["text"] = ["8", 0]
+            graph["4"]["inputs"]["run_on_dependency"] = True
             graph["8"] = dict(class_type="TaskText", inputs={"text": "dependency"})
         graph["3"]["inputs"]["text"] = ["7" if fanout or dependency else "5", 0]
         identity = workflow_files.add_instance(
             self.project.root, workflow_files.pack(workflow, graph), "Seeds"
         )
         return identity, identity + ":" + graph["3"]["inputs"]["stub_id"]
+
+    async def test_dependency_switch_reads_current_or_refreshes_existing_result(self):
+        for refresh in (False, True):
+            with self.subTest(refresh=refresh):
+
+                def graph(prompt):
+                    prompt["4"]["inputs"].update(
+                        text=["compute", 0], run_on_dependency=refresh
+                    )
+                    prompt["3"]["inputs"]["text"] = ["4", 0]
+
+                identity, targets = self.card(graph, 2)
+                self.project.select(targets[1], {"text": "chosen"}, 0)
+                operation = await self.tasks.start(
+                    "project", self.project.document()["revision"], target=targets[0]
+                )
+                result = await self.finished(operation)
+                self.assertEqual(result["status"], "success", result)
+                self.assertEqual(
+                    self.project.selection(targets[0])["text"],
+                    "source!" if refresh else "chosen",
+                )
+
+    async def test_read_only_missing_dependency_never_runs_its_computation(self):
+        def graph(prompt):
+            prompt["4"]["inputs"].update(text=["compute", 0], run_on_dependency=False)
+            prompt["3"]["inputs"]["text"] = ["4", 0]
+
+        _, targets = self.card(graph, 2)
+        operation = await self.tasks.start(
+            "project", self.project.document()["revision"], target=targets[0]
+        )
+        result = await self.finished(operation)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("随依赖执行", result["error"])
+        self.assertNotIn("text", self.project.selection(targets[1]))
+
+    async def test_run_all_refreshes_each_shared_boundary_once_even_when_enabled(self):
+        def graph(prompt):
+            prompt["5"]["inputs"].update(text=["compute", 0], run_on_dependency=True)
+            prompt["3"]["inputs"]["text"] = ["5", 0]
+            prompt["4"]["inputs"]["text"] = ["5", 0]
+
+        identity, targets = self.card(graph, 3)
+        operation = await self.tasks.start(
+            "project", self.project.document()["revision"], card=identity
+        )
+        result = await self.finished(operation)
+        self.assertEqual(result["status"], "success", result)
+        history = self.server.prompt_queue.get_history()
+        self.assertEqual(len(history), 3)
+        self.assertEqual(set(result["completed"]), set(targets))
 
     async def test_value_controls_advance_exposed_and_internal_seeds_and_persist(self):
         for exposed in (True, False):
@@ -333,6 +393,42 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
             for key, fields in queued[3]["turing_value_controls"].items():
                 for name, value in fields.items():
                     self.assertEqual(queued[2][key]["inputs"][name], value)
+
+    async def test_new_parameter_revision_does_not_reuse_running_material(self):
+        identity, target = self.seeded_card("fixed")
+        revision = self.project.document()["revision"]
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.tasks._execute
+        executions = []
+
+        async def delayed(project, material, client, ancestors, snapshot):
+            executions.append(snapshot["revision"])
+            if len(executions) == 1:
+                entered.set()
+                await release.wait()
+            return await original(project, material, client, ancestors, snapshot)
+
+        with mock.patch.object(self.tasks, "_execute", side_effect=delayed):
+            first = await self.tasks.start("project", revision, target=target)
+            await entered.wait()
+            next_revision = self.project.patch(
+                revision,
+                [
+                    dict(
+                        type="input",
+                        id=identity + ":parameters",
+                        name="seed",
+                        value=7,
+                    )
+                ],
+            )
+            second = await self.tasks.start("project", next_revision, target=target)
+            self.assertNotEqual(first["id"], second["id"])
+            release.set()
+            results = await asyncio.gather(self.finished(first), self.finished(second))
+        self.assertTrue(all(r["status"] == "success" for r in results), results)
+        self.assertEqual(executions, [revision, next_revision])
+        self.assertEqual(self.project.selection(target)["text"], "7")
 
     async def test_seed_is_frozen_across_dependency_retry_and_invalid_queue_does_not_advance(
         self,

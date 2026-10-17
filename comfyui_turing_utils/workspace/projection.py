@@ -47,6 +47,15 @@ def material_options(workflow, interface, identities):
             presentation["allow_upload"] = False
         if properties.get("canvas_show_generate") is False:
             presentation["show_generate"] = False
+        if properties.get("canvas_show_generate") is True:
+            presentation["show_generate"] = True
+        if properties.get("canvas_show_history") is True:
+            presentation["show_history"] = True
+        if "canvas_preview" in properties:
+            preview = properties["canvas_preview"]
+            if preview not in {"main", "show", "hide"}:
+                raise ValueError("Invalid material preview setting")
+            presentation["preview"] = preview
         label = properties.get("canvas_generate_label", "")
         if isinstance(label, str) and label.strip():
             presentation["generate_label"] = label.strip()
@@ -69,9 +78,9 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
         {},
     )
     for connection in canvas.get("connections", []):
-        connections.setdefault(connection["target"], {})[connection["port"]] = (
-            connection
-        )
+        connections.setdefault(connection["target"], {})[
+            connection["port"]
+        ] = connection
     for instance in canvas["cards"]:
         if card_ids is not None and instance["id"] not in card_ids:
             continue
@@ -262,22 +271,52 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                                     for kind, types in MATERIAL_TYPES.items()
                                     if port["type"] in types
                                 )
+                                owner, stub = replacement[0].split(":", 1)
+                                try:
+                                    source_data, source_interface = unpack(
+                                        load_json(card_path(root, owner))
+                                    )
+                                    source_node = source_data["prompt"][
+                                        source_interface["stubs"][stub]
+                                    ]
+                                except (ValueError, OSError):
+                                    # A broken editor file does not invalidate a saved material boundary.
+                                    source_node = {"inputs": {}}
                                 prompt[replacement[0]] = {
                                     "class_type": "TuringMaterial" + kind.title(),
-                                    "inputs": {},
+                                    "inputs": {
+                                        "run_on_dependency": source_node["inputs"].get(
+                                            "run_on_dependency", False
+                                        )
+                                    },
+                                    "_meta": {
+                                        "turing_executable": any(
+                                            is_link(source_node["inputs"].get(n))
+                                            for n in ("value", "images", "text")
+                                        )
+                                    },
                                 }
         materials, material_names, fields = [], {}, []
+        presentation = material_options(workflow, interface, identities)
+        positioned = set()
+        hidden_positions = set()
         configuration_id = f"{instance['id']}:parameters"
         parameters = {}
         layout = []
         for port in interface["inputs"]:
             if port["kind"] == "position":
+                if port["id"] not in interface["positions"]:
+                    continue
                 material = identities[
                     interface["stubs"][interface["positions"][port["id"]]]
                 ]
                 materials.append(material)
+                positioned.add(material)
                 material_names[material] = port["name"]
-                layout.append({"material": material})
+                if not port.get("canvas_hidden", False):
+                    layout.append({"material": material})
+                else:
+                    hidden_positions.add(material)
             elif is_parameter(port):
                 value = overrides.get(port["id"], parameter_default(port))
                 parameters[port["id"]] = value
@@ -299,7 +338,7 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                             else {}
                         ),
                     },
-                    "hidden": port.get("canvas_hidden", False),
+                    "hidden": port.get("canvas_hidden", True),
                     "group": next(
                         (
                             node.get("_meta", {}).get("title", node["class_type"])
@@ -319,6 +358,41 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                 }
                 fields.append(field)
                 layout.append({"field": field})
+        for stub, key in interface["stubs"].items():
+            material = identities[key]
+            if material not in materials:
+                materials.append(material)
+                material_names[material] = (
+                    data["prompt"][key].get("_meta", {}).get("title", stub)
+                )
+        exported = [
+            identities[
+                data["prompt"][interface["output_node"]]["inputs"][f"port_{p['slot']}"][
+                    0
+                ]
+            ]
+            for p in interface["outputs"]
+        ]
+        main = next(
+            (m for m in materials if presentation.get(m, {}).get("preview") == "main"),
+            None,
+        )
+        if main is None:
+            main = next((m for m in exported if m not in positioned), None)
+        if main is None and not any("material" in item for item in layout):
+            main = next(iter(exported or materials), None)
+        for material in materials:
+            if material in hidden_positions:
+                continue
+            preview = presentation.get(material, {}).get("preview")
+            if preview == "hide":
+                layout = [item for item in layout if item.get("material") != material]
+            elif preview in {"main", "show"} or material == main:
+                layout = [item for item in layout if item.get("material") != material]
+                if material == main:
+                    layout.insert(0, {"material": material})
+                else:
+                    layout.append({"material": material})
         prompt[configuration_id] = {
             "class_type": "CanvasParameters",
             "inputs": parameters,
@@ -334,7 +408,7 @@ def document(root, canvas=None, card_ids=None, *, execution=False):
                 **instance,
                 "materials": materials,
                 "material_names": material_names,
-                "material_options": material_options(workflow, interface, identities),
+                "material_options": presentation,
                 "fields": fields,
                 "layout": layout,
                 "instance": True,

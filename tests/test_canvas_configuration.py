@@ -36,6 +36,93 @@ class CanvasConfigurationTest(unittest.TestCase):
         Path(self.temporary.name, "project").mkdir()
         self.project = Project.create("project")
 
+    def test_hidden_position_and_unpositioned_materials_remain_execution_targets(self):
+        workflow, graph = material_template(("text", "text"))
+        ports = json.loads(graph["1"]["inputs"]["ports"])
+        ports[0]["canvas_hidden"] = True
+        encoded = json.dumps(ports)
+        graph["1"]["inputs"]["ports"] = encoded
+        endpoint = next(
+            n for n in workflow["nodes"] if n["type"] == "TuringCanvasInputs"
+        )
+        endpoint["widgets_values"] = [encoded]
+        endpoint["widgets_values_named"] = {"ports": encoded}
+        graph["4"]["inputs"].pop("position")
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "Hidden"
+        )
+        document = self.project.document(execution=True)
+        card = document["cards"][0]
+        self.assertEqual(len(card["materials"]), 2)
+        self.assertEqual(card["layout"], [{"material": identity + ":" + graph["4"]["inputs"]["stub_id"]}])
+        for node in ("3", "4"):
+            self.assertIn(
+                identity + ":" + graph[node]["inputs"]["stub_id"], document["prompt"]
+            )
+
+
+    def test_incomplete_draft_preserves_source_and_selection_then_recovers(self):
+        workflow, graph = material_template(("text",))
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "Draft"
+        )
+        target = identity + ":" + graph["3"]["inputs"]["stub_id"]
+        self.project.select(target, {"text": "keep me"})
+        opened = workflow_files.read_instance(self.project.root, identity)
+        source = copy.deepcopy(opened["workflow"])
+        source["nodes"].append(
+            {"id": 999, "type": "PrimitiveString", "widgets_values": ["unfinished"]}
+        )
+        revision = workflow_files.save_instance(
+            self.project.root,
+            identity,
+            source,
+            None,
+            opened["revision"],
+            draft=True,
+            error="unfinished wiring",
+        )
+        draft = workflow_files.read_instance(self.project.root, identity)
+        self.assertEqual(draft["revision"], revision)
+        self.assertTrue(any(n["id"] == 999 for n in draft["workflow"]["nodes"]))
+        self.assertEqual(self.project.selection(target)["text"], "keep me")
+        self.assertIn("尚不可执行", self.project.document()["cards"][0]["error"])
+        workflow_files.save_instance(
+            self.project.root, identity, source, graph, revision
+        )
+        restored = workflow_files.read_instance(self.project.root, identity)
+        workflow_files.unpack(restored["workflow"])
+        self.assertTrue(any(n["id"] == 999 for n in restored["workflow"]["nodes"]))
+        self.assertEqual(self.project.selection(target)["text"], "keep me")
+
+
+    def test_presentation_patch_keeps_material_content_and_updates_hidden_position(
+        self,
+    ):
+        workflow, graph = material_template(("text",))
+        identity = workflow_files.add_instance(
+            self.project.root, workflow_files.pack(workflow, graph), "View"
+        )
+        target = identity + ":" + graph["3"]["inputs"]["stub_id"]
+        self.project.select(target, {"text": "chosen"})
+        revision = self.project.document()["revision"]
+        workflow_files.patch(
+            self.project.root,
+            revision,
+            [
+                {
+                    "type": "presentation",
+                    "id": target,
+                    "value": {"canvas_preview": "hide", "canvas_show_history": True},
+                }
+            ],
+        )
+        card = self.project.document()["cards"][0]
+        self.assertEqual(card["materials"], [target])
+        self.assertEqual(card["layout"], [])
+        self.assertEqual(self.project.selection(target)["text"], "chosen")
+
+
     def test_canvas_chat_settings_redact_preserve_and_clear_key(self):
         settings = self.project.settings()
         settings["chat"].update(base_url="http://global.example", model="model", api_key="secret-key")
@@ -121,7 +208,7 @@ class CanvasConfigurationTest(unittest.TestCase):
         self.project.patch(document["revision"], [dict(type="input", id=identity + ":parameters", name="message", value="changed")])
         self.assertEqual(self.project.document(execution=True)["prompt"][identity + ":node:7"]["inputs"]["value"], "changed")
         with self.assertRaisesRegex(ValueError, "Only editable"):
-            parse_ports(json.dumps([{**ports[0], "canvas_hidden": True}]))
+            parse_ports(json.dumps([dict(id="data", slot=0, name="Data", kind="value", type="STRING", canvas_hidden=True)]))
 
     def test_canvas_template_export_removes_project_binding_and_literal_key(self):
         workflow, prompt = material_template(("image",))

@@ -114,7 +114,7 @@ try {
       ).pos[0] === 640,
       "Canvas save menu did not save canvas.json",
     );
-    await card.widgets.find((w) => w.name === "编辑工作流").callback();
+    await card.getExtraMenuOptions().find((w) => w.content === "编辑工作流").callback();
     check(
       !app.graph.getNodeById(sourceId) && !app.graph.getNodeById(sinkId),
       "Project editor retained external test nodes",
@@ -130,7 +130,7 @@ try {
     } finally {
       window.fetch = fetch;
     }
-    check(submissions === 0, "Project editor allowed global Run");
+    check(submissions === 0, "Project editor bypassed server-owned material tasks");
     let editingText = app.graph._nodes.find((n) => n.type === "TuringMaterialText");
     let textWidget = editingText.widgets.find((w) => w.name === "text");
     check(
@@ -219,7 +219,10 @@ try {
       editingText,
       editingText.inputs.findIndex((s) => s.name === "text"),
     );
-    await editingText.widgets.find((w) => w._executionTarget).callback();
+    const run = editingText.getExtraMenuOptions(app.canvas, [])
+      .find((item) => item.content === "运行此素材");
+    check(!run.disabled, "New computation did not enable the editor run action");
+    await run.callback();
     let published = false;
     for (let i = 0; i < 60; i++) {
       const selection = await workspace.request("selection", {
@@ -313,6 +316,8 @@ try {
     const { DirectoryPicker } = await import(
       "/extensions/comfyui-turing-utils/lib/directory_picker.js"
     );
+    await libraryTab.save({ automatic: true });
+    const beforeCopy = await workspace.request("template/open", { name });
     const choose = DirectoryPicker.prototype.choose;
     const tabCount = app.extensionManager.workflow.openWorkflows.length;
     try {
@@ -354,13 +359,13 @@ try {
     check(
       copiedFile.workflow.nodes.some((n) => n.title === "Independent copy") &&
         !originalFile.workflow.nodes.some((n) => n.title === "Independent copy") &&
-        originalFile.revision === stored.revision,
+        originalFile.revision === beforeCopy.revision,
       "Saving the copy changed the original template",
     );
     return {
       nativeSave: true,
       testBranchIsolation: true,
-      projectRunBlocked: true,
+      projectRun: true,
       projectHistory: true,
       projectUploadAndSerialization: true,
       closeSave: true,

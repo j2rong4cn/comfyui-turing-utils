@@ -13,6 +13,7 @@ import {
   documentPath,
   fileReference,
   fileTab,
+  flushActiveDocument,
   installDocumentStorage,
   snapshotCard,
 } from "./workspace/documents.js";
@@ -57,6 +58,7 @@ const deletions = new Map();
 export { request } from "./workspace/api.js";
 export { saveProject } from "./workspace/project_state.js";
 export async function openTab(workflow, name) {
+  await flushActiveDocument();
   const reference = fileReference(workflow);
   let tab = reference && fileTab(reference);
   if (reference && !tab) {
@@ -88,7 +90,8 @@ function configureCard(node, card, document, directory) {
     name: names.get(id) || card.material_names[id],
     kind: document.prompt[id].class_type.replace("TuringMaterial", "").toLowerCase(),
     allowUpload: card.material_options?.[id]?.allow_upload !== false,
-    showGenerate: card.material_options?.[id]?.show_generate !== false,
+    showGenerate: card.material_options?.[id]?.show_generate === true,
+    showHistory: card.material_options?.[id]?.show_history === true,
     generateLabel: card.material_options?.[id]?.generate_label || "生成",
     selection: document.selections[id] || {},
     executable: ["value", "images", "text"].some((name) =>
@@ -151,7 +154,27 @@ function prepare({ workflow, document, statistics }) {
   workflow.last_link_id = id;
   return workflow;
 }
+
+async function refreshCard(node) {
+  const directory = node.properties.directory;
+  const data = await request("project/open", { directory });
+  const fresh = prepare(data);
+  const update = (target) => {
+    const saved = fresh.nodes.find((n) => n.properties.instance === target.properties.instance);
+    if (!saved) return;
+    Object.assign(target.properties, saved.properties);
+    target.onConfigure?.();
+  };
+  for (const tab of app.extensionManager.workflow.openWorkflows) {
+    if (tab.activeState?.extra?.turing_project?.directory !== directory) continue;
+    tab.activeState.extra.turing_project.revision = data.document.revision;
+    if (tab === app.extensionManager.workflow.activeWorkflow) {
+      for (const current of app.rootGraph.nodes) if (current.type === CARD) update(current);
+    } else for (const current of tab.activeState.nodes) if (current.type === CARD) update(current);
+  }
+}
 export async function openProject(directory, create = false) {
+  await flushActiveDocument();
   if (!create && directory.endsWith("/canvas.json"))
     directory = directory.slice(0, -12);
   await openTab(
@@ -356,7 +379,7 @@ function installEditorMaterials(graph, editing) {
   installProjectMaterials(graph, editing, async (node, target) => {
     // Use the same local task flow as outer cards, including missing upstream
     // materials. The editor never submits a full workflow run.
-    await fileTab(editing).save();
+    await fileTab(editing).save({ automatic: true });
     const state =
       projectState(editing.directory) ||
       (await request("project/open", { directory: editing.directory })).workflow.extra
@@ -364,12 +387,12 @@ function installEditorMaterials(graph, editing) {
     await runMaterial(state, target, {});
   });
 }
-async function saveCard(editing = editor(), task) {
+async function saveCard(editing = editor(), task, { automatic = false } = {}) {
   if (!editing) throw Error("请先打开卡片工作流");
-  const { workflow, output } = task || (await snapshotCard());
+  const { workflow, output, error } = task || (await snapshotCard(app.rootGraph, { draft: true }));
   delete workflow.extra.turing_editor;
   const parameters = Object.fromEntries(
-    Object.values(output)
+    Object.values(output || {})
       .filter((n) => n.class_type === INPUTS)
       .flatMap((n) =>
         JSON.parse(n.inputs.ports)
@@ -378,7 +401,7 @@ async function saveCard(editing = editor(), task) {
       ),
   );
   if (editing.new) {
-    const name = await prompt(
+    const name = automatic ? `草稿-${editing.new}.json` : await prompt(
       "卡片文件名",
       editing.source?.replace(/\.json$/, " 副本.json") || "我的卡片.json",
     );
@@ -391,17 +414,21 @@ async function saveCard(editing = editor(), task) {
     prompt: output,
     parameters,
     base: editing.base,
+    draft: true,
+    error,
   });
   editing.revision = result.revision;
   if (editing.id) {
     const current = await request("card/open", editing);
-    restoreSavedValues(editing.directory, {
-      parameters: { [editing.id]: current.parameters },
-      control_modes: { [editing.id]: current.base.controls },
-      inputs: current.base.inputs,
-    });
-    editing.parameters = current.parameters;
-    editing.base = current.base;
+    if (!current.workflow.extra?.turing_card?.invalid) {
+      restoreSavedValues(editing.directory, {
+        parameters: { [editing.id]: current.parameters },
+        control_modes: { [editing.id]: current.base.controls },
+        inputs: current.base.inputs,
+      });
+      editing.parameters = current.parameters;
+      editing.base = current.base;
+    }
     editing.revision = current.revision;
   }
   if (result.name) editing.name = result.name;
@@ -420,7 +447,7 @@ async function saveCard(editing = editor(), task) {
     // do not require reloading the tab to replace the instance-wide file list.
     if (editor() === editing) installEditorMaterials(app.rootGraph, editing);
   }
-  app.extensionManager.toast.add({
+  if (!automatic) app.extensionManager.toast.add({
     severity: "success",
     summary: "已保存卡片文件",
     life: 3000,
@@ -580,6 +607,7 @@ app.registerExtension({
       run,
       copyCard,
       restoreProject,
+      refreshCard,
     });
   },
   commands: [
@@ -666,10 +694,10 @@ app.registerExtension({
       deleteTemplate,
     });
     bindDocument = installDocumentStorage({
-      save: (reference, task) =>
+      save: (reference, task, options) =>
         reference.directory && !reference.id
           ? saveProject(reference.directory)
-          : saveCard(reference, task),
+          : saveCard(reference, task, options),
       load: loadDocument,
       saveAs: (reference) => {
         if (reference.directory && !reference.id)
@@ -797,7 +825,7 @@ app.registerExtension({
     stopActivePreview();
     if (workflow.extra?.turing_editor || workflow.extra?.turing_card) {
       // Native extension hooks swallow thrown errors. Show the invalid file
-      // explicitly and leave it open for repair; snapshotCard blocks its Save.
+      // explicitly and leave it open for repair; execution rejects its draft.
       try {
         assertWorkflowLinks(workflow);
       } catch (error) {

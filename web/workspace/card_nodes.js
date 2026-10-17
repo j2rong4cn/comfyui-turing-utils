@@ -11,7 +11,7 @@ import { titleAction } from "../lib/title_action.js";
 import { CardLayout } from "./card_layout.js";
 import { request, report, action } from "./api.js";
 import { valueControlWidget } from "../lib/value_controls.js";
-import { hiddenParameters, projectParameters, saveParameters } from "./parameters.js";
+import { cardPresentation, hiddenParameters, projectParameters, saveParameters } from "./parameters.js";
 import { refreshCanvasInstances } from "./sidebar.js";
 import { ROOT, CARD, enqueueSave, setProjectStatus } from "./project_state.js";
 
@@ -24,6 +24,7 @@ export function registerCanvasNodes({
   run,
   copyCard,
   restoreProject,
+  refreshCard,
 }) {
   const instances = new WeakMap();
   class ProjectNode extends LiteGraph.LGraphNode {
@@ -108,6 +109,7 @@ export function registerCanvasNodes({
       super("Canvas Card");
       this.removable = false;
       this.cardLayout = new CardLayout(this);
+      this.materialActions = { select, importMedia, run };
       this.runAll = titleAction(
         this,
         "generate-all",
@@ -116,9 +118,11 @@ export function registerCanvasNodes({
     }
     getExtraMenuOptions() {
       return [
-        ...(this.properties.card?.fields.some((f) => f.hidden)
-          ? [{ content: "隐藏参数…", callback: action(() => hiddenParameters(this)) }]
+        ...(this.properties.card?.fields.some((f) => f.hidden) || this.properties.materials?.some((m) => !this.properties.card.layout.some((x) => x.material === m.id))
+          ? [{ content: "隐藏参数…", callback: action(() => hiddenParameters(this, { select, importMedia, run })) }]
           : []),
+        { content: "卡片显示…", callback: action(() => cardPresentation(this, refreshCard)) },
+        { content: "运行卡片", disabled: this.runAll.disabled, callback: action(() => run(this)) },
         {
           content: "编辑工作流",
           disabled: this.copyPending,

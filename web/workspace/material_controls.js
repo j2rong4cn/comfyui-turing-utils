@@ -9,6 +9,7 @@ import { action, report, request } from "./api.js";
 import { acceptsFile, chooseUpload } from "./material_selection.js";
 import { bindTextUndo } from "./text_undo.js";
 import { previewLayout } from "./card_layout.js";
+import { chooseHistory } from "./material_history.js";
 
 let playing = null;
 export const stopActivePreview = () => playing?.releasePlayer();
@@ -23,7 +24,7 @@ export function field(node, name, type, value, fn, options = {}) {
   return parameterWidget(node, name, type, value, action(fn), options);
 }
 export function materialWidget(node, identity) {
-  return node.widgets.find((widget) => widget._materialId === identity);
+  return node.widgets?.find((widget) => widget._materialId === identity);
 }
 export function url(
   directory,
@@ -94,6 +95,14 @@ function installMaterialMenu(
               },
             ]
           : [
+              {
+                content: "选择历史素材…",
+                callback: () => chooseHistory(
+                  directory, material,
+                  (content) => node.selectMaterial(material, content),
+                  (asset) => url(directory, asset, true),
+                ),
+              },
               ...(importMedia && material.allowUpload !== false
                 ? [
                     {
@@ -407,6 +416,8 @@ export function controls(node, m, { select, importMedia, run }) {
     );
     w._materialId = m.id;
     w.label = m.name;
+    w.hidden = !m.showHistory;
+    w.options.hidden = !m.showHistory;
     const directory = node.properties.directory;
     bindMaterialCombo(node, w, {
       key: `${directory}:${m.kind}`,
@@ -422,9 +433,10 @@ export function controls(node, m, { select, importMedia, run }) {
       select: action((asset) => select(node, m, { asset })),
       kind: m.kind,
       preview: (asset) => (m.kind === "audio" ? "" : url(directory, asset, true)),
+      lazy: !m.showHistory,
     }).catch(report);
   }
-  if (m.executable && m.showGenerate !== false) generateButton(node, m, run);
+  if (m.executable && m.showGenerate === true) generateButton(node, m, run);
 }
 
 function comparable(value) {

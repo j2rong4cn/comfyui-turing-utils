@@ -3,12 +3,14 @@ import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import { report, request } from "./api.js";
 import { materialChanged, settleMaterials } from "./material_selection.js";
+import { fileTab } from "./documents.js";
 import {
   assertProjectSaved,
   editor,
   enqueueSave,
   jobs,
   project,
+  projectState,
   saveProject,
   setProjectStatus,
   settleProjectWrites,
@@ -130,12 +132,38 @@ export async function restoreTasks(directory) {
 
 export function installLocalExecution() {
   const queue = app.queuePrompt;
+  let active;
   app.queuePrompt = function (...args) {
-    if (project() || editor()?.id) {
-      report(Error("画布及项目内卡片不执行整图；请使用生成按钮"));
-      return Promise.resolve();
+    const editing = editor();
+    const state = project();
+    if (!editing?.id && !state) {
+      if (!editing) return queue.apply(this, args);
+      return fileTab(editing).save({ automatic: true })
+        .then(() => queue.apply(this, args));
     }
-    return queue.apply(this, args);
+    if (active) return active;
+    active = (async () => {
+      const count = args[1] ?? 1;
+      for (let i = 0; i < count; i++) {
+        if (editing?.id) {
+          await fileTab(editing).save({ automatic: true });
+          const current =
+            projectState(editing.directory) ||
+            (await request("project/open", { directory: editing.directory }))
+              .workflow.extra.turing_project;
+          await runCardMaterials(current, editing.id);
+        } else {
+          const cards = [...app.canvas.selectedItems]
+            .filter((n) => n.type === CARD)
+            .map((n) => n.properties.instance);
+          if (!cards.length) throw Error("请先选择要运行的卡片");
+          await runSelectedCards(state, cards);
+        }
+      }
+    })().catch(report).finally(() => {
+      active = null;
+    });
+    return active;
   };
   api.addEventListener("reconnected", () => {
     if (project()) restoreTasks(project().directory).catch(report);

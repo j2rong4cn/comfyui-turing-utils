@@ -50,12 +50,6 @@ app.registerExtension({
           (w) => w.name === "Auto-refresh after generation",
         );
         if (refresh) refresh.value = false;
-        const upload = this.widgets.find((w) => w.name === "canvas_allow_upload");
-        if (upload) upload.value = this.properties.canvas_allow_upload !== false;
-        this.widgets.find((w) => w.name === "canvas_show_generate").value =
-          this.properties.canvas_show_generate !== false;
-        this.widgets.find((w) => w.name === "canvas_generate_label").value =
-          this.properties.canvas_generate_label || "";
       };
       const kind = type.slice("TuringMaterial".length).toLowerCase();
       const id = node.widgets?.find((w) => w.name === "stub_id");
@@ -64,42 +58,68 @@ app.registerExtension({
       }
       if (kind === "text" && !node.inputs.some((s) => s.name === "text"))
         node.addInput("text", "STRING");
-      const visibility = node.addWidget(
-        "toggle",
-        "canvas_show_generate",
-        node.properties.canvas_show_generate !== false,
-        (value) => {
-          node.properties.canvas_show_generate = value;
-          node.graph?.change();
-        },
-        { serialize: false },
-      );
-      visibility.label = "在卡片显示生成按钮";
-      const generateLabel = node.addWidget(
-        "text",
-        "canvas_generate_label",
-        node.properties.canvas_generate_label || "",
-        (value) => {
-          node.properties.canvas_generate_label = value;
-          node.graph?.change();
-        },
-        { serialize: false, placeholder: "生成" },
-      );
-      generateLabel.label = "生成按钮文字（留空为生成）";
+      const dependency = node.widgets.find((w) => w.name === "run_on_dependency");
+      if (dependency) dependency.label = "随依赖执行";
+      const menu = node.getExtraMenuOptions;
+      node.getExtraMenuOptions = function (...args) {
+        const change = (key, value) => {
+          this.graph?.beforeChange();
+          this.properties[key] = value;
+          if (key === "canvas_preview") {
+            for (const input of this.graph.nodes.filter((n) => n.type === INPUTS)) {
+              const ports = entries(input);
+              const socket = this.inputs.find((s) => s.name === "position");
+              const link = socket?.link != null ? this.graph.links[socket.link] : null;
+              if (link?.origin_id === input.id) {
+                const port = ports.find((p) => p.slot === link.origin_slot);
+                if (port) { port.canvas_hidden = value === "hide"; syncPorts(input, ports); }
+              }
+            }
+            if (value === "main") {
+              for (const other of this.graph.nodes)
+                if (other !== this && other.properties.canvas_preview === "main")
+                  other.properties.canvas_preview = "show";
+            }
+          }
+          if (key === "canvas_show_history") {
+            const file = this.widgets.find((w) => ["file", "audio"].includes(w.name));
+            if (file) { file.hidden = !value; file.options.hidden = !value; }
+          }
+          this.updateProjectPresentation?.();
+          this.graph?.afterChange();
+        };
+        return [
+          ...(menu?.apply(this, args) || []),
+          ...[["主预览", "main"], ["在卡片显示", "show"], ["在卡片隐藏", "hide"]].map(([label, value]) => ({
+            content: `${this.properties.canvas_preview === value ? "✓ " : ""}${label}`,
+            callback: () => change("canvas_preview", value),
+          })),
+          ...[["显示历史下拉", "canvas_show_history"], ["显示生成按钮", "canvas_show_generate"]].map(([label, key]) => ({
+            content: `${this.properties[key] ? "✓ " : ""}${label}`,
+            callback: () => change(key, !this.properties[key]),
+          })),
+          ...(kind === "text" ? [] : [{ content: `${this.properties.canvas_allow_upload !== false ? "✓ " : ""}允许上传素材`, callback: () => change("canvas_allow_upload", this.properties.canvas_allow_upload === false) }]),
+        ];
+      };
+      const added = node.onAdded;
+      node.onAdded = function (...args) {
+        const result = added?.apply(this, args);
+        queueMicrotask(() => {
+          if (!this.graph) return;
+          const all = [], seen = new Set();
+          const visit = (graph) => {
+            if (seen.has(graph)) return;
+            seen.add(graph);
+            for (const child of graph.nodes) { all.push(child); if (child.subgraph) visit(child.subgraph); }
+          };
+          visit(this.graph.rootGraph);
+          const stub = this.widgets.find((w) => w.name === "stub_id");
+          const original = all.find((n) => n.widgets?.some((w) => w.name === "stub_id" && w.value === stub.value));
+          if (original !== this) stub.value = crypto.randomUUID();
+        });
+        return result;
+      };
       if (kind !== "text") {
-        // A card presentation option, not an execution input: keep the ordinary
-        // workflow's native upload widget unchanged and persist it in properties.
-        const policy = node.addWidget(
-          "toggle",
-          "canvas_allow_upload",
-          node.properties.canvas_allow_upload !== false,
-          function (value) {
-            node.properties.canvas_allow_upload = value;
-            node.graph?.change();
-          },
-          { serialize: false },
-        );
-        policy.label = "在卡片显示上传入口";
         // Preserve this native auxiliary widget's old positional slot, but
         // disable its unrelated global execution-success refresh subscription.
         const refresh = node.widgets.find(

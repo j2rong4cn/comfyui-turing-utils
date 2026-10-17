@@ -53,6 +53,7 @@ export function parameterDefinition(type, widget, target) {
   return {
     type,
     kind: "parameter",
+    canvas_hidden: true,
     default: value,
     options,
     ...(control ? { control } : {}),
@@ -119,7 +120,7 @@ function syncParameterWidgets(node, ports) {
 
 export function refreshEndpointLabels(node, ports = entries(node)) {
   for (const port of ports) {
-    const label = port.name + (port.canvas_hidden ? " · 隐藏" : "");
+    const label = port.name + ((port.canvas_hidden ?? port.kind === "parameter") ? " · 隐藏" : "");
     const output = node.outputs.find((slot) => slot._portId === port.id);
     if (output) output.label = output.localized_name = label;
     const widget = node.widgets.find(

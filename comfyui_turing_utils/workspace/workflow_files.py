@@ -111,6 +111,8 @@ def unpack(workflow):
         raise ValueError(
             "Open this workflow in ComfyUI and save it as a Canvas card first"
         )
+    if data.get("invalid"):
+        raise ValueError("工作流已保存但尚不可执行：" + data["invalid"])
     if not isinstance(data.get("overrides", {}), dict):
         raise ValueError("Card parameter overrides must be an object")
     values.state(workflow)
@@ -310,10 +312,12 @@ def read_instance(root, identity):
         parameters = values.parameters(workflow) if clean else {}
         metadata = values.state(workflow) if clean else {}
         return {
-            "workflow": project_copy(workflow) if clean else workflow,
-            "revision": values.editor_revision(workflow)
-            if clean
-            else hashlib.sha256(content).hexdigest(),
+            "workflow": copy.deepcopy(workflow),
+            "revision": (
+                values.editor_revision(workflow)
+                if clean
+                else hashlib.sha256(content).hexdigest()
+            ),
             "parameters": parameters,
             "control_modes": metadata.get("control_modes", {}),
             "base": values.editor_base(workflow) if clean else {},
@@ -354,13 +358,42 @@ def _saved_contract(workflow):
 
 
 def save_instance(
-    root, identity, workflow, prompt, revision, parameters=None, base=None
+    root,
+    identity,
+    workflow,
+    prompt,
+    revision,
+    parameters=None,
+    base=None,
+    draft=False,
+    error=None,
 ):
     with LOCK:
         current = read_instance(root, identity)
         if current["revision"] != revision:
             raise ValueError("Card file or parameters changed; reopen it before saving")
-        result = project_copy(pack(workflow, prompt))
+        try:
+            if prompt is None:
+                raise ValueError(error or "工作流尚未完成")
+            result = pack(workflow, prompt)
+        except ValueError as exception:
+            if not draft:
+                raise
+            result = copy.deepcopy(workflow)
+            result.setdefault("extra", {})[KEY] = copy.deepcopy(
+                current["workflow"]["extra"][KEY]
+            )
+            result["extra"][KEY]["invalid"] = str(exception)
+            canvas = load_json(Path(root) / "canvas.json")
+            canvas["revision"] += 1
+            commit_project(
+                root,
+                [
+                    (card_path(root, identity), result),
+                    (Path(root) / "canvas.json", canvas),
+                ],
+            )
+            return read_instance(root, identity)["revision"]
         canvas = load_json(Path(root) / "canvas.json")
         _, interface = unpack(result)
         old_ports, old_materials = _saved_contract(current["workflow"])
@@ -457,6 +490,67 @@ def patch(root, revision, changes):
             raise ValueError("Canvas changed; reload before saving")
         workflows = {}
         for change in changes:
+            if change["type"] == "presentation":
+                identity, suffix = change["id"].split(":", 1)
+                if not any(c["id"] == identity for c in canvas["cards"]):
+                    raise ValueError("Unknown card instance")
+                if identity not in workflows:
+                    workflows[identity] = load_json(card_path(root, identity))
+                workflow = workflows[identity]
+                data, interface = unpack(workflow)
+                if suffix == "parameters":
+                    key = interface["input_node"]
+                    ports = interface["inputs"]
+                    port = next(
+                        p
+                        for p in ports
+                        if p["id"] == change["name"] and is_parameter(p)
+                    )
+                    if type(change["value"]) is not bool:
+                        raise ValueError("Parameter visibility must be a boolean")
+                    port["canvas_hidden"] = change["value"]
+                    values.set_input(
+                        workflow, key, "ports", json.dumps(ports, ensure_ascii=False)
+                    )
+                else:
+                    key = interface["stubs"].get(suffix)
+                    if key is None:
+                        raise ValueError("Unknown material")
+                    options = change["value"]
+                    if not isinstance(options, dict) or set(options) - {
+                        "canvas_preview",
+                        "canvas_show_history",
+                        "canvas_show_generate",
+                    }:
+                        raise ValueError("Unknown material presentation setting")
+                    for name, value in options.items():
+                        if name == "canvas_preview":
+                            if value not in {"main", "show", "hide"}:
+                                raise ValueError("Invalid material preview setting")
+                        elif type(value) is not bool:
+                            raise ValueError("Material visibility must be a boolean")
+                    native = values.native_nodes(workflow)
+                    if options.get("canvas_preview") == "main":
+                        for source in interface["stubs"].values():
+                            properties = native[source].setdefault("properties", {})
+                            if properties.get("canvas_preview") == "main":
+                                properties["canvas_preview"] = "show"
+                    native[key].setdefault("properties", {}).update(options)
+                    if "canvas_preview" in options:
+                        ports = interface["inputs"]
+                        for port in ports:
+                            if interface["positions"].get(port["id"]) == suffix:
+                                port["canvas_hidden"] = (
+                                    options["canvas_preview"] == "hide"
+                                )
+                        values.set_input(
+                            workflow,
+                            interface["input_node"],
+                            "ports",
+                            json.dumps(ports, ensure_ascii=False),
+                        )
+                values.refresh(workflow)
+                continue
             if change["type"] in {"input", "control"}:
                 identity, suffix = change["id"].split(":", 1)
                 if suffix != "parameters":

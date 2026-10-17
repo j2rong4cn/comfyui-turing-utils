@@ -63,6 +63,8 @@ def describe(prompt):
             raise ValueError("Every material needs a unique stable stub_id")
         stubs[identity] = key
         marker = node["inputs"].get("position")
+        if marker is None:
+            continue
         if not is_link(marker) or marker[0] != input_id:
             raise ValueError(
                 f"Material {identity} has no Canvas Inputs position binding"
@@ -71,9 +73,6 @@ def describe(prompt):
         if port is None or port["kind"] != "position" or port["id"] in positioned:
             raise ValueError("Each position port must bind exactly one material")
         positioned[port["id"]] = identity
-    for port in incoming:
-        if port["kind"] == "position" and port["id"] not in positioned:
-            raise ValueError("Unbound material position")
     for port in outgoing:
         source = prompt[output_id]["inputs"].get(f"port_{port['slot']}")
         if (
@@ -99,7 +98,7 @@ def describe(prompt):
 
 
 def project_content(workflow, prompt, interface):
-    """Keep positioned materials and their computation, not external test branches."""
+    """Keep all materials and their computation, not external test branches."""
     kept = set()
 
     def visit(key):

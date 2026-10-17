@@ -74,9 +74,12 @@ def parse_ports(value, *, endpoint=INPUTS):
             validate_definition(port)
             validate_parameter(port, parameter_default(port))
         if "canvas_hidden" in port and (
-            port["kind"] != "parameter" or type(port["canvas_hidden"]) is not bool
+            port["kind"] not in {"parameter", "position"}
+            or type(port["canvas_hidden"]) is not bool
         ):
-            raise ValueError("Only editable parameters may be hidden on a card")
+            raise ValueError(
+                "Only editable parameters and material positions may be hidden on a card"
+            )
         if port["kind"] != "parameter" and "default" in port:
             if port["type"] != "STRING" or not isinstance(port["default"], str):
                 raise ValueError("Only text materials may have an inline default")

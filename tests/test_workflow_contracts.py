@@ -50,6 +50,16 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
     assert set(codec[0]) == set(old_codec[0])
     actual["TuringMaterialVideo"]["inputs"]["required"]["codec"] = old_codec
     for kind in ("Image", "Video", "Audio", "Text"):
+        material = actual[f"TuringMaterial{kind}"]
+        assert material["input_order"]["optional"].pop() == "run_on_dependency"
+        assert material["inputs"]["optional"].pop("run_on_dependency") == [
+            "BOOLEAN",
+            {"default": False},
+        ]
+        reader = actual[f"_TuringMaterialRead{kind}"]["inputs"]["optional"][
+            "source_state"
+        ][0]
+        assert reader.pop(reader.index("saved")) == "saved"
         contract = actual[f"_TuringMaterialWrite{kind}"]
         assert contract["input_order"]["optional"].pop() == "configuration"
         assert contract["inputs"]["optional"].pop("configuration") == [
@@ -58,7 +68,9 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
         ]
     # Adding a strategy does not change the serialized inputs of any existing
     # mode. Check Spark separately and keep the old-mode snapshot frozen.
-    options = actual["TuringUtilsAttentionStrategy"]["inputs"]["required"]["strategy"][1]["options"]
+    options = actual["TuringUtilsAttentionStrategy"]["inputs"]["required"]["strategy"][
+        1
+    ]["options"]
     spark = [option for option in options if option["key"] == "spark"]
     assert len(spark) == 1
     options.remove(spark[0])
@@ -68,5 +80,9 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
     fields = veda["inputs"]["required"]
     prefix = fields.pop("prefix_policy")
     assert prefix[0] == "COMFY_DYNAMICCOMBO_V3"
-    assert [option["key"] for option in prefix[1]["options"]] == ["auto", "none", "manual"]
+    assert [option["key"] for option in prefix[1]["options"]] == [
+        "auto",
+        "none",
+        "manual",
+    ]
     assert actual == expected

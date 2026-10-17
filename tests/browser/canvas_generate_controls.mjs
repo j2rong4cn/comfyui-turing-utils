@@ -11,6 +11,10 @@ const browser = await chromium.launch({
 try {
   const page = await browser.newPage();
   const errors = [];
+  const historyRequests = [];
+  page.on("request", (request) => {
+    if (request.url().endsWith("/turing/workspace/history")) historyRequests.push(request);
+  });
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18187");
   await selectRenderer(page);
@@ -27,13 +31,9 @@ try {
     window.wireStarter();
     const text = app.rootGraph._nodes.find((n) => n.type === "TuringMaterialText");
     const image = app.rootGraph._nodes.find((n) => n.type === "TuringMaterialImage");
-    const configure = (node, name, value) => {
-      const widget = node.widgets.find((w) => w.name === name);
-      widget.value = value;
-      widget.callback(value);
-    };
-    configure(text, "canvas_show_generate", false);
-    configure(text, "canvas_generate_label", "Enhance");
+    text.properties.canvas_show_generate = false;
+    text.properties.canvas_generate_label = "Enhance";
+    image.getExtraMenuOptions(app.canvas, []).find((m) => m.content === "显示生成按钮").callback();
     const source = LiteGraph.createNode("PrimitiveString");
     app.rootGraph.add(source);
     source.widgets[0].value = "generated text";
@@ -159,6 +159,20 @@ try {
       material.selection.text === "generated text" && picture.selection.asset,
       "Header action did not generate all stubs",
     );
+    menu(card.previewElements.get(picture.id));
+    document.querySelectorAll(".litemenu-entry").forEach((entry) => {
+      if (entry.value?.content === "选择历史素材…") entry.value.callback();
+    });
+    LiteGraph.closeAllContextMenus();
+    const history = document.querySelector("dialog[open].turing-material-history");
+    check(history, "Preview menu did not open project history");
+    for (let i = 0; i < 100 && !history.querySelector("img"); i++)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    check(history.querySelector("img"), "Project history did not load a thumbnail");
+    history.querySelector("img").closest("button").click();
+    for (let i = 0; i < 100 && history.isConnected; i++)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    check(!history.isConnected, "History selection did not finish");
     await workspace.openProject(directory);
     const reopened = app.rootGraph._nodes.find(
       (n) => n.properties.instance === added.id,
@@ -175,9 +189,11 @@ try {
       menus: true,
       stableStatus: true,
       persisted: true,
+      onDemandHistory: true,
     };
   });
   assert.deepEqual(errors, []);
+  assert.equal(historyRequests.length, 1, "Hidden history fetched without opening its picker");
   console.log(JSON.stringify(result));
 } finally {
   await browser.close();

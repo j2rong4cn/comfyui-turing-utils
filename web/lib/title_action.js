@@ -61,6 +61,7 @@ export function titleAction(node, name, callback) {
   native.getWidth = () => 32;
   const draw = native.draw;
   native.draw = function (ctx, ...args) {
+    if (!node.mouseOver && !node.is_selected && action.state === "idle") return;
     ctx.save();
     ctx.fillStyle = action.color;
     if (action.disabled) ctx.globalAlpha *= 0.55;
@@ -79,6 +80,9 @@ export function titleAction(node, name, callback) {
 
 export function installTitleActionDom(app) {
   const container = document.getElementById("graph-canvas-container");
+  const style = document.createElement("style");
+  style.textContent = "[data-node-id]:not(:hover):not(.selected):not(:focus-within) [data-turing-title-action][data-state=idle]{opacity:0!important}";
+  container.append(style);
   const attach = (element) => {
     if (!(element instanceof Element)) return;
     const nodeElement = element.closest("[data-node-id]");

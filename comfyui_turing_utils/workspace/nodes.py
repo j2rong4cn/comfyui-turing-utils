@@ -48,9 +48,7 @@ class Material:
             upload = (
                 "video_upload"
                 if cls.KIND == "video"
-                else "audio_upload"
-                if cls.KIND == "audio"
-                else "image_upload"
+                else "audio_upload" if cls.KIND == "audio" else "image_upload"
             )
             inputs["audio" if cls.KIND == "audio" else "file"] = (
                 "COMBO",
@@ -84,6 +82,14 @@ class Material:
                     },
                 ),
             )
+        # Append after existing widgets: older positional workflows retain their values.
+        optional["run_on_dependency"] = (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": "随依赖执行：其它目标需要此桩时，先执行其计算分支。关闭时只读取当前素材；直接运行及全局运行仍会执行。",
+            },
+        )
         return {"required": inputs, "optional": optional}
 
     def check_lazy_status(self, **kwargs):
@@ -139,7 +145,7 @@ class Read:
                 "optional": {
                     "directory": ("STRING",),
                     "target": ("STRING",),
-                    "source_state": (["current", "waiting", "resumed"],),
+                    "source_state": (["current", "saved", "waiting", "resumed"],),
                 },
             }
         return {
@@ -153,7 +159,7 @@ class Read:
             "optional": {
                 "target": ("STRING",),
                 "max_megapixels": ("FLOAT",),
-                "source_state": (["current", "waiting", "resumed"],),
+                "source_state": (["current", "saved", "waiting", "resumed"],),
             },
         }
 
@@ -175,6 +181,10 @@ class Read:
             text, asset = selected.get("text", ""), selected.get("asset", "")
             start, end = selected.get("start", 0), selected.get("end", 0)
             if not (text if self.KIND == "text" else asset):
+                if source_state == "saved":
+                    raise ValueError(
+                        f"素材 {target} 没有当前内容；请先运行或上传，或开启随依赖执行"
+                    )
                 # Resolve only when this branch actually executes. Successful
                 # reads are retained by the logical task's continuation, while
                 # empty/waiting reads stay unresolved until its dependency ends.

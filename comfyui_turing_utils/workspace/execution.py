@@ -24,6 +24,7 @@ class MaterialTasks:
         self.server = server
         self.active = {}
         self.materials = {}
+        self.material_revisions = {}
         self.waits = {}
         self.lock = asyncio.Lock()
 
@@ -55,20 +56,25 @@ class MaterialTasks:
                 cards if cards is not None else [card],
             )
             for (owned, pending), record in self.active.items():
-                if owned == directory and record["targets"] == targets:
+                if (
+                    owned == directory
+                    and record["targets"] == targets
+                    and record["revision"] == revision
+                ):
                     return project.operation(pending)
             for snapshot in snapshots.values():
                 snapshot["pending_materials"] = {
                     source: task
                     for (owned, source), task in self.materials.items()
                     if owned == directory
+                    and self.material_revisions[(owned, source)] == revision
                 }
             with project.connect() as db:
                 db.execute(
                     "INSERT INTO operations(id,targets,status) VALUES(?,?,'queued')",
                     (identity, json.dumps(targets)),
                 )
-            record = {"targets": targets}
+            record = {"targets": targets, "revision": revision}
             self.active[(directory, identity)] = record
             record["task"] = asyncio.create_task(
                 self._operation(project, identity, snapshots, client_id)
@@ -100,6 +106,7 @@ class MaterialTasks:
                 )
             targets = material_order(document["prompt"], targets)
         # One expansion per selected card, not once per material boundary.
+        document["generated_materials"] = set()
         return targets, dict.fromkeys(targets, document)
 
     async def _operation(self, project, identity, snapshots, client_id):
@@ -153,17 +160,34 @@ class MaterialTasks:
         if target in ancestors:
             raise ValueError("Material dependency cycle: " + target)
         pending = self.materials.get(key)
-        if pending:
-            return await asyncio.shield(pending)
+        while pending:
+            if self.material_revisions[key] == snapshot["revision"]:
+                return await asyncio.shield(pending)
+            previous = await asyncio.shield(pending)
+            selected = project.selection(target)
+            if (
+                previous["selected"]
+                and selected.get("content_revision", selected.get("revision", 0))
+                == previous["revision"] + 1
+            ):
+                snapshot = {
+                    **snapshot,
+                    "selections": {**snapshot["selections"], target: selected},
+                }
+            if self.materials.get(key) is pending:
+                break
+            pending = self.materials.get(key)
         task = asyncio.create_task(
             self._execute(project, target, client_id, ancestors | {target}, snapshot)
         )
         self.materials[key] = task
+        self.material_revisions[key] = snapshot["revision"]
         try:
             return await asyncio.shield(task)
         finally:
             if self.materials.get(key) is task:
                 self.materials.pop(key, None)
+                self.material_revisions.pop(key, None)
 
     async def _execute(self, project, target, client_id, ancestors, snapshot):
         snapshot = snapshot or await asyncio.to_thread(
@@ -185,15 +209,28 @@ class MaterialTasks:
             if node["class_type"].startswith("_TuringMaterialRead")
         ]
         pending_sources = dict(snapshot.get("pending_materials", {}))
-        generated = set(snapshot.get("completed_materials", []))
+        generated = snapshot.setdefault(
+            "generated_materials", set(snapshot.get("completed_materials", []))
+        )
         continuation = TaskContinuation(project.directory, run_id)
         try:
             for reader in reads:
                 source = reader["target"]
-                pending = pending_sources.get(source) or self.materials.get(
-                    (project.directory, source)
-                )
-                if pending and source not in ancestors:
+                if source in generated:
+                    reader["source_state"] = "resumed"
+                    continue
+                pending = pending_sources.get(source)
+                if (
+                    pending is None
+                    and self.material_revisions.get((project.directory, source))
+                    == snapshot["revision"]
+                ):
+                    pending = self.materials.get((project.directory, source))
+                if (
+                    pending
+                    and source not in ancestors
+                    and reader["source_state"] == "waiting"
+                ):
                     pending_sources[source] = pending
                     # Let native lazy evaluation decide whether this reader is
                     # needed. A selected branch waits through the same missing-
@@ -221,6 +258,7 @@ class MaterialTasks:
                     await asyncio.sleep(0.2)
                 run = project.run(run_id)
                 if run["status"] == "success":
+                    generated.add(target)
                     self.server.send_sync(
                         "turing_material_changed",
                         {
@@ -239,15 +277,25 @@ class MaterialTasks:
                 dependency = run["dependency"]
                 if dependency in generated:
                     raise ValueError("Upstream material is still empty: " + dependency)
-                pending = pending_sources.get(dependency) or self.materials.get(
-                    (project.directory, dependency)
-                )
+                pending = pending_sources.get(dependency)
+                if (
+                    pending is None
+                    and self.material_revisions.get((project.directory, dependency))
+                    == snapshot["revision"]
+                ):
+                    pending = self.materials.get((project.directory, dependency))
                 if pending:
                     await self._wait(project.directory, target, dependency, pending)
                 else:
-                    selection = project.selection(dependency)
-                    if not (selection.get("text") or selection.get("asset")):
-                        await self._material(project, dependency, client_id, ancestors)
+                    dependency_snapshot = await asyncio.to_thread(
+                        project.document,
+                        card_ids={dependency.split(":", 1)[0]},
+                        execution=True,
+                    )
+                    dependency_snapshot["generated_materials"] = generated
+                    await self._material(
+                        project, dependency, client_id, ancestors, dependency_snapshot
+                    )
                 generated.add(dependency)
                 for reader in reads:
                     if reader["target"] == dependency:
@@ -257,9 +305,11 @@ class MaterialTasks:
         except BaseException as error:
             project.run_state(
                 run_id,
-                "interrupted"
-                if isinstance(error, (asyncio.CancelledError, MaterialInterrupted))
-                else "failed",
+                (
+                    "interrupted"
+                    if isinstance(error, (asyncio.CancelledError, MaterialInterrupted))
+                    else "failed"
+                ),
                 str(error),
             )
             raise

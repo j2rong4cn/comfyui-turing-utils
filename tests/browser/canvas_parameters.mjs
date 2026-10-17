@@ -59,6 +59,8 @@ try {
       );
       check(link, `Cannot expose ${type}`);
       const port = entries(endpoint).at(-1);
+      port.canvas_hidden = false;
+      syncPorts(endpoint, entries(endpoint).map((p) => p.id === port.id ? port : p));
       check(port.kind === "parameter" && port.type === type, `Wrong ${type} port`);
       ids[type] = port.id;
       const widget = endpoint.widgets.find((w) => w._portId === port.id);
@@ -257,8 +259,10 @@ try {
       "Instance edits changed template",
     );
     check(
-      JSON.stringify(opened.workflow.extra.turing_card.overrides) === "{}",
-      "Instance values were stored in workflow rather than canvas",
+      JSON.parse(Object.values(opened.workflow.extra.turing_card.prompt)
+        .find((n) => n.class_type === "TuringCanvasInputs").inputs.ports)
+        .find((p) => p.id === ids.INT).default === values.INT,
+      "Private workflow did not retain endpoint defaults",
     );
     await workspace.openProject(directory);
     card = app.graph._nodes.find((n) => n.properties.instance === added.id);
@@ -267,8 +271,9 @@ try {
         card.properties.values[ids[type]] === value,
         `${type} not restored on project open`,
       );
-    await card.widgets.find((w) => w.name === "编辑工作流").callback();
+    await card.getExtraMenuOptions().find((w) => w.content === "编辑工作流").callback();
     const editing = app.graph._nodes.find((n) => n.type === "TuringCanvasInputs");
+    check(editing, "Workflow editor did not open: " + document.querySelector(".p-toast")?.textContent);
     for (const [type, value] of Object.entries(values))
       check(
         editing.widgets.find((w) => w._portId === ids[type]).value === value,

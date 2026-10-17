@@ -1,6 +1,7 @@
 """Project routes; inference belongs to the server-owned material task service."""
 
 import asyncio
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -213,7 +214,9 @@ def install_routes():
             with workflow_files.LOCK:
                 if path.exists():
                     if data.get("create_only"):
-                        raise Conflict("Template name already exists; choose a new name")
+                        raise Conflict(
+                            "Template name already exists; choose a new name"
+                        )
                     if (
                         data.get("revision")
                         != hashlib.sha256(path.read_bytes()).hexdigest()
@@ -221,15 +224,27 @@ def install_routes():
                         raise Conflict(
                             "Template exists or changed; open it before replacing it"
                         )
-                workflow_files.atomic_json(
-                    path,
-                    export_card(
-                        data["workflow"], data["prompt"],
+                if data.get("create_only"):
+                    workflow = export_card(
+                        data["workflow"],
+                        data["prompt"],
                         project=data.get("export_instance", False),
                     )
-                    if data.get("create_only")
-                    else workflow_files.pack(data["workflow"], data["prompt"]),
-                )
+                else:
+                    try:
+                        if data.get("prompt") is None:
+                            raise ValueError(data.get("error") or "工作流尚未完成")
+                        workflow = workflow_files.pack(data["workflow"], data["prompt"])
+                    except ValueError as error:
+                        if not data.get("draft"):
+                            raise
+                        workflow = copy.deepcopy(data["workflow"])
+                        metadata = workflow.setdefault("extra", {}).setdefault(
+                            workflow_files.KEY,
+                            {"version": 2, "prompt": {}, "state": {}},
+                        )
+                        metadata["invalid"] = str(error)
+                workflow_files.atomic_json(path, workflow)
                 return hashlib.sha256(path.read_bytes()).hexdigest()
 
         revision = await asyncio.to_thread(save_file)
@@ -369,6 +384,8 @@ def install_routes():
                 data["revision"],
                 parameters=data.get("parameters"),
                 base=data.get("base"),
+                draft=data.get("draft", False),
+                error=data.get("error"),
             )
         )
         return web.json_response({"revision": revision})
@@ -413,7 +430,9 @@ def install_routes():
                 project.patch(data["revision"], data["changes"])
                 return workflow_files.parameter_state(
                     project.root,
-                    card_ids={change["id"].split(":", 1)[0] for change in data["changes"]},
+                    card_ids={
+                        change["id"].split(":", 1)[0] for change in data["changes"]
+                    },
                 )
 
         return web.json_response(await asyncio.to_thread(update))

@@ -143,6 +143,17 @@ def compile_segment(
             return output_key
         if kind and not destination:
             selected = selections.get(key, {})
+            refresh = (
+                key != target
+                and node["inputs"].get("run_on_dependency", False)
+                and (
+                    node.get("_meta", {}).get("turing_executable", False)
+                    or any(
+                        is_link(node["inputs"].get(name))
+                        for name in ("value", "images", "text")
+                    )
+                )
+            )
             if kind == "text":
                 if not selected.get("text") and not allow_missing:
                     raise MissingMaterial(key, kind)
@@ -155,7 +166,7 @@ def compile_segment(
                         "run_id": run_id,
                         "directory": directory,
                         "target": key,
-                        "source_state": "current",
+                        "source_state": "waiting" if refresh else "saved",
                     },
                 }
                 return output_key
@@ -170,7 +181,7 @@ def compile_segment(
                     "end": selected.get("end", 0),
                     "run_id": run_id,
                     "target": key,
-                    "source_state": "current",
+                    "source_state": "waiting" if refresh else "saved",
                     **(
                         {"max_megapixels": max_megapixels}
                         if max_megapixels is not None

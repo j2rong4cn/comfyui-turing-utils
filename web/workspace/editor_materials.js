@@ -36,10 +36,18 @@ export function installProjectMaterials(graph, editing, run) {
       id: target,
       kind,
       selection: state.selection,
-      allowUpload: true,
-      executable: true,
+      allowUpload: node.properties.canvas_allow_upload !== false,
+      executable: ["value", "images", "text"].some((name) => node.inputs.some((s) => s.name === name && s.link != null)),
     };
+    node.selectMaterial = (_material, content) => select(content);
     node.projectMaterial = state;
+    const menu = node.getExtraMenuOptions;
+    node.getExtraMenuOptions = function (...args) {
+      return [
+        ...(menu?.apply(this, args) || []),
+        { content: "运行此素材", disabled: !material.executable, callback: action(() => run(node, target)) },
+      ];
+    };
     const canonical = () =>
       state.selection.asset
         ? `${editing.directory}/${state.selection.asset} [output]`
@@ -119,7 +127,10 @@ export function installProjectMaterials(graph, editing, run) {
         kind,
         preview: (asset) =>
           kind === "audio" ? "" : url(editing.directory, asset, true),
+        lazy: !node.properties.canvas_show_history,
       }).catch(report);
+      widget.hidden = !node.properties.canvas_show_history;
+      widget.options.hidden = widget.hidden;
       const upload = action((file) =>
         mutateMaterial(editing.directory, target, async () => {
           const asset = await importAsset(editing.directory, kind, file);
@@ -158,7 +169,25 @@ export function installProjectMaterials(graph, editing, run) {
       }
     }
     update(state.selection);
-    generateButton(node, material, () => run(node, target));
+    if (node.properties.canvas_show_generate === true && material.executable)
+      generateButton(node, material, () => run(node, target));
+    node.updateProjectPresentation = () => {
+      material.allowUpload = node.properties.canvas_allow_upload !== false;
+      material.executable = ["value", "images", "text"].some((name) =>
+        node.inputs.some((s) => s.name === name && s.link != null),
+      );
+      widget.setHistoryVisible?.(!!node.properties.canvas_show_history)?.catch(report);
+      const button = node.widgets.find((w) => w._executionTarget === target);
+      if (button && node.properties.canvas_show_generate !== true) node.removeWidget(button);
+      else if (!button && node.properties.canvas_show_generate === true && material.executable)
+        generateButton(node, material, () => run(node, target));
+      node.setSize(node.computeSize());
+    };
+    const connected = node.onConnectionsChange;
+    node.onConnectionsChange = function (...args) {
+      connected?.apply(this, args);
+      this.updateProjectPresentation();
+    };
     node.setSize(node.computeSize());
   }
 }

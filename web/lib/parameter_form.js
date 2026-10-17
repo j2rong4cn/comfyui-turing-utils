@@ -153,6 +153,7 @@ export function parameterForm({ title, fields, values, apply }) {
     parent.append(row);
   }
   function renderField(parent, field, value, change, path = [], root = value) {
+    if (field.render) return field.render(parent);
     if (field.type !== DYNAMIC_COMBO) return scalar(parent, field, value, change);
     scalar(
       parent,
@@ -276,7 +277,10 @@ export function parameterForm({ title, fields, values, apply }) {
   dialog.addEventListener("cancel", (e) => {
     if (saving) e.preventDefault();
   });
-  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  dialog.addEventListener("close", () => {
+    for (const field of fields) field.dispose?.();
+    dialog.remove();
+  }, { once: true });
   footer.append(cancel, submit);
   dialog.append(style, heading, search, body, status, footer);
   document.body.append(dialog);

@@ -121,7 +121,7 @@ export function mediaComboPreview(node, widget, kind, preview, project = false) 
 export function bindMaterialCombo(
   node,
   widget,
-  { key, list, selected, select, kind, preview },
+  { key, list, selected, select, kind, preview, lazy = false },
 ) {
   let entry,
     query = "",
@@ -209,8 +209,14 @@ export function bindMaterialCombo(
     }
   };
   update();
-  widget.refreshMaterialList = () => refreshMaterialList(key);
-  return entry.loaded ? Promise.resolve() : refreshEntry(entry);
+  widget.refreshMaterialList = () => lazy ? Promise.resolve() : refreshMaterialList(key);
+  widget.setHistoryVisible = (visible) => {
+    lazy = !visible;
+    widget.hidden = !visible;
+    widget.options.hidden = !visible;
+    return visible ? refreshMaterialList(key) : Promise.resolve();
+  };
+  return entry.loaded || lazy ? Promise.resolve() : refreshEntry(entry);
 }
 
 export async function refreshMaterialList(key, append = false) {

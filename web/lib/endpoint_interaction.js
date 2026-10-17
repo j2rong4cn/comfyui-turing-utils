@@ -122,15 +122,15 @@ export function installEndpoint(node) {
     if (index < 0) return [];
     return [
       { content: "重命名", callback: (_, __, event) => rename(id, event) },
-      ...(node.type === INPUTS && ports[index].kind === "parameter"
+      ...(node.type === INPUTS && ["parameter", "position"].includes(ports[index].kind)
         ? [
             {
-              content: `${ports[index].canvas_hidden ? "✓ " : ""}隐藏参数`,
+              content: `${(ports[index].canvas_hidden ?? ports[index].kind === "parameter") ? "✓ " : ""}在卡片隐藏`,
               callback: () =>
                 commit(() => {
                   const ps = entries(node);
                   const port = ps.find((p) => p.id === id);
-                  port.canvas_hidden = !port.canvas_hidden;
+                  port.canvas_hidden = !(port.canvas_hidden ?? port.kind === "parameter");
                   // Presentation metadata only: retain native slots and links.
                   node.widgets.find((w) => w.name === "ports").value =
                     JSON.stringify(ps);

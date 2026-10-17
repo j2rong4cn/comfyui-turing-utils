@@ -379,8 +379,7 @@ class WorkspaceTest(unittest.TestCase):
         result = compile_task(self.project, target, document["revision"])
         self.assertEqual(result["target"], target)
         graph["3"]["inputs"].pop("position")
-        with self.assertRaisesRegex(ValueError, "position binding"):
-            describe(graph)
+        self.assertEqual(describe(graph)["positions"], {})
 
     def test_task_reports_missing_and_empty_dependencies_without_prepared_run(self):
         workflow, graph = material_template(("text", "text"))
