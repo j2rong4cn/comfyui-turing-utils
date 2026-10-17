@@ -12,7 +12,7 @@ from .layout import (
 )
 from .runtime import (
     AttentionRuntimeConfig,
-    attention_runtime_config,
+    dense_attention_runtime,
     install_attention_runtime,
 )
 from .stable import (
@@ -56,46 +56,43 @@ def _bootstrap_attention_integrations() -> None:
 
 
 def attention_base_runtime(model) -> AttentionRuntimeConfig:
-    """Resolve the immutable dense base used by a Sol/SLA strategy.
-
-    Models loaded by the ConvRot loader already carry this capability marker.
-    Official and third-party loaders are bootstrapped from their current
-    override when possible, otherwise from SDPA.
-    """
+    """Keep a configured dense base; default unconfigured models to W8A8."""
     _bootstrap_attention_integrations()
     transformer_options = model.model_options.setdefault("transformer_options", {})
-    config = attention_runtime_config(transformer_options)
+    config = dense_attention_runtime(transformer_options)
     if config is not None:
         return config
 
-    current = transformer_options.get("optimized_attention_override")
-    dense_backend = transformer_options.get(
-        "turing_utils_attention_base_backend",
-        transformer_options.get("turing_utils_attention_backend", "sdpa"),
-    )
-    if dense_backend not in {"w8a8", "sage", "sdpa"}:
-        dense_backend = getattr(current, "turing_utils_attention_backend", "sdpa")
-    if dense_backend not in {"w8a8", "sage", "sdpa"}:
-        dense_backend = "sdpa"
-
-    if not callable(current):
-        current = make_attention_override(dense_backend, device=model.load_device)
-    implementation = getattr(
-        current,
-        "turing_utils_attention_implementation",
-        f"inherited:{dense_backend}",
-    )
+    override = make_attention_override("w8a8", device=model.load_device)
     return AttentionRuntimeConfig(
-        dense_backend=dense_backend,
-        dense_implementation=implementation,
-        dense_override=current,
+        dense_backend="w8a8",
+        dense_implementation=override.turing_utils_attention_implementation,
+        dense_override=override,
         native_runtime=False,
     )
 
 
+def inherit_attention_backend(model):
+    """Preserve upstream dispatch, including H3's pre-sampling text refiner."""
+    _bootstrap_attention_integrations()
+    patched = model.clone()
+    options = patched.model_options.setdefault("transformer_options", {})
+    runtime = dense_attention_runtime(options)
+    if runtime is not None:
+        # A native backend node may replace only the legacy override, leaving
+        # a previous strategy's prepared executor behind. Normalize both paths.
+        install_attention_runtime(options, runtime)
+    ensure_attention_layout_provider(patched)
+    return patched
+
+
 def apply_spark_attention_patch(model, **settings):
-    # W8A8 is independent of the loader's dense numerical policy.
     runtime = attention_base_runtime(model)
+    if runtime.dense_backend != "w8a8":
+        raise ValueError(
+            "Spark-H3 requires W8A8 dense attention. Select W8A8 upstream "
+            "or remove the explicit backend selection before using Spark."
+        )
     override = make_spark_attention_override(model.load_device, **settings)
     dense = override.turing_utils_dense_override
     runtime = replace(runtime, dense_backend="w8a8", dense_override=dense,

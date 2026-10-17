@@ -33,6 +33,65 @@ class FakePatcher:
 
 
 class AttentionRuntimeTest(unittest.TestCase):
+    def test_unconfigured_backend_defaults_to_w8a8(self):
+        def w8a8(*args, **kwargs):
+            return "w8a8"
+
+        w8a8.turing_utils_attention_implementation = "test:w8a8"
+        model = FakePatcher()
+        original = model.model_options["transformer_options"].copy()
+        with mock.patch.object(
+            attention_patches, "make_attention_override", return_value=w8a8
+        ) as make:
+            config = attention_patches.attention_base_runtime(model)
+        make.assert_called_once_with("w8a8", device=model.load_device)
+        self.assertEqual(config.dense_backend, "w8a8")
+        self.assertIs(config.dense_override, w8a8)
+        self.assertEqual(model.model_options["transformer_options"], original)
+
+    def test_official_kitchen_backend_is_inherited_and_named_accurately(self):
+        from comfy.model_patcher import ModelPatcher
+        from comfy.ldm.modules import attention as native
+
+        def kitchen(*args, **kwargs):
+            return "kitchen"
+
+        kitchen.container_function = lambda *args, **kwargs: "kitchen-container"
+        model = FakePatcher()
+        ModelPatcher.set_model_optimized_attention(model, kitchen)
+        upstream = model.model_options["transformer_options"][
+            "optimized_attention_override"
+        ]
+        with (
+            mock.patch.dict(
+                native.REGISTERED_ATTENTION_FUNCTIONS, {"comfy_kitchen_int8": kitchen}
+            ),
+            mock.patch.object(attention_patches, "make_attention_override") as make,
+        ):
+            config = attention_patches.attention_base_runtime(model)
+        make.assert_not_called()
+        self.assertEqual(config.dense_backend, "kitchen")
+        self.assertIs(config.dense_override, upstream)
+        self.assertEqual(config.dense_override(None), "kitchen")
+
+    def test_official_backend_replacement_invalidates_stale_turing_config(self):
+        from comfy.model_patcher import ModelPatcher
+
+        model = FakePatcher()
+        dense = lambda *args, **kwargs: "old"
+        attention_runtime.install_attention_runtime(
+            model.model_options["transformer_options"],
+            attention_runtime.AttentionRuntimeConfig("sdpa", "old", dense),
+        )
+        ModelPatcher.set_model_optimized_attention(
+            model, lambda *args, **kwargs: "kitchen"
+        )
+        with mock.patch.object(attention_patches, "make_attention_override") as make:
+            config = attention_patches.attention_base_runtime(model)
+        make.assert_not_called()
+        self.assertEqual(config.dense_backend, "upstream")
+        self.assertEqual(config.dense_override(None), "kitchen")
+
     def test_removed_static_image_strategies_are_rejected(self):
         config = attention_runtime.AttentionRuntimeConfig(
             "sdpa", "test", lambda *args: None
@@ -43,6 +102,60 @@ class AttentionRuntimeTest(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "unsupported attention strategy"),
             ):
                 config.with_strategy(name, "removed", lambda *args: None)
+
+    def test_none_removes_stale_prepared_executor_after_official_backend_replacement(
+        self,
+    ):
+        from comfy.model_patcher import ModelPatcher
+
+        model = FakePatcher()
+
+        def old_strategy(*args, **kwargs):
+            raise AssertionError("The stale strategy executed")
+
+        old_strategy.prepared_attention_executor = lambda request: "stale"
+        options = model.model_options["transformer_options"]
+        attention_runtime.install_attention_runtime(
+            options,
+            attention_runtime.AttentionRuntimeConfig(
+                "w8a8",
+                "old",
+                lambda *args: None,
+                strategy="sol",
+                strategy_override=old_strategy,
+            ),
+        )
+        ModelPatcher.set_model_optimized_attention(
+            model, lambda *args, **kwargs: "new-backend"
+        )
+        patched = attention_patches.inherit_attention_backend(model)
+        actual = patched.model_options["transformer_options"]
+        self.assertNotIn(attention_runtime.ATTENTION_EXECUTOR_KEY, actual)
+        self.assertIn(attention_runtime.ATTENTION_EXECUTOR_KEY, options)
+        self.assertEqual(actual["optimized_attention_override"](None), "new-backend")
+        self.assertEqual(
+            attention_runtime.attention_runtime_config(actual).strategy, "dense"
+        )
+
+    def test_spark_rejects_incompatible_explicit_backend_before_kernel_setup(self):
+        for backend in ("sage", "sdpa", "kitchen", "upstream"):
+            with self.subTest(backend=backend):
+                runtime = attention_runtime.AttentionRuntimeConfig(
+                    backend, "explicit", lambda *args: None
+                )
+                with (
+                    mock.patch.object(
+                        attention_patches,
+                        "attention_base_runtime",
+                        return_value=runtime,
+                    ),
+                    mock.patch.object(
+                        attention_patches, "make_spark_attention_override"
+                    ) as make,
+                    self.assertRaisesRegex(ValueError, "Spark-H3 requires W8A8"),
+                ):
+                    attention_patches.apply_spark_attention_patch(FakePatcher())
+                make.assert_not_called()
 
     def test_dense_backend_installs_native_capability_marker(self):
         model = FakePatcher()
@@ -296,6 +409,51 @@ class AttentionRuntimeTest(unittest.TestCase):
         self.assertEqual(override.turing_utils_dense_backend, "sdpa")
         self.assertEqual(override.turing_utils_sparse_numeric_backend, "fp16")
         self.assertFalse(sparse.call_args.kwargs["use_w8a8"])
+
+    def test_inherited_kitchen_stays_the_dense_provider_for_sol_and_sla(self):
+        from contextlib import ExitStack
+
+        def kitchen(original, *args, **kwargs):
+            return "kitchen"
+
+        for module, factory, availability, preflight in (
+            (
+                "sol",
+                "make_sparse_attention_override",
+                "bundled_sparse_available",
+                "preflight_bundled_sparse",
+            ),
+            (
+                "sla",
+                "make_sla_attention_override",
+                "bundled_sla_available",
+                "preflight_bundled_sla",
+            ),
+        ):
+            with self.subTest(strategy=module), ExitStack() as stack:
+                prefix = "comfyui_turing_utils.attention." + module
+                stack.enter_context(
+                    mock.patch(
+                        prefix + ".is_supported_attention_device", return_value=True
+                    )
+                )
+                stack.enter_context(
+                    mock.patch(prefix + "." + availability, return_value=True)
+                )
+                stack.enter_context(mock.patch(prefix + "." + preflight))
+                override = getattr(attention_patches, factory)(
+                    torch.device("cuda", 0),
+                    dense_backend="kitchen",
+                    dense_override=kitchen,
+                )
+                q = torch.zeros(1, 2, 16, 128)
+                self.assertEqual(
+                    override(
+                        lambda *args, **kwargs: "wrong", q, q, q, 2, skip_reshape=True
+                    ),
+                    "kitchen",
+                )
+                self.assertEqual(override.turing_utils_dense_backend, "kitchen")
 
 
 if __name__ == "__main__":

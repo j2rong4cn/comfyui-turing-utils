@@ -13,7 +13,7 @@ import math
 import weakref
 
 from ...log import get_logger
-from ...attention.runtime import attention_runtime_config
+from ...attention.runtime import dense_attention_runtime
 from ...attention.layout import (
     ATTENTION_LAYOUT_KEY,
     AttentionSegment,
@@ -102,6 +102,8 @@ def make_minimax_runtime_context_wrapper(base_model):
     """Expose the current sampler-owned nested shapes for packed H3 blocks."""
 
     def outer_sample_wrapper(executor, *args, **kwargs):
+        options = executor.class_obj.model_options.get("transformer_options", {})
+        config = dense_attention_runtime(options)
         latent_shapes = kwargs.get("latent_shapes")
         if latent_shapes is None and len(args) > 8:
             latent_shapes = args[8]
@@ -111,9 +113,7 @@ def make_minimax_runtime_context_wrapper(base_model):
             RUNTIME_CONTEXT_ATTR,
             {
                 "latent_shapes": latent_shapes,
-                "attention_runtime": attention_runtime_config(
-                    executor.class_obj.model_options.get("transformer_options", {})
-                ),
+                "attention_runtime": config,
                 # The same mutable object survives the shallow runtime-context
                 # copies made for every diffusion forward and denoising step.
                 "activation_plan": ActivationRuntimePlan(),

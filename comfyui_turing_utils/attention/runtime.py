@@ -76,6 +76,37 @@ def attention_runtime_config(transformer_options) -> AttentionRuntimeConfig | No
     return config
 
 
+def dense_attention_runtime(transformer_options) -> AttentionRuntimeConfig | None:
+    """Resolve the effective upstream dense provider without choosing a default."""
+    if not isinstance(transformer_options, dict):
+        return None
+    current = transformer_options.get("optimized_attention_override")
+    config = attention_runtime_config(transformer_options)
+    if config is not None and is_attention_runtime_dispatcher(current):
+        return config
+    if not callable(current):
+        return None
+
+    from comfy.ldm.modules.attention import get_attention_function
+
+    backend = getattr(current, "turing_utils_attention_backend", "upstream")
+    if backend not in {"w8a8", "sage", "sdpa"}:
+        backend = "upstream"
+    kitchen = get_attention_function("comfy_kitchen_int8", None)
+    container = getattr(current, "container_function", None)
+    if callable(container) and container is getattr(
+        kitchen, "container_function", None
+    ):
+        backend = "kitchen"
+    return AttentionRuntimeConfig(
+        dense_backend=backend,
+        dense_implementation=getattr(
+            current, "turing_utils_attention_implementation", f"upstream:{backend}"
+        ),
+        dense_override=current,
+    )
+
+
 def _active_override(transformer_options, fallback: Callable) -> Callable:
     config = attention_runtime_config(transformer_options)
     return config.active_override if config is not None else fallback
@@ -219,6 +250,7 @@ __all__ = [
     "ATTENTION_RUNTIME_PROTOCOL_VERSION",
     "AttentionRuntimeConfig",
     "attention_runtime_config",
+    "dense_attention_runtime",
     "install_attention_runtime",
     "is_attention_runtime_dispatcher",
     "make_attention_runtime_dispatcher",

@@ -7,7 +7,12 @@ serialization, search and menus. Backend schemas are the single source of
 parameter definitions. Do not patch these to implement our own visual conventions.
 DynamicCombo remains appropriate for genuinely mode-dependent input branches.
 
-Configure Attention Strategy selects Sol, SLA, Veda or Spark with DynamicCombo.
+Configure Attention Strategy selects Sol, SLA, Veda, Spark or `none` with DynamicCombo.
+Sol/SLA/Veda preserve an explicit upstream dense backend, including native
+Kitchen; models without one default to W8A8. `none` preserves upstream execution
+and adds no strategy. Spark requires W8A8 and rejects incompatible explicit
+backends before sampling. The same resolved dense provider is used for H3 text
+refinement, independently of the packed video/audio sparse strategy.
 Spark and Veda require kernel 0.48.0 and expose the same protection controls
 as Sol/SLA: `prefix_policy=auto|none|manual`. Auto shows
 `sparse_reference_image`, `sparse_reference_video`, and `sparse_reference_audio`;

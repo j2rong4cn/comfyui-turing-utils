@@ -83,7 +83,8 @@ def make_sla_attention_override(
     dense_prefix_layers = int(dense_prefix_layers)
     dense_suffix_layers = int(dense_suffix_layers)
     debug_route_density = bool(debug_route_density)
-    dense_backend = normalize_attention_backend(dense_backend)
+    if dense_backend not in {"kitchen", "upstream"}:
+        dense_backend = normalize_attention_backend(dense_backend)
     use_w8a8 = dense_backend == "w8a8"
     if not math.isfinite(sparsity_ratio) or not 0.0 <= sparsity_ratio < 1.0:
         raise ValueError("sparsity_ratio must be finite and in [0, 1)")

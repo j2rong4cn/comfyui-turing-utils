@@ -88,7 +88,8 @@ def make_sparse_attention_override(
     dense_prefix_layers = int(dense_prefix_layers)
     dense_suffix_layers = int(dense_suffix_layers)
     debug_route_density = bool(debug_route_density)
-    dense_backend = normalize_attention_backend(dense_backend)
+    if dense_backend not in {"kitchen", "upstream"}:
+        dense_backend = normalize_attention_backend(dense_backend)
     use_w8a8 = dense_backend == "w8a8"
     if not math.isfinite(routing_threshold):
         raise ValueError("routing_threshold must be finite")

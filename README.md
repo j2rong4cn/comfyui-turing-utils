@@ -530,14 +530,17 @@ original loading functions; callers bypassing the prompt server must invoke
   poster only until playback is requested. Creating a project requires an empty
   folder; opening one requires its valid `canvas.json`. The standalone page is removed.
   See [Material Workspace](docs/material-canvas.md) for usage and validation limits.
-- `Configure Attention Strategy` is the unified entry for Sol, SLA, Veda, and Spark.
+- `Configure Attention Strategy` selects Sol, SLA, Veda, Spark, or `none`.
   H3 Image Sol and Static Virtual KV have been removed, including their node IDs.
   Its dynamic selector exposes only
   the selected strategy, including reference protection and dense-step/layer
   safeguards as ordinary controls. Manual prefix length appears only for manual
   protection. The three previous Sol/SLA/Veda Configure node IDs are removed.
-  Sol/SLA/Veda inherit the loader's dense backend; Spark uses W8A8 independently
-  of the loader. Spark/Veda protection requires kernel 0.48.0.
+  Sol/SLA/Veda preserve an explicit upstream dense backend. With no explicit
+  backend they default to W8A8, including models from official loaders.
+  `none` adds no strategy and preserves upstream execution, including Kitchen
+  and any strategy already applied upstream. Spark requires W8A8 and rejects
+  incompatible explicit backends before sampling. Spark/Veda protection requires kernel 0.48.0.
   See [node configuration and reusable presets](docs/node-configuration.md)
   and the [complete node inventory](docs/node-inventory.md).
 - `Video Frames Padding` shares the model `type` choices of Set Video Latent
@@ -812,10 +815,20 @@ and SLA change only its immutable strategy configuration, while every
 ModelPatcher branch binds its resolved prepared executor directly for the fused
 QKV hot path. They do not stack another model-side attention implementation or
 require separate patched model branches for full and partial denoise samplers.
-The selected dense backend is inherited:
+The dense backend and sparse strategy are separate selections. One resolver
+reads the current upstream override: an explicit backend wins; otherwise an
+active strategy defaults to W8A8. A newer official Model Attention Backend node
+takes precedence over older Turing configuration. `none` preserves upstream
+behavior without choosing a default or adding a strategy. Native Kitchen stays
+Kitchen, including its own fallback policy; it is not relabeled as bundled W8A8
+or SDPA. Clones normalize legacy/container and prepared dispatch together so a
+stale prepared executor cannot keep running an older strategy.
+
+Sol/SLA inherit the selected dense provider:
 `w8a8` uses the signed-V/unsigned-probability Tensor Core path for selected
-exact blocks, while `sage` and `sdpa` use the FP16 sparse core. Dense protected
-steps/layers remain on the selected Sage or SDPA backend. Skipped-block
+exact blocks, while Sage, SDPA, and inherited native providers use the FP16 sparse
+core. Dense protected steps/layers remain on the selected provider, including
+Kitchen. The sparse kernels remain owned by the selected strategy. Skipped-block
 correction keeps original V centroids and FP32 online state, so the numeric
 path does not alter routing. Both variants keep a 64-query
 tile. Native D64 uses 16 KiB dynamic shared memory, while D128 uses 32 KiB. The

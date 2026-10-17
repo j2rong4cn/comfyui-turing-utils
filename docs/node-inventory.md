@@ -19,7 +19,7 @@
 
 H3 音频保护节点放在 Video，与延续拼接、截断工具相邻。
 Sigmas To String 将原生 SIGMAS 转为可复制的十进制 STRING，正向转换复用官方 ManualSigmas。
-Configure Attention Strategy 放在 Models；Sol/SLA/Veda/Spark 通过 DynamicCombo 选择，
+Configure Attention Strategy 放在 Models；Sol/SLA/Veda/Spark/none 通过 DynamicCombo 选择，
 只显示相关参数，参数保持普通控件。Chat 的原 Options 参数使用高级设置；
 H3 KSampler 的主曲线 scheduler/manual 和单段/渐进/二采使用原生 DynamicCombo。
 不引入全局配置、侧栏状态或额外模型缓存。

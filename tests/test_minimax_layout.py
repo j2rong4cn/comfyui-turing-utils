@@ -218,6 +218,36 @@ class MiniMaxLayoutProviderTest(unittest.TestCase):
         torch.testing.assert_close(forward(value), expected)
         self.assertEqual(len(dense_calls), 12)
 
+        # An official backend node can replace the dispatcher on a clone while
+        # the old Turing config remains in model_options. None must use the
+        # replacement in preprocessing as well as in the main DiT.
+        from comfy.model_patcher import ModelPatcher
+        from comfy.ldm.modules import attention as native
+
+        kitchen_calls = []
+
+        def kitchen(*args, **kwargs):
+            kitchen_calls.append(True)
+            return native.attention_pytorch(*args, **kwargs)
+
+        def kitchen_container(q, k, v, *args, **kwargs):
+            return kitchen(q.take(), k.take(), v.take(), *args, **kwargs)
+
+        kitchen.container_function = kitchen_container
+        ModelPatcher.set_model_optimized_attention(branch, kitchen)
+        with (
+            self._minimax_type_patch(),
+            mock.patch.dict(
+                native.REGISTERED_ATTENTION_FUNCTIONS, {"comfy_kitchen_int8": kitchen}
+            ),
+        ):
+            inherited = attention_patches.inherit_attention_backend(branch)
+            executor.class_obj = SimpleNamespace(model_options=inherited.model_options)
+            torch.testing.assert_close(wrapper(executor), expected)
+        self.assertEqual(len(kitchen_calls), 2)
+        self.assertEqual(len(dense_calls), 12)
+        self.assertFalse(hasattr(patcher.model, minimax_layout.RUNTIME_CONTEXT_ATTR))
+
     @staticmethod
     def _latent_shapes():
         return [

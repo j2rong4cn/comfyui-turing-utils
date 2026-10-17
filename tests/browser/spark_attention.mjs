@@ -60,10 +60,18 @@ try {
         if (node.widgets.some(widget => widget.options?.advanced || widget.advanced)) throw Error("Unexpected advanced controls");
         results.push({ strategy, policy, roundtrip: true });
       }
+      await set("strategy", "none");
+      const saved = app.graph.serialize();
+      await app.loadGraphData(saved);
+      await tick();
+      node = app.graph._nodes.find(item => item.type === "TuringUtilsAttentionStrategy");
+      if (value("strategy") !== "none") throw Error("None selection did not persist");
+      if (node.widgets.some(widget => widget.name.startsWith("strategy."))) throw Error("None retained strategy controls");
+      results.push({ strategy: "none", previous: strategy, roundtrip: true });
     }
     return { renderer: LiteGraph.vueNodesMode ? "vue" : "classic", results };
   });
-  assert.equal(report.results.length, 6);
+  assert.equal(report.results.length, 8);
   assert.ok(report.results.every(result => result.roundtrip));
   console.log(JSON.stringify(report));
 } finally {

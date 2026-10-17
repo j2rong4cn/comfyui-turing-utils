@@ -2,6 +2,7 @@
 
 from comfy_api.latest import io
 from ..attention import apply_sla_attention_patch, apply_sparse_attention_patch, apply_spark_attention_patch
+from ..attention.patches import inherit_attention_backend
 from ..adapters.minimax.veda.integration import (
     configure as configure_veda,
     predictor_choices,
@@ -317,6 +318,7 @@ _ATTENTION_STRATEGIES = {
     "sla": apply_sla_attention_patch,
     "veda": configure_veda,
     "spark": apply_spark_attention_patch,
+    "none": inherit_attention_backend,
 }
 _COMMON_CONTROLS = {
     "routing_threshold",
@@ -386,10 +388,14 @@ class AttentionStrategy(io.ComfyNode):
             category="Turing Utils/Models",
             description=(
                 "Select one attention strategy; these modes replace one another, not stack. "
-                "Sol/SLA/Veda dense attention inherits the loader's backend. Sol is model-generic; "
+                "Sol/SLA/Veda inherit an explicitly configured upstream dense backend; "
+                "unconfigured models default to W8A8. "
+                "None preserves upstream attention, including Kitchen, without adding a sparse strategy. "
+                "Sol is model-generic; "
                 "SLA needs compatible trained weights; Veda requires MiniMax H3. "
                 "Veda requires a predictor bundle. Spark-H3 reblocks target video and reweights skipped blocks; "
-                "it uses W8A8, starts with two dense steps, and keeps all reference modalities exact."
+                "it requires W8A8, starts with two dense steps, and keeps all reference modalities exact. "
+                "An incompatible explicit backend is rejected before sampling."
             ),
             inputs=[
                 io.Model.Input("model"),
@@ -400,7 +406,7 @@ class AttentionStrategy(io.ComfyNode):
                             name, _strategy_inputs(node(), advanced=advanced)
                         )
                         for name, node in _ATTENTION_INPUTS.items()
-                    ],
+                    ] + [io.DynamicCombo.Option("none", [])],
                 ),
             ],
             outputs=[io.Model.Output("model")],

@@ -98,7 +98,7 @@ class SparseAttentionNodeTest(unittest.TestCase):
         options = patched.model_options["transformer_options"]
         runtime = options[attention_runtime.ATTENTION_RUNTIME_CONFIG_KEY]
         self.assertEqual(runtime.strategy, "sol")
-        self.assertEqual(runtime.dense_backend, "sdpa")
+        self.assertEqual(runtime.dense_backend, "w8a8")
         self.assertIs(runtime.strategy_override, override)
         self.assertTrue(options["existing"])
         make_override.assert_called_once_with(
@@ -116,7 +116,7 @@ class SparseAttentionNodeTest(unittest.TestCase):
             dense_prefix_layers=3,
             dense_suffix_layers=4,
             debug_route_density=False,
-            dense_backend="sdpa",
+            dense_backend="w8a8",
             dense_override=mock.ANY,
         )
 
@@ -153,6 +153,30 @@ class SparseAttentionNodeTest(unittest.TestCase):
     def test_legacy_node_classes_are_removed(self):
         self.assertFalse(hasattr(attention_nodes, "LegacySolSparseAttentionPatch"))
         self.assertFalse(hasattr(attention_nodes, "LegacySlaSparseAttentionPatch"))
+
+    def test_none_preserves_upstream_options_without_selecting_a_backend(self):
+        from comfy.model_patcher import ModelPatcher
+
+        model = FakePatcher()
+        kitchen = lambda *args, **kwargs: "kitchen"
+        ModelPatcher.set_model_optimized_attention(model, kitchen)
+        options = model.model_options["transformer_options"].copy()
+        with mock.patch.object(attention_patches, "make_attention_override") as make:
+            patched = attention_nodes.AttentionStrategy.execute(
+                model, {"strategy": "none"}
+            ).result[0]
+        make.assert_not_called()
+        self.assertEqual(model.model_options["transformer_options"], options)
+        runtime = attention_runtime.attention_runtime_config(
+            patched.model_options["transformer_options"]
+        )
+        self.assertIs(runtime.dense_override, options["optimized_attention_override"])
+        self.assertEqual(
+            patched.model_options["transformer_options"][
+                "optimized_attention_override"
+            ](None),
+            "kitchen",
+        )
 
     def test_sla_node_returns_the_patched_model(self):
         model = object()
