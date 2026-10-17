@@ -68,6 +68,15 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
         ]
     # Adding a strategy does not change the serialized inputs of any existing
     # mode. Check Spark separately and keep the old-mode snapshot frozen.
+    attention = actual["TuringUtilsAttentionStrategy"]
+    assert attention["input_order"].pop("optional") == ["reference_video_compression"]
+    compression = attention["inputs"].pop("optional")["reference_video_compression"]
+    assert compression[0] == "COMFY_DYNAMICCOMBO_V3"
+    assert [option["key"] for option in compression[1]["options"]] == ["off", "vpack"]
+    ratio = compression[1]["options"][1]["inputs"]["required"]["compression_ratio"]
+    assert ratio[0] == "COMBO"
+    assert ratio[1]["options"] == ["1/5", "2/5", "3/5"]
+    assert ratio[1]["default"] == "2/5"
     options = actual["TuringUtilsAttentionStrategy"]["inputs"]["required"]["strategy"][
         1
     ]["options"]

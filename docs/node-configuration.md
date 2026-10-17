@@ -13,6 +13,14 @@ Kitchen; models without one default to W8A8. `none` preserves upstream execution
 and adds no strategy. Spark requires W8A8 and rejects incompatible explicit
 backends before sampling. The same resolved dense provider is used for H3 text
 refinement, independently of the packed video/audio sparse strategy.
+The optional top-level `reference_video_compression` DynamicCombo is independent
+of strategy and defaults to `off`, including workflows saved before this field
+existed. Selecting `vpack` shows `compression_ratio` with default `2/5`.
+Compression affects H3 Ref2VA reference videos before memory planning; protection
+controls then operate on the retained sequence. Original first/last reference
+anchors remain available to `sparse_reference_image`. Manual prefix counts refer
+to the compressed sequence. Target video/mask, reference audio and Qwen results
+are unchanged. `strategy=none` can still use VPack while inheriting attention.
 Spark and Veda require kernel 0.48.0 and expose the same protection controls
 as Sol/SLA: `prefix_policy=auto|none|manual`. Auto shows
 `sparse_reference_image`, `sparse_reference_video`, and `sparse_reference_audio`;

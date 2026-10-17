@@ -8,6 +8,10 @@ from ..adapters.minimax.veda.integration import (
     predictor_choices,
 )
 from ..adapters.minimax.veda.predictor import PRECISIONS
+from ..adapters.minimax.reference_compression import (
+    COMPRESSION_PHASES,
+    configure_reference_compression,
+)
 
 
 def sol_inputs():
@@ -39,7 +43,7 @@ def sol_inputs():
                     "min": 0,
                     "max": 262144,
                     "step": 64,
-                    "tooltip": "Leading Query tokens kept dense and leading K/V tokens kept exact only for manual policy. Boundaries round outward to 64-token blocks.",
+                    "tooltip": "Leading Query tokens kept dense and leading K/V tokens kept exact only for manual policy. Count the actual packed sequence after reference compression. Boundaries round outward to 64-token blocks.",
                 },
             ),
             "skipped_residual": (
@@ -236,7 +240,7 @@ def _protection_inputs(*, sparse_video):
              "sparse_reference_video", "sparse_reference_audio")
     result = {name: (source[name][0], dict(source[name][1])) for name in names}
     result["manual_prefix_tokens"][1]["tooltip"] = (
-        "Protect the first N original packed tokens in both Query and K/V. "
+        "Protect the first N packed tokens after reference compression in both Query and K/V. "
         "A block touching the boundary is protected in full."
     )
     for name in names[2:]:
@@ -396,6 +400,8 @@ class AttentionStrategy(io.ComfyNode):
                 "Veda requires a predictor bundle. Spark-H3 reblocks target video and reweights skipped blocks; "
                 "it requires W8A8, starts with two dense steps, and keeps all reference modalities exact. "
                 "An incompatible explicit backend is rejected before sampling."
+                " Optional VPack compresses H3 reference videos before any attention strategy; "
+                "reference protection then applies to the retained tokens."
             ),
             inputs=[
                 io.Model.Input("model"),
@@ -408,12 +414,32 @@ class AttentionStrategy(io.ComfyNode):
                         for name, node in _ATTENTION_INPUTS.items()
                     ] + [io.DynamicCombo.Option("none", [])],
                 ),
+                io.DynamicCombo.Input(
+                    "reference_video_compression",
+                    optional=True,
+                    options=[
+                        io.DynamicCombo.Option("off", []),
+                        io.DynamicCombo.Option("vpack", [
+                            io.Combo.Input(
+                                "compression_ratio",
+                                options=list(COMPRESSION_PHASES),
+                                default="2/5",
+                                tooltip=(
+                                    "Drop 1, 2 or 3 of each five H3 reference-video latent frames. "
+                                    "Original first/last anchors are retained, so actual reduction varies. "
+                                    "Sparse protection applies to retained tokens; target video and mask are unchanged."
+                                ),
+                            ),
+                        ]),
+                    ],
+                    tooltip="H3 Ref2VA reference-video compression, independent of strategy. Off by default; images and keyframes are unchanged.",
+                ),
             ],
             outputs=[io.Model.Output("model")],
         )
 
     @classmethod
-    def execute(cls, model, strategy):
+    def execute(cls, model, strategy, reference_video_compression=None):
         # ComfyUI materializes missing optional dynamic inputs as None.
         settings = {key: value for key, value in strategy.items() if value is not None}
         name = settings.pop("strategy")
@@ -433,4 +459,5 @@ class AttentionStrategy(io.ComfyNode):
                 ):
                     if prefix.get(key) is not None:
                         settings[key] = prefix[key]
-        return io.NodeOutput(_ATTENTION_STRATEGIES[name](model, **settings))
+        patched = _ATTENTION_STRATEGIES[name](model, **settings)
+        return io.NodeOutput(configure_reference_compression(patched, reference_video_compression))

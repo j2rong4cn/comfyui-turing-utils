@@ -25,6 +25,7 @@ from ...attention.layout import (
 from ..methods import OriginalMethod, weak_method
 from .memory_state import ActivationRuntimePlan
 from .compat import accepts_parameter, make_packed_layout
+from .reference_compression import restore_reference_times
 
 
 LOG = get_logger("minimax.layout")
@@ -442,8 +443,13 @@ def _make_model_forward(base_model, diffusion_model, original):
         previous = getattr(base_model, RUNTIME_CONTEXT_ATTR, None)
         runtime = dict(previous) if isinstance(previous, dict) else {}
         payload = minimax_payload if isinstance(minimax_payload, dict) else {}
+        packed_layout = _resolve_packed_layout(self, x, context, payload)
+        if packed_layout is not None:
+            restore_reference_times(packed_layout, payload.get("refs"))
+            if getattr(packed_layout, "_compact_ref2va_physical_time_applied", False):
+                minimax_payload = dict(payload, layout=packed_layout)
         runtime.update(
-            packed_layout=_resolve_packed_layout(self, x, context, payload),
+            packed_layout=packed_layout,
             refs=payload.get("refs"),
         )
         setattr(base_model, RUNTIME_CONTEXT_ATTR, runtime)

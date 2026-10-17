@@ -541,6 +541,22 @@ original loading functions; callers bypassing the prompt server must invoke
   `none` adds no strategy and preserves upstream execution, including Kitchen
   and any strategy already applied upstream. Spark requires W8A8 and rejects
   incompatible explicit backends before sampling. Spark/Veda protection requires kernel 0.48.0.
+  The independent `reference_video_compression` control defaults to `off`.
+  `vpack` exposes `compression_ratio` (`1/5`, `2/5` default, or `3/5`) and drops
+  selected H3 Ref2VA reference-video latent frames before sampling memory
+  estimation. It preserves spatial resolution, original first/last anchors and
+  temporal RoPE coordinates, including guide/target and reference-audio timing.
+  Target latents, masks, images, Qwen embeddings and audio are unchanged.
+  All strategy protection controls apply to the retained packed sequence;
+  `manual_prefix_tokens` counts that compressed sequence. Dense steps protect
+  attention computations, not reference frames already removed by compression.
+  No reference video means no compression. Official samplers and H3 single,
+  progressive and two-pass sampling share the same preparation path, without
+  repeatedly compressing a previous stage's references. The schedule follows
+  [Spark-VPack](https://github.com/zechengtang/Spark-H3), with endpoint retention
+  added for our existing anchor protection; actual reduction may be smaller
+  than the selected nominal ratio. Its Apache-2.0 license is included in
+  [kernel/LICENSES/spark-h3-LICENSE.txt](kernel/LICENSES/spark-h3-LICENSE.txt).
   See [node configuration and reusable presets](docs/node-configuration.md)
   and the [complete node inventory](docs/node-inventory.md).
 - `Video Frames Padding` shares the model `type` choices of Set Video Latent
