@@ -823,6 +823,20 @@ automatic logical K schedule uses 64 tokens for short K and two sequential
 64-token stages for K above 1024.
 These are the current production geometries, not global resource limits.
 
+H3's two text-token refiner layers use the current sampling branch's selected
+dense backend, including preprocessing before the first denoising step. They do
+not use the packed video/audio sparse strategy. This bridge also applies when
+an official model loader is followed by a dense attention patch. Reinstalling
+the H3 bridge or cloning a patched model does not stack its sampler wrapper.
+Each refiner execution logs its token count, actual input dtype, and dense
+backend. The earlier model-construction `manual cast` log precedes the ConvRot
+loader's compute-dtype override and does not establish the final inference dtype.
+
+The DiT's attention configuration does not change Qwen text/vision encoding or
+the audio VAE's causal attention. Those retain their own upstream backends and
+mask semantics. H3 video VAE decoding has its own attention selector (W8A8 by
+default); its CNN encoder and the learned latent upscaler have no attention.
+
 On architectures where `sage` delegates to ComfyUI's registered SageAttention,
 the runtime exposes a floating prepared-attention finalizer. It consumes the
 already-projected Q/K/V exactly once, applies the model-published RMSNorm/RoPE

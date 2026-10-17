@@ -90,6 +90,134 @@ class FakePatcher:
 
 
 class MiniMaxLayoutProviderTest(unittest.TestCase):
+    def test_dense_patch_installs_refiner_bridge_on_official_loader_model(self):
+        patcher = FakePatcher()
+        patcher.model.diffusion_model.token_refiner = torch.nn.Identity()
+        with self._minimax_type_patch():
+            attention_patches.apply_attention_backend(
+                patcher, "sdpa", device=torch.device("cpu")
+            )
+        self.assertIn(
+            "diffusion_model.token_refiner.forward", patcher.object_patches
+        )
+        self.assertEqual(len(patcher.wrappers), 1)
+
+    def test_native_patcher_does_not_stack_runtime_wrappers_on_reinstall_or_clone(self):
+        from comfy.model_patcher import ModelPatcher
+        from comfy.patcher_extension import WrappersMP
+
+        patcher = ModelPatcher(
+            FakeBase(), load_device=torch.device("cpu"),
+            offload_device=torch.device("cpu"),
+        )
+        with self._minimax_type_patch():
+            minimax_layout.ensure_minimax_attention_layout_provider(patcher)
+            minimax_layout.ensure_minimax_attention_layout_provider(patcher)
+            branch = patcher.clone()
+            minimax_layout.ensure_minimax_attention_layout_provider(branch)
+        for model in (patcher, branch):
+            self.assertEqual(len(model.get_wrappers(
+                WrappersMP.OUTER_SAMPLE, minimax_layout.RUNTIME_OUTER_WRAPPER_KEY,
+            )), 1)
+
+    def test_text_refiner_uses_current_branch_dense_attention_without_sparse_layout(
+        self,
+    ):
+        import comfy.ops
+        from comfy.ldm.minimax.model import TokenRefiner
+
+        patcher = FakePatcher()
+        refiner = TokenRefiner(
+            2,
+            16,
+            2,
+            8,
+            32,
+            1e-6,
+            1e-6,
+            1e-6,
+            dtype=torch.float32,
+            device="cpu",
+            operations=comfy.ops.manual_cast,
+        )
+        for parameter in refiner.parameters():
+            torch.nn.init.normal_(parameter, std=0.1)
+        patcher.model.diffusion_model.token_refiner = refiner
+        value = torch.randn(11, 16)
+        expected = refiner(value)
+        dense_calls = []
+
+        def dense(original, *args, **kwargs):
+            dense_calls.append(kwargs["transformer_options"])
+            return original(*args, **kwargs)
+
+        def sparse(*args, **kwargs):
+            raise AssertionError("Text refiner entered packed video sparse attention")
+
+        config = attention_runtime.AttentionRuntimeConfig(
+            "w8a8",
+            "test-dense",
+            dense,
+            strategy="sol",
+            strategy_override=sparse,
+        )
+        attention_runtime.install_attention_runtime(
+            patcher.model_options["transformer_options"], config
+        )
+        with self._minimax_type_patch():
+            minimax_layout.ensure_minimax_attention_layout_provider(patcher)
+            installed = patcher.object_patches.copy()
+            minimax_layout.ensure_minimax_attention_layout_provider(patcher)
+            self.assertEqual(patcher.object_patches, installed)
+        forward = patcher.object_patches.get(
+            "diffusion_model.token_refiner.forward", refiner.forward
+        )
+        wrapper = next(iter(patcher.wrappers.values()))
+
+        class Executor:
+            class_obj = SimpleNamespace(model_options=patcher.model_options)
+
+            def __call__(self):
+                return forward(value)
+
+        actual = wrapper(Executor())
+        torch.testing.assert_close(actual, expected)
+        self.assertEqual(len(dense_calls), 2)
+        self.assertTrue(
+            all(
+                set(options) == {"optimized_attention_override"}
+                for options in dense_calls
+            )
+        )
+        self.assertFalse(hasattr(patcher.model, minimax_layout.RUNTIME_CONTEXT_ATTR))
+        branch = patcher.clone()
+        other_calls = []
+
+        def other_dense(original, *args, **kwargs):
+            other_calls.append(True)
+            return dense(original, *args, **kwargs)
+
+        executor = Executor()
+        executor.class_obj = SimpleNamespace(model_options=branch.model_options)
+        for strategy in ("dense", "sol", "sla", "spark", "veda"):
+            with self.subTest(strategy=strategy):
+                attention_runtime.install_attention_runtime(
+                    branch.model_options["transformer_options"],
+                    attention_runtime.AttentionRuntimeConfig(
+                        "sage", "other-dense", other_dense
+                    ).with_strategy(strategy, "test", sparse),
+                )
+                torch.testing.assert_close(wrapper(executor), expected)
+        self.assertEqual(len(other_calls), 10)
+        self.assertIs(
+            attention_runtime.attention_runtime_config(
+                patcher.model_options["transformer_options"]
+            ).dense_override,
+            dense,
+        )
+        torch.testing.assert_close(forward(value), expected)
+        self.assertEqual(len(dense_calls), 12)
+
     @staticmethod
     def _latent_shapes():
         return [
@@ -151,6 +279,7 @@ class MiniMaxLayoutProviderTest(unittest.TestCase):
                 minimax_payload={"layout": packed_layout, "refs": []},
             )
 
+        executor.class_obj = SimpleNamespace(model_options=patcher.model_options)
         output = runtime_wrapper(
             executor,
             None,

@@ -13,6 +13,7 @@ import math
 import weakref
 
 from ...log import get_logger
+from ...attention.runtime import attention_runtime_config
 from ...attention.layout import (
     ATTENTION_LAYOUT_KEY,
     AttentionSegment,
@@ -34,6 +35,7 @@ RUNTIME_OUTER_WRAPPER_KEY = "turing_utils_minimax_runtime_layout"
 RUNTIME_FORWARD_PATCH_KEY = "diffusion_model.forward"
 _FORWARD_PROVIDER_ATTR = "_turing_utils_minimax_layout_forward"
 _MODEL_FORWARD_PROVIDER_ATTR = "_turing_utils_minimax_layout_model_forward"
+_REFINER_FORWARD_PROVIDER_ATTR = "_turing_utils_minimax_refiner_attention"
 _BLOCK_FORWARD_PARAMETERS = (
     "x",
     "t_emb",
@@ -109,6 +111,9 @@ def make_minimax_runtime_context_wrapper(base_model):
             RUNTIME_CONTEXT_ATTR,
             {
                 "latent_shapes": latent_shapes,
+                "attention_runtime": attention_runtime_config(
+                    executor.class_obj.model_options.get("transformer_options", {})
+                ),
                 # The same mutable object survives the shallow runtime-context
                 # copies made for every diffusion forward and denoising step.
                 "activation_plan": ActivationRuntimePlan(),
@@ -126,6 +131,28 @@ def make_minimax_runtime_context_wrapper(base_model):
                 setattr(base_model, RUNTIME_CONTEXT_ATTR, previous)
 
     return outer_sample_wrapper
+
+
+def _make_refiner_forward(refiner, base_model, current):
+    original = OriginalMethod.capture(current, refiner)
+    base_model = weakref.proxy(base_model)
+
+    def forward(self, x, transformer_options={}):
+        context = getattr(base_model, RUNTIME_CONTEXT_ATTR, None)
+        config = context.get("attention_runtime") if context is not None else None
+        if config is not None:
+            # Text refinement has no packed AV layout or sparse layer index.
+            transformer_options = {
+                "optimized_attention_override": config.dense_override
+            }
+            LOG.info(
+                "H3 text refiner: %d tokens, dtype %s, dense attention %s",
+                x.shape[0], x.dtype, config.dense_backend,
+            )
+        return original(self, x, transformer_options=transformer_options)
+
+    setattr(forward, _REFINER_FORWARD_PROVIDER_ATTR, True)
+    return weak_method(forward, refiner)
 
 
 def _runtime_latent_shapes(base_model):
@@ -516,12 +543,25 @@ def ensure_minimax_attention_layout_provider(model) -> LayoutProviderStatus:
             MINIMAX_H3_LAYOUT_KIND, False, "patcher_extension_unavailable"
         )
 
-    model.add_wrapper_with_key(
-        comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
-        RUNTIME_OUTER_WRAPPER_KEY,
-        make_minimax_runtime_context_wrapper(base_model),
-    )
+    wrapper_type = comfy.patcher_extension.WrappersMP.OUTER_SAMPLE
+    get_wrappers = getattr(model, "get_wrappers", None)
+    if not callable(get_wrappers) or not get_wrappers(
+        wrapper_type, RUNTIME_OUTER_WRAPPER_KEY
+    ):
+        model.add_wrapper_with_key(
+            wrapper_type,
+            RUNTIME_OUTER_WRAPPER_KEY,
+            make_minimax_runtime_context_wrapper(base_model),
+        )
     object_patches = getattr(model, "object_patches", {})
+    refiner = getattr(diffusion_model, "token_refiner", None)
+    if refiner is not None:
+        key = "diffusion_model.token_refiner.forward"
+        current = object_patches.get(key, refiner.forward)
+        if not getattr(current, _REFINER_FORWARD_PROVIDER_ATTR, False):
+            model.add_object_patch(
+                key, _make_refiner_forward(refiner, base_model, current)
+            )
     current_model_forward = object_patches.get(
         RUNTIME_FORWARD_PATCH_KEY,
         diffusion_model.forward,

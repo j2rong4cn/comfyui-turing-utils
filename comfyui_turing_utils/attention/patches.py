@@ -6,6 +6,10 @@ import torch
 from dataclasses import replace
 from .integration import ensure_prepared_attention_sites
 from .orchestration import install_attention_strategy
+from .layout import (
+    ATTENTION_LAYOUT_REQUIREMENT_KEY,
+    ensure_attention_layout_provider,
+)
 from .runtime import (
     AttentionRuntimeConfig,
     attention_runtime_config,
@@ -278,6 +282,10 @@ def apply_attention_backend(
         native_runtime=bool(native_runtime),
     )
     install_attention_runtime(transformer_options, config)
+    if not native_runtime:
+        layout_status = ensure_attention_layout_provider(model)
+        if layout_status.required:
+            transformer_options[ATTENTION_LAYOUT_REQUIREMENT_KEY] = layout_status.model_kind
     prepared_executor = getattr(override, "prepared_attention_executor", None)
     if callable(prepared_executor):
         target_device = (

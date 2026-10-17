@@ -625,6 +625,8 @@ class MiniMaxAdapterTest(unittest.TestCase):
         seen = []
 
         class Executor:
+            class_obj = SimpleNamespace(model_options={"transformer_options": {}})
+
             def __call__(self, *args, **kwargs):
                 seen.append(getattr(base, minimax_memory_planning._MEMORY_CONTEXT_ATTR))
                 return "ok"
