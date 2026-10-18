@@ -330,6 +330,7 @@ try {
     const beforeCopy = await workspace.request("template/open", { name });
     const choose = DirectoryPicker.prototype.choose;
     const tabCount = app.extensionManager.workflow.openWorkflows.length;
+    const copyName = `${directory}-copy.json`;
     try {
       DirectoryPicker.prototype.choose = async () => null;
       await command("Turing.MaterialWorkspace.Copy");
@@ -338,21 +339,21 @@ try {
         "Cancelling copy opened an empty draft",
       );
       DirectoryPicker.prototype.choose = async () => name;
+      app.extensionManager.dialog.prompt = async () => copyName;
       await command("Turing.MaterialWorkspace.Copy");
     } finally {
       DirectoryPicker.prototype.choose = choose;
+      app.extensionManager.dialog.prompt = dialog;
     }
     check(
-      app.graph.extra.turing_editor.new &&
-        !app.graph.extra.turing_editor.name &&
-        !app.graph.extra.turing_editor.revision &&
+      app.graph.extra.turing_editor.name === copyName &&
+        !app.graph.extra.turing_editor.new &&
         app.extensionManager.workflow.activeWorkflow !== libraryTab,
       "Copy retained the original file identity",
     );
     const copiedText = app.graph._nodes.find((n) => n.type === "TuringMaterialText");
     copiedText.title = "Independent copy";
     app.graph.change();
-    const copyName = `${directory}-copy.json`;
     app.extensionManager.dialog.prompt = async () => copyName;
     try {
       await command("Comfy.SaveWorkflow");

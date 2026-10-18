@@ -64,7 +64,7 @@ try {
     const field = [...dialog.querySelectorAll("input,textarea")].find((e) => e.getAttribute("aria-label") === parameter.name);
     check(field, "Hidden input parameter is missing");
     field.value = "from-popup"; field.dispatchEvent(new Event("input", { bubbles: true }));
-    [...dialog.querySelectorAll("button")].find((b) => b.textContent === "应用").click();
+    [...dialog.querySelectorAll("button")].find((b) => b.textContent === "关闭").click();
     await wait(() => !dialog.isConnected, "apply hidden parameter");
     await card.getExtraMenuOptions().find((m) => m.content === "编辑工作流").callback();
     const editing = app.rootGraph.extra.turing_editor;

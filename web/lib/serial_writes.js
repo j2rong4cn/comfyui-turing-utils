@@ -46,8 +46,9 @@ export class SerialWrites {
     this.assertSaved();
   }
 
-  async discardFailures() {
+  async discardFailures(keys) {
     await this.drain();
-    this.errors.clear();
+    if (keys) for (const key of keys) this.errors.delete(key);
+    else this.errors.clear();
   }
 }

@@ -193,10 +193,10 @@ export function assertProjectSaved(directory) {
   }
 }
 
-export async function discardProjectFailures(directory) {
+export async function discardProjectFailures(directory, edits) {
   const queue = saves.get(directory);
   if (!queue) return;
-  await queue.writes.discardFailures();
+  await queue.writes.discardFailures(edits);
   if (queue.writes.idle) saves.delete(directory);
 }
 export async function settleProjectWrites(directory) {

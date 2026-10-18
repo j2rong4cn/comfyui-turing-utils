@@ -132,10 +132,17 @@ function sourceSignature(workflow) {
   return JSON.stringify(source);
 }
 
-export function installDocumentStorage({ save, load, saveAs }) {
+export function installDocumentStorage({ save, load, saveAs, rename, renameTemplate }) {
   const manager = app.extensionManager;
   const store = manager.workflow;
   const loadGraph = app.loadGraphData;
+  const saveCopy = async (tab, name) => {
+    const reference = { ...documents.get(tab) };
+    if (reference.directory && !reference.id)
+      throw Error("画布需要复制整个项目，请在卡片编辑页另存为模板");
+    const task = await promptForTab(tab, { draft: true }, loadGraph);
+    return saveAs(reference, task, name);
+  };
   const sessionKey = () => `turing.documents:${api.apiURL("/")}:${api.user}`;
   let restoring = true;
   let restored = false;
@@ -308,15 +315,29 @@ export function installDocumentStorage({ save, load, saveAs }) {
       }
     };
     tab.rename = async function (path) {
-      if (path !== documentPath(documents.get(this)))
-        throw Error("这个文件由画布管理；卡片副本请使用另存为");
-      this.updatePath(path);
-      return this;
+      const reference = documents.get(this);
+      if (path === documentPath(reference)) {
+        this.updatePath(path);
+        return this;
+      }
+      const prefix = "workflows/canvas/library/";
+      if (reference.directory || reference.new || !path.startsWith(prefix) || path.slice(prefix.length).includes("/"))
+        throw Error("请先保存为卡片模板，再修改模板名称");
+      return writes.run(async () => {
+        await saveTab.call(this, { automatic: true, settle: true });
+        const result = await rename(reference, path.slice(prefix.length));
+        Object.assign(reference, result);
+        this.activeState.extra.turing_editor = reference;
+        if (this === store.activeWorkflow) app.rootGraph.extra.turing_editor = reference;
+        this.updatePath(documentPath(reference));
+        api.dispatchCustomEvent("turing_card_library_changed", {});
+        return this;
+      }, "document");
     };
-    for (const name of ["delete", "saveAs"])
-      tab[name] = async () => {
-        throw Error("这个文件由画布管理；卡片副本请使用另存为");
-      };
+    tab.saveAs = (path) => saveCopy(tab, path?.split("/").at(-1));
+    tab.delete = async () => {
+      throw Error("请从卡片库删除模板；项目卡片请从所属画布移除");
+    };
   };
   const bind = ({ loaded = false } = {}) => {
     const tab = store.activeWorkflow;
@@ -397,9 +418,16 @@ export function installDocumentStorage({ save, load, saveAs }) {
   app.loadGraphData = async function (...args) {
     const tab = store.activeWorkflow;
     const target = args[3];
+    const reference = fileReference(args[0]);
+    const owner = reference && fileTab(reference);
+    const duplicating = target?.isTemporary && !documents.has(target) && owner && owner !== target;
+    if (duplicating && reference.directory)
+      throw Error("请在卡片编辑页另存为模板；画布需要复制整个项目");
     const reloading = target === tab && loadedReferences.has(tab);
+    const { turingPreserveDraft = false, ...nativeOptions } = args[4] || {};
+    args[4] = nativeOptions;
     try {
-      if (!restoring && !app.configuringGraph && tab && documents.has(tab) && !reloading) {
+      if (!restoring && !app.configuringGraph && tab && documents.has(tab) && !reloading && !turingPreserveDraft) {
         try {
           await tab.save({ automatic: true, settle: true });
         } catch (error) {
@@ -407,6 +435,14 @@ export function installDocumentStorage({ save, load, saveAs }) {
           // dialog already owns the user's Save/Discard/Cancel decision.
           report(error);
         }
+      }
+      if (duplicating) {
+        const workflow = JSON.parse(JSON.stringify(args[0]));
+        workflow.id = crypto.randomUUID();
+        workflow.extra.turing_editor = { new: crypto.randomUUID(), source: documents.get(owner).name };
+        args[0] = workflow;
+        target.content = target.originalContent = JSON.stringify(workflow);
+        await store.renameWorkflow(target, documentPath(workflow.extra.turing_editor));
       }
       return await loadGraph.apply(this, args);
     } finally {
@@ -426,7 +462,7 @@ export function installDocumentStorage({ save, load, saveAs }) {
     }
     return closeWorkflow.apply(this, args);
   };
-  for (const id of ["Comfy.SaveWorkflow", "Comfy.SaveWorkflowAs"]) {
+  for (const id of ["Comfy.SaveWorkflow", "Comfy.SaveWorkflowAs", "Comfy.RenameWorkflow"]) {
     const command = commands.find((c) => c.id === id);
     if (!command) continue;
     const original = command.function;
@@ -435,16 +471,23 @@ export function installDocumentStorage({ save, load, saveAs }) {
       const tab = store.activeWorkflow;
       const reference = documents.get(tab);
       if (!reference) return original(...args);
-      if (id === "Comfy.SaveWorkflowAs") return saveAs(reference);
+      if (id === "Comfy.SaveWorkflowAs") return saveCopy(tab);
+      if (id === "Comfy.RenameWorkflow") {
+        if (reference.directory)
+          throw Error("请在卡片库中修改模板名称");
+        if (reference.new) return store.saveWorkflow(tab);
+        return renameTemplate(reference.name);
+      }
       await store.saveWorkflow(tab);
       if (reference.directory && reference.id) await saveProject(reference.directory);
     };
   }
-  // Native duplicate uses store.saveAs rather than tab.saveAs. Do not allow it
-  // to turn a project view into a misleading ordinary workflow copy.
+  // Native Save As creates an unloaded descriptor synchronously. Its managed
+  // identity is detached when that copy loads, just like native Duplicate.
   const duplicate = store.saveAs;
   store.saveAs = function (tab, ...args) {
-    if (documents.has(tab)) throw Error("卡片副本请使用另存为；画布需要复制整个项目");
+    if (documents.get(tab)?.directory)
+      throw Error("请在卡片编辑页另存为模板；画布需要复制整个项目");
     return duplicate.call(this, tab, ...args);
   };
   return bind;

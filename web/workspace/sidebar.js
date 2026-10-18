@@ -47,10 +47,13 @@ export function installSidebar({
   editCard,
   addCard,
   deleteTemplate,
+  renameTemplate,
+  copyTemplate,
 }) {
   let container,
     generation = 0,
-    unsubscribe;
+    unsubscribe,
+    query = "";
   const command = (name) =>
     app.extensionManager.command.execute(`Turing.MaterialWorkspace.${name}`);
   function button(parent, label, click) {
@@ -87,10 +90,17 @@ export function installSidebar({
     button(library, "新建卡片", () => command("New"));
     const filter = document.createElement("input");
     filter.placeholder = "搜索卡片";
+    filter.value = query;
     filter.style.cssText = "width:100%;box-sizing:border-box;padding:6px;margin:6px 0";
     library.append(filter);
     const results = document.createElement("div");
     library.append(results);
+    let list;
+    filter.oninput = () => {
+      query = filter.value;
+      list?.();
+      refreshInstances?.();
+    };
     const instances = section(host, "当前画布");
     refreshInstances = () => {
       if (token !== generation || host !== container) return;
@@ -117,7 +127,7 @@ export function installSidebar({
     refreshInstances();
     const { items } = await request("templates");
     if (token !== generation || host !== container) return;
-    const list = () => {
+    list = () => {
       results.replaceChildren();
       for (const name of items
         .filter((n) => n.toLowerCase().includes(filter.value.toLowerCase()))
@@ -131,6 +141,8 @@ export function installSidebar({
           new LiteGraph.ContextMenu(
             [
               { content: "编辑卡片模板", callback: action(() => editTemplate(name)) },
+              { content: "重命名…", callback: action(() => renameTemplate(name)) },
+              { content: "复制卡片模板…", callback: action(() => copyTemplate(name)) },
               {
                 content: "删除卡片模板…",
                 callback: action(() => deleteTemplate(name)),
@@ -140,10 +152,6 @@ export function installSidebar({
           );
         };
       }
-    };
-    filter.oninput = () => {
-      list();
-      refreshInstances?.();
     };
     list();
   }

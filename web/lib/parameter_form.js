@@ -1,8 +1,9 @@
-/** A draft-only form for endpoint schemas; the caller owns persistence. */
+/** Endpoint forms; the caller owns persistence and opts into automatic saving. */
 import { DYNAMIC_COMBO } from "./dynamic_parameter.js";
 import { VALUE_CONTROL_MODES } from "./value_controls.js";
+import { SerialWrites } from "./serial_writes.js";
 
-export function parameterForm({ title, fields, values, apply }) {
+export function parameterForm({ title, fields, values, apply, autoSave = false, discard }) {
   const draft = structuredClone(values);
   const modes = Object.fromEntries(
     fields.filter((f) => f.control).map((f) => [f.input, { ...f.control }]),
@@ -83,7 +84,49 @@ export function parameterForm({ title, fields, values, apply }) {
   };
   const groups = [...new Set(fields.map((f) => f.group || "Parameters"))];
   let selected = "全部",
-    saving = false;
+    saving = false,
+    revision = 0,
+    savedRevision = -1,
+    timer;
+  const writes = new SerialWrites();
+  const persist = () => {
+    clearTimeout(timer);
+    return writes.run(async () => {
+      if (savedRevision === revision) return;
+      const current = revision;
+      status.textContent = "正在保存…";
+      try {
+        await apply(structuredClone(draft), structuredClone(modes));
+        savedRevision = current;
+        status.textContent = revision === current ? "已保存" : "等待保存…";
+        discardButton.hidden = true;
+      } catch (error) {
+        status.textContent = error.message;
+        discardButton.hidden = !autoSave;
+        throw error;
+      }
+    }, "parameters");
+  };
+  const changed = () => {
+    revision++;
+    if (!autoSave || saving) return;
+    clearTimeout(timer);
+    status.textContent = "等待保存…";
+    timer = setTimeout(() => {
+      if (form.checkValidity()) persist().catch(() => {});
+    }, 300);
+  };
+  dialog.flush = async () => {
+    try {
+      if (!form.reportValidity()) throw Error("请完成参数输入后再继续");
+      do { await persist(); } while (revision !== savedRevision);
+      for (const field of fields) await field.flush?.();
+    } catch (error) {
+      status.textContent = error.message;
+      discardButton.hidden = !autoSave;
+      throw error;
+    }
+  };
   function scalar(parent, field, value, change) {
     const row = document.createElement("div");
     row.style.cssText =
@@ -239,6 +282,7 @@ export function parameterForm({ title, fields, values, apply }) {
       for (const f of matches) {
         renderField(section, f, draft[f.input], (v) => {
           draft[f.input] = v;
+          changed();
         });
         if (f.control)
           scalar(
@@ -253,6 +297,7 @@ export function parameterForm({ title, fields, values, apply }) {
             modes[f.input].mode,
             (mode) => {
               modes[f.input].mode = mode;
+              changed();
             },
           );
       }
@@ -260,28 +305,46 @@ export function parameterForm({ title, fields, values, apply }) {
     }
   }
   search.oninput = render;
-  const cancel = button("取消", () => dialog.close());
-  const submit = button("应用", async () => {
+  const finish = async () => {
     if (!form.reportValidity() || saving) return;
-    saving = submit.disabled = cancel.disabled = true;
+    saving = cancel.disabled = true;
+    if (submit) submit.disabled = true;
     status.textContent = "正在保存…";
     try {
-      await apply(draft, modes);
+      await dialog.flush();
       dialog.close();
     } catch (error) {
       status.textContent = error.message;
     } finally {
-      saving = submit.disabled = cancel.disabled = false;
+      saving = cancel.disabled = false;
+      if (submit) submit.disabled = false;
     }
+  };
+  const cancel = button(autoSave ? "关闭" : "取消", () => autoSave ? finish() : dialog.close());
+  const submit = autoSave ? null : button("应用", finish);
+  const discardButton = button("放弃未保存修改", async () => {
+    saving = true;
+    clearTimeout(timer);
+    discardButton.disabled = true;
+    for (const field of fields) field.discard?.();
+    await writes.drain();
+    await discard?.();
+    dialog.close();
   });
+  discardButton.hidden = true;
   dialog.addEventListener("cancel", (e) => {
-    if (saving) e.preventDefault();
+    if (saving || autoSave) e.preventDefault();
+    if (autoSave && !saving) finish();
   });
   dialog.addEventListener("close", () => {
+    clearTimeout(timer);
     for (const field of fields) field.dispose?.();
     dialog.remove();
   }, { once: true });
-  footer.append(cancel, submit);
+  footer.append(cancel);
+  if (submit) footer.append(submit);
+  if (autoSave) footer.prepend(discardButton);
+  if (autoSave) status.textContent = "修改会自动保存";
   dialog.append(style, heading, search, body, status, footer);
   document.body.append(dialog);
   render();

@@ -226,31 +226,56 @@ def install_routes():
                         )
                 elif data.get("revision") is not None:
                     raise Conflict("Template was deleted; save the draft under a new name")
-                if data.get("create_only"):
-                    workflow = export_card(
-                        data["workflow"],
-                        data["prompt"],
-                        project=data.get("export_instance", False),
-                    )
-                else:
-                    try:
-                        if data.get("prompt") is None:
-                            raise ValueError(data.get("error") or "工作流尚未完成")
-                        workflow = workflow_files.pack(data["workflow"], data["prompt"])
-                    except ValueError as error:
-                        if not data.get("draft"):
-                            raise
-                        workflow = copy.deepcopy(data["workflow"])
-                        metadata = workflow.setdefault("extra", {}).setdefault(
-                            workflow_files.KEY,
-                            {"version": 2, "prompt": {}, "state": {}},
+                try:
+                    if data.get("prompt") is None:
+                        raise ValueError(data.get("error") or "工作流尚未完成")
+                    if data.get("create_only"):
+                        workflow = export_card(
+                            data["workflow"],
+                            data["prompt"],
+                            project=data.get("export_instance", False),
                         )
-                        metadata["invalid"] = str(error)
+                    else:
+                        workflow = workflow_files.pack(data["workflow"], data["prompt"])
+                except ValueError as error:
+                    if not data.get("draft") or data.get("export_instance"):
+                        raise
+                    workflow = copy.deepcopy(data["workflow"])
+                    workflow.setdefault("extra", {}).pop("turing_editor", None)
+                    metadata = workflow["extra"].setdefault(
+                        workflow_files.KEY,
+                        {"version": 2, "prompt": {}, "state": {}},
+                    )
+                    metadata["invalid"] = str(error)
                 workflow_files.atomic_json(path, workflow)
                 return hashlib.sha256(path.read_bytes()).hexdigest()
 
         revision = await asyncio.to_thread(save_file)
         return web.json_response({"name": path.name, "revision": revision})
+
+    @endpoint("post", "/template/rename")
+    async def rename_template(request):
+        data = await request.json()
+        path = template_path(request, data["name"])
+        destination = template_path(request, data["new_name"])
+        root = library(request)
+        if any((root / name).is_symlink() for name in (data["name"], data["new_name"])):
+            raise ValueError("Cannot rename a card template through a symbolic link")
+
+        def rename():
+            with workflow_files.LOCK:
+                if not path.exists():
+                    raise Conflict("Template was deleted; reopen the card library")
+                revision = hashlib.sha256(path.read_bytes()).hexdigest()
+                if revision != data["revision"]:
+                    raise Conflict("Template changed; reopen before renaming it")
+                if destination != path:
+                    if destination.exists():
+                        raise Conflict("Template name already exists; choose a new name")
+                    path.rename(destination)
+                return {"name": destination.name, "revision": revision}
+
+        return web.json_response(await asyncio.to_thread(rename))
 
     @endpoint("post", "/template/delete")
     async def delete_template(request):
@@ -542,7 +567,7 @@ def install_routes():
         return web.json_response({"asset": asset})
 
     @endpoint("post", "/copy")
-    async def copy(request):
+    async def copy_material(request):
         data = await request.json()
 
         def perform():

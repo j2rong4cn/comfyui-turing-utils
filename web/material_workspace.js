@@ -58,8 +58,8 @@ const copies = new Map();
 const deletions = new Map();
 export { request } from "./workspace/api.js";
 export { saveProject } from "./workspace/project_state.js";
-export async function openTab(workflow, name) {
-  await flushActiveDocument();
+export async function openTab(workflow, name, { preserveDraft = false } = {}) {
+  if (!preserveDraft) await flushActiveDocument();
   const reference = fileReference(workflow);
   let tab = reference && fileTab(reference);
   if (reference && !tab) {
@@ -70,7 +70,7 @@ export async function openTab(workflow, name) {
     await store.renameWorkflow(tab, documentPath(reference));
   }
   if (reference) refreshDocumentReference(tab, reference);
-  await app.loadGraphData(workflow, true, true, tab || name);
+  await app.loadGraphData(workflow, true, true, tab || name, { turingPreserveDraft: preserveDraft });
 }
 const directoryPicker = (create, options) =>
   new DirectoryPicker(request, prompt, (message) =>
@@ -408,7 +408,7 @@ async function saveCard(editing = editor(), task, { automatic = false } = {}) {
       editing.source?.replace(/\.json$/, " 副本.json") || "我的卡片.json",
     );
     if (!name) return false;
-    editing.name = name;
+    editing.name = templateFilename(name);
   }
   const result = await request(editing.id ? "card/save" : "template/save", {
     ...editing,
@@ -450,24 +450,33 @@ async function saveCard(editing = editor(), task, { automatic = false } = {}) {
     if (editor() === editing) installEditorMaterials(app.rootGraph, editing);
   }
 }
-async function saveTemplate() {
-  if (project()) throw Error("请在卡片工作流中保存模板");
-  const name = await prompt(
+function templateFilename(name) {
+  name = name.trim();
+  return /\.json$/i.test(name) ? name.replace(/\.json$/i, ".json") : name + ".json";
+}
+async function saveTemplate(reference = editor(), task, filename) {
+  if (!task && project()) throw Error("请在卡片工作流中保存模板");
+  const { workflow, output, error } = task || await snapshotCard(app.rootGraph, { draft: true });
+  const name = filename || await prompt(
     "新卡片文件名",
-    editor()?.name ? editor().name.replace(/\.json$/, " 副本.json") : "我的卡片.json",
+    reference?.name ? reference.name.replace(/\.json$/, " 副本.json") : "我的卡片.json",
   );
-  if (!name) return;
-  const { workflow, output } = await snapshotCard();
+  if (!name?.trim()) return;
   delete workflow.extra?.turing_editor;
-  const reference = await request("template/save", {
-    name,
+  workflow.id = crypto.randomUUID();
+  const saved = await request("template/save", {
+    name: templateFilename(name),
     workflow,
     prompt: output,
     create_only: true,
-    export_instance: !!editor()?.id,
+    export_instance: !!reference?.id,
+    draft: true,
+    error,
   });
+  api.dispatchCustomEvent("turing_card_library_changed", {});
   // Save As creates an independent library file/tab, never rebinds a project copy.
-  await openTab(await loadDocument(reference), reference.name);
+  await openTab(await loadDocument(saved), saved.name, { preserveDraft: true });
+  return app.extensionManager.workflow.activeWorkflow;
 }
 async function editTemplate(name) {
   name ||= await directoryPicker(false, { mode: "cards" });
@@ -502,15 +511,31 @@ export async function deleteTemplate(name) {
   if (tab && !tab.isModified) await app.extensionManager.workflow.closeWorkflow(tab);
   api.dispatchCustomEvent("turing_card_library_changed", {});
 }
-async function copyTemplate() {
-  const name = await directoryPicker(false, {
+export async function renameTemplate(name) {
+  const filename = await prompt("卡片模板名称", name);
+  if (!filename?.trim()) return;
+  const newName = templateFilename(filename);
+  if (newName === name) return;
+  const tab = fileTab({ name });
+  if (tab) {
+    await app.extensionManager.workflow.renameWorkflow(tab, documentPath({ name: newName }));
+  } else {
+    const source = await request("template/open", { name });
+    await request("template/rename", { name, new_name: newName, revision: source.revision });
+    api.dispatchCustomEvent("turing_card_library_changed", {});
+  }
+}
+export async function copyTemplate(name) {
+  name ||= await directoryPicker(false, {
     mode: "cards",
     title: "复制卡片 · 选择模板",
   });
   if (!name) return;
-  const reference = { new: crypto.randomUUID(), source: name };
-  await openTab(await loadDocument(reference), name.replace(/\.json$/, " 副本.json"));
-  app.extensionManager.workflow.activeWorkflow.isModified = true;
+  const tab = fileTab({ name });
+  if (tab) return tab.saveAs();
+  const { workflow } = await request("template/open", { name });
+  const metadata = workflow.extra.turing_card;
+  return saveTemplate({ name }, { workflow, output: metadata.invalid ? null : metadata.prompt, error: metadata.invalid });
 }
 async function loadDocument(reference) {
   if (reference.directory && !reference.id)
@@ -657,7 +682,7 @@ app.registerExtension({
     {
       id: "Turing.MaterialWorkspace.Copy",
       label: "复制卡片…",
-      function: action(copyTemplate),
+      function: action(() => copyTemplate()),
     },
     {
       id: "Turing.MaterialWorkspace.SaveTemplate",
@@ -694,6 +719,8 @@ app.registerExtension({
       editCard,
       addCard,
       deleteTemplate,
+      renameTemplate,
+      copyTemplate,
     });
     bindDocument = installDocumentStorage({
       save: (reference, task, options) =>
@@ -701,11 +728,9 @@ app.registerExtension({
           ? saveProject(reference.directory)
           : saveCard(reference, task, options),
       load: loadDocument,
-      saveAs: (reference) => {
-        if (reference.directory && !reference.id)
-          throw Error("画布另存需要复制整个项目；当前请使用保存");
-        return saveTemplate();
-      },
+      saveAs: saveTemplate,
+      rename: (reference, name) => request("template/rename", { ...reference, new_name: name }),
+      renameTemplate,
     });
     materialChanges.addEventListener("select", ({ detail }) => {
       const { directory, target, selection } = detail;

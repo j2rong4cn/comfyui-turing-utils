@@ -61,10 +61,12 @@ try {
     );
     const port = entries(endpoint).at(-1);
     const links = JSON.stringify(app.rootGraph.serialize().links);
-    endpoint
-      .getSlotMenuOptions({ output: endpoint.outputs[port.slot] })
-      .find((o) => o.content.includes("隐藏参数"))
-      .callback();
+    check(port.canvas_hidden, "New parameters should be hidden by default");
+    for (let i = 0; i < 2; i++)
+      endpoint
+        .getSlotMenuOptions({ output: endpoint.outputs[port.slot] })
+        .find((o) => o.content.includes("在卡片隐藏"))
+        .callback();
     check(entries(endpoint).at(-1).canvas_hidden, "Hidden toggle not saved to schema");
     check(
       endpoint.outputs[port.slot].name === port.name &&
@@ -123,13 +125,14 @@ try {
       "Hidden parameter was not reflected immediately",
     );
     dialog = hiddenParameters(card);
-    dialog.querySelector(`input[aria-label="${port.name}"]`).value = "cancelled";
+    dialog.querySelector(`input[aria-label="${port.name}"]`).value = "saved with Escape";
     dialog
       .querySelector(`input[aria-label="${port.name}"]`)
       .dispatchEvent(new Event("input", { bubbles: true }));
-    dialog.close();
+    dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+    await wait(() => !dialog.isConnected);
     saved = await workspace.request("card/open", { directory, id: added.id });
-    check(saved.parameters[port.id] === "hidden edit", "Cancel committed a draft");
+    check(saved.parameters[port.id] === "saved with Escape", "Escape discarded an automatic save");
     const root = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasProject");
     check(
       root.getExtraMenuOptions().some((o) => o.content === "隐藏参数…") &&
@@ -184,14 +187,14 @@ try {
     const newName = `${directory}-export.json`;
     app.extensionManager.dialog.prompt = async () => newName;
     try {
-      await command("Turing.MaterialWorkspace.SaveTemplate");
+      await command("Comfy.SaveWorkflowAs");
     } finally {
       app.extensionManager.dialog.prompt = prompt;
     }
     check(
       app.rootGraph.extra.turing_editor.name === newName &&
         !app.rootGraph.extra.turing_editor.id,
-      "Save Card did not create an independent template",
+      "Save As did not create an independent template",
     );
     const exported = await workspace.request("template/open", { name: newName });
     check(
@@ -218,14 +221,14 @@ try {
     await workspace.openProject(directory);
     card = app.rootGraph._nodes.find((n) => n.properties.instance === added.id);
     check(
-      card.properties.values[port.id] === "hidden edit" &&
+      card.properties.values[port.id] === "saved with Escape" &&
         !card.widgets.some((w) => w.name === port.id),
       "Reopen lost hidden state",
     );
     return {
       mode: LiteGraph.vueNodesMode ? "vue" : "classic",
       hidden: true,
-      cancel: true,
+      closeFlush: true,
       globalKeyPrivate: true,
       fileOwnership: true,
       deleteConfirm: true,

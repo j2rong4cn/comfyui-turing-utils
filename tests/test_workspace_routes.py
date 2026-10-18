@@ -60,3 +60,48 @@ class TemplateWrites(unittest.IsolatedAsyncioTestCase):
         status, _ = await self.request("save", name="card.json", revision="old", workflow=self.workflow, prompt=self.prompt)
         self.assertEqual(status, 409)
         self.assertEqual((self.library / "card.json").read_bytes(), before)
+
+    async def test_rename_preserves_contents_and_rejects_late_saves(self):
+        _, saved = await self.request("save", name="card.json", workflow=self.workflow, prompt=self.prompt)
+        before = (self.library / "card.json").read_bytes()
+        status, renamed = await self.request("rename", **saved, new_name="renamed.json")
+        self.assertEqual(status, 200)
+        self.assertEqual(renamed, {"name": "renamed.json", "revision": saved["revision"]})
+        self.assertFalse((self.library / "card.json").exists())
+        self.assertEqual((self.library / "renamed.json").read_bytes(), before)
+        status, _ = await self.request("save", **saved, workflow=self.workflow, prompt=self.prompt)
+        self.assertEqual(status, 409)
+        self.assertFalse((self.library / "card.json").exists())
+
+    async def test_rename_does_not_overwrite_another_template(self):
+        _, saved = await self.request("save", name="card.json", workflow=self.workflow, prompt=self.prompt)
+        await self.request("save", name="existing.json", workflow=self.workflow, prompt=self.prompt)
+        before = {p.name: p.read_bytes() for p in self.library.glob("*.json")}
+        status, _ = await self.request("rename", **saved, new_name="existing.json")
+        self.assertEqual(status, 409)
+        self.assertEqual({p.name: p.read_bytes() for p in self.library.glob("*.json")}, before)
+
+    async def test_rename_checks_revision_and_path(self):
+        _, saved = await self.request("save", name="card.json", workflow=self.workflow, prompt=self.prompt)
+        for destination, revision, expected in (("renamed.json", "old", 409), ("../outside.json", saved["revision"], 400)):
+            status, _ = await self.request("rename", name=saved["name"], revision=revision, new_name=destination)
+            self.assertEqual(status, expected)
+            self.assertTrue((self.library / "card.json").exists())
+        status, same = await self.request("rename", **saved, new_name=saved["name"])
+        self.assertEqual(status, 200)
+        self.assertEqual(same, saved)
+
+    async def test_rename_rejects_symlinks(self):
+        _, saved = await self.request("save", name="card.json", workflow=self.workflow, prompt=self.prompt)
+        (self.library / "alias.json").symlink_to("card.json")
+        for source, target in (("alias.json", "renamed.json"), ("card.json", "alias.json")):
+            status, _ = await self.request("rename", name=source, revision=saved["revision"], new_name=target)
+            self.assertEqual(status, 400)
+        self.assertTrue((self.library / "card.json").exists())
+
+    async def test_save_as_preserves_an_unfinished_template(self):
+        status, _ = await self.request("save", name="draft.json", workflow=self.workflow, prompt=None, draft=True, error="unfinished", create_only=True)
+        self.assertEqual(status, 200)
+        saved = json.loads((self.library / "draft.json").read_text())
+        self.assertEqual(saved["nodes"], self.workflow["nodes"])
+        self.assertEqual(saved["extra"]["turing_card"]["invalid"], "unfinished")

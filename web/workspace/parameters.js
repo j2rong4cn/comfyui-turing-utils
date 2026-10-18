@@ -1,17 +1,18 @@
 /** Both card forms and hidden-parameter dialogs use the same saved input owner. */
 import { request } from "./api.js";
-import { enqueueSave, projectState, restoreSavedValues } from "./project_state.js";
+import { enqueueSave, projectState, restoreSavedValues, discardProjectFailures } from "./project_state.js";
+import { discardMaterialFailures } from "./material_selection.js";
 import { parameterForm } from "../lib/parameter_form.js";
 import { materialField } from "./material_panel.js";
 
-export async function saveParameters(node, changes) {
+export async function saveParameters(node, changes, edit) {
   const directory = node.properties.directory;
   const state = projectState(directory);
   if (!state) throw Error("请先打开所属画布");
   const result = await enqueueSave(
     state,
     (revision) => request("patch", { directory, revision, changes }),
-    changes.map((c) => `${c.type}:${c.id}:${c.name}`).join("|"),
+    edit ?? changes.map((c) => `${c.type}:${c.id}:${c.name}`).join("|"),
   );
   restoreSavedValues(directory, result);
   return result;
@@ -25,15 +26,25 @@ export function hiddenParameters(node, actions = node.materialActions) {
   const controls = Object.fromEntries(
     fields.filter((f) => f.control).map((f) => [f.input, { ...f.control }]),
   );
-  return parameterForm({
+  const edit = `hidden:${crypto.randomUUID()}`;
+  let dialog, retry = false;
+  dialog = parameterForm({
     title: `隐藏参数 · ${node.title}`,
-    fields: [...fields, ...materials.map((m) => materialField(node, m, actions))],
+    fields: [...fields, ...materials.map((m) => materialField(node, m, {
+      ...actions,
+      run: async (...args) => { await dialog.flush(); return actions.run(...args); },
+    }))],
     values: original,
+    autoSave: true,
+    discard: async () => {
+      await discardProjectFailures(node.properties.directory, [edit]);
+      await discardMaterialFailures(node.properties.directory, materials.map((m) => m.id));
+    },
     apply: async (values, modes) => {
       const changes = [];
       for (const f of fields) {
         if (f.connected) continue;
-        if (JSON.stringify(values[f.input]) !== JSON.stringify(original[f.input])) {
+        if (retry || JSON.stringify(values[f.input]) !== JSON.stringify(original[f.input])) {
           if (
             JSON.stringify(node.properties.values[f.input]) !==
             JSON.stringify(original[f.input])
@@ -46,7 +57,7 @@ export function hiddenParameters(node, actions = node.materialActions) {
             value: values[f.input],
           });
         }
-        if (f.control && modes[f.input].mode !== controls[f.input].mode) {
+        if (f.control && (retry || modes[f.input].mode !== controls[f.input].mode)) {
           if (f.control.mode !== controls[f.input].mode)
             throw Error("控制模式在窗口打开后已改变，请关闭后重新打开");
           changes.push({
@@ -57,9 +68,20 @@ export function hiddenParameters(node, actions = node.materialActions) {
           });
         }
       }
-      if (changes.length) await saveParameters(node, changes);
+      try {
+        if (changes.length) await saveParameters(node, changes, edit);
+      } catch (error) {
+        retry = true;
+        throw error;
+      }
+      retry = false;
+      for (const f of fields) {
+        original[f.input] = structuredClone(values[f.input]);
+        if (f.control) controls[f.input] = { ...modes[f.input] };
+      }
     },
   });
+  return dialog;
 }
 
 export function cardPresentation(node, refresh) {

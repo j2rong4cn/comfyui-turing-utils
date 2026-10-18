@@ -33,10 +33,10 @@ export async function settleMaterials(directory) {
   }
 }
 
-export async function discardMaterialFailures(directory) {
+export async function discardMaterialFailures(directory, targets) {
   const queue = mutations.get(directory);
   if (!queue) return;
-  await queue.discardFailures();
+  await queue.discardFailures(targets);
   if (queue.idle) mutations.delete(directory);
 }
 
