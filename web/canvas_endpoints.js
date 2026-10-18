@@ -162,6 +162,7 @@ app.registerExtension({
       }
       const executed = node.onExecuted;
       node.onExecuted = function (data) {
+        if (this.projectMaterial) return;
         executed?.call(this, data);
         const name = kind === "text" ? "text" : kind === "audio" ? "audio" : "file";
         const value = data.material_text?.[0] ?? data.material_file?.[0];

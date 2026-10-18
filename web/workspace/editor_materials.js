@@ -1,4 +1,5 @@
 /** Native stub controls bound to the owning project, never global media history. */
+import { app } from "../../../scripts/app.js";
 import { bindMaterialCombo } from "../lib/material_combo.js";
 import { setWidgetValue } from "../lib/parameter_widget.js";
 import { action, report, request } from "./api.js";
@@ -60,11 +61,6 @@ export function installProjectMaterials(graph, editing, run) {
       if (kind === "text") setWidgetValue(widget, selection.text || "");
       else {
         widget.value = selection.asset?.split("/").at(-1) || "";
-        // Use the native preview contract without decoding/uploading another copy.
-        node.onExecuted({
-          material_file: [canonical()],
-        });
-        widget.value = selection.asset?.split("/").at(-1) || "";
         node.posters?.get(target)?.preview.refresh();
         node.range?.refresh();
       }
@@ -109,6 +105,14 @@ export function installProjectMaterials(graph, editing, run) {
     };
     if (kind === "text") widget.callback = action((text) => select({ text }));
     else {
+      // The project poster owns preview and playback. Vue uses this flag;
+      // Classic creates its preview widgets in onDrawBackground instead.
+      node.hideOutputImages = true;
+      node.onDrawBackground = undefined;
+      delete app.nodeOutputs[graph.isRootGraph ? node.id : `${graph.id}:${node.id}`];
+      for (const preview of [...node.widgets])
+        if (["$$canvas-image-preview", "video-preview", "$$comfy_animation_preview"].includes(preview.name))
+          node.removeWidget(preview);
       // Native remote combos own a getter. Replace it locally for this project
       // view only; normal workflow stubs retain their instance-wide file list.
       Object.defineProperty(widget.options, "values", {
