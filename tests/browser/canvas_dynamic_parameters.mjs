@@ -60,6 +60,7 @@ try {
     window.wireStarter();
     const endpoint = app.graph._nodes.find((n) => n.type === "TuringCanvasInputs");
     const image = app.graph._nodes.find((n) => n.type === "TuringMaterialImage");
+    image.properties.canvas_show_generate = true;
     for (const node of [...app.graph._nodes])
       if (node.type.startsWith("TuringMaterial") && node !== image)
         app.graph.remove(node);
@@ -103,6 +104,8 @@ try {
         `Cannot expose ${input}`,
       );
       const port = entries(endpoint).at(-1);
+      port.canvas_hidden = false;
+      syncPorts(endpoint, entries(endpoint).map((p) => p.id === port.id ? port : p));
       check(
         port.kind === "parameter" && port.type === DYNAMIC_COMBO,
         "Wrong group definition",
@@ -335,7 +338,7 @@ try {
             .map((w) => [w.name, w.value]),
         }),
     );
-    await card.widgets.find((w) => w.name === "编辑工作流").callback();
+    await card.getExtraMenuOptions().find((w) => w.content === "编辑工作流").callback();
     const editing = app.graph.getNodeById(endpoint.id);
     check(
       editing.widgets.find((w) => w.name === fieldName(ids.layout, "offset_x"))

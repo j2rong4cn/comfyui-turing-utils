@@ -89,13 +89,23 @@ export function parameterForm({ title, fields, values, apply, autoSave = false, 
     savedRevision = -1,
     timer;
   const writes = new SerialWrites();
+  const validate = () => {
+    const invalid = [...form.elements].find((input) => !input.checkValidity());
+    if (!invalid) return;
+    selected = "全部";
+    search.value = "";
+    render();
+    invalid.reportValidity();
+    throw Error(`请检查参数“${invalid.getAttribute("aria-label") || ""}”：${invalid.validationMessage}`);
+  };
   const persist = () => {
     clearTimeout(timer);
     return writes.run(async () => {
-      if (savedRevision === revision) return;
-      const current = revision;
-      status.textContent = "正在保存…";
       try {
+        validate();
+        if (savedRevision === revision) return;
+        const current = revision;
+        status.textContent = "正在保存…";
         await apply(structuredClone(draft), structuredClone(modes));
         savedRevision = current;
         status.textContent = revision === current ? "已保存" : "等待保存…";
@@ -118,9 +128,13 @@ export function parameterForm({ title, fields, values, apply, autoSave = false, 
   };
   dialog.flush = async () => {
     try {
-      if (!form.reportValidity()) throw Error("请完成参数输入后再继续");
-      do { await persist(); } while (revision !== savedRevision);
-      for (const field of fields) await field.flush?.();
+      for (;;) {
+        const current = revision;
+        await persist();
+        for (const field of fields) await field.flush?.();
+        validate();
+        if (current === revision && revision === savedRevision) break;
+      }
     } catch (error) {
       status.textContent = error.message;
       discardButton.hidden = !autoSave;
@@ -177,15 +191,17 @@ export function parameterForm({ title, fields, values, apply, autoSave = false, 
       input.type = "number";
       input.required = true;
       input.value = value;
-      input.step = String(
-        options.step2 ??
-          (options.step != null ? options.step / 10 : field.type === "INT" ? 1 : 0.01),
-      );
+      // Widget increments are interaction hints, not a grid for typed floats.
+      input.step = field.type === "INT" ? "1" : "any";
       if (options.min != null) input.min = options.min;
       if (options.max != null) input.max = options.max;
       input.oninput = () => {
-        if (input.value !== "" && Number.isFinite(input.valueAsNumber))
-          change(input.valueAsNumber);
+        const value = input.valueAsNumber;
+        input.setCustomValidity(
+          field.type === "INT" && Number.isFinite(value) && !Number.isInteger(value)
+            ? "请输入整数" : "",
+        );
+        if (input.value !== "" && Number.isFinite(value)) change(value);
       };
     }
     input.classList.add("comfy-input", "turing-parameter-control");
@@ -196,64 +212,91 @@ export function parameterForm({ title, fields, values, apply, autoSave = false, 
     parent.append(row);
   }
   function renderField(parent, field, value, change, path = [], root = value) {
-    if (field.render) return field.render(parent);
+    if (field.render) return field.render(parent, () => revision++);
     if (field.type !== DYNAMIC_COMBO) return scalar(parent, field, value, change);
-    scalar(
-      parent,
-      {
-        ...field,
-        type: "COMBO",
-        options: { values: field.options.options.map((b) => b.key) },
-      },
-      value.selected,
-      (selected) => {
-        value.selected = selected;
-        change(value);
-        render();
-      },
-    );
-    const branch = field.options.options.find((b) => b.key === value.selected);
-    for (const [name, spec] of Object.entries({
-      ...branch.inputs?.required,
-      ...branch.inputs?.optional,
-    })) {
-      const type = Array.isArray(spec[0]) ? "COMBO" : spec[0];
-      const options = {
-        ...spec[1],
-        ...(Array.isArray(spec[0]) ? { values: spec[0] } : {}),
-      };
-      if (type === "COMBO" && !options.values) options.values = options.options;
-      const child = { label: name, type, options, connected: field.connected };
-      renderField(
-        parent,
-        child,
-        value.branches[value.selected][name],
-        (v) => {
-          value.branches[value.selected][name] = v;
-          change(value);
+    const container = document.createElement("div");
+    parent.append(container);
+    const renderBranch = () => {
+      container.replaceChildren();
+      scalar(
+        container,
+        {
+          ...field,
+          type: "COMBO",
+          options: { values: field.options.options.map((b) => b.key) },
         },
-        [...path, value.selected, name],
-        root,
+        value.selected,
+        (selected) => {
+          value.selected = selected;
+          change(value);
+          renderBranch();
+        },
       );
-      const key = [...path, value.selected, name].join(".");
-      if (root.controls?.[key])
-        scalar(
-          parent,
-          {
-            label: `${name} · control`,
-            type: "COMBO",
-            options: {
-              values: VALUE_CONTROL_MODES,
-            },
-          },
-          root.controls[key].mode,
-          (mode) => {
-            root.controls[key].mode = mode;
+      const branch = field.options.options.find((b) => b.key === value.selected);
+      for (const [name, spec] of Object.entries({
+        ...branch.inputs?.required,
+        ...branch.inputs?.optional,
+      })) {
+        const type = Array.isArray(spec[0]) ? "COMBO" : spec[0];
+        const options = {
+          ...spec[1],
+          ...(Array.isArray(spec[0]) ? { values: spec[0] } : {}),
+        };
+        if (type === "COMBO" && !options.values) options.values = options.options;
+        const child = { label: name, type, options, connected: field.connected };
+        renderField(
+          container,
+          child,
+          value.branches[value.selected][name],
+          (v) => {
+            value.branches[value.selected][name] = v;
             change(value);
           },
+          [...path, value.selected, name],
+          root,
         );
-    }
+        const key = [...path, value.selected, name].join(".");
+        if (root.controls?.[key])
+          scalar(container, {
+            label: `${name} · control`,
+            type: "COMBO",
+            connected: field.connected,
+            options: { values: VALUE_CONTROL_MODES },
+          }, root.controls[key].mode, (mode) => {
+            root.controls[key].mode = mode;
+            change(value);
+          });
+      }
+    };
+    renderBranch();
   }
+  const sections = groups.map((group) => {
+    const section = document.createElement("section");
+    const h = document.createElement("h4");
+    h.textContent = group;
+    section.append(h);
+    const rows = fields.filter((f) => (f.group || "Parameters") === group).map((f) => {
+      const row = document.createElement("div");
+      renderField(row, f, draft[f.input], (v) => {
+        draft[f.input] = v;
+        changed();
+      });
+      if (f.control)
+        scalar(row, {
+          label: `${f.label} · control`,
+          type: "COMBO",
+          connected: f.connected,
+          options: { values: VALUE_CONTROL_MODES },
+        }, modes[f.input].mode, (mode) => {
+          modes[f.input].mode = mode;
+          changed();
+        });
+      section.append(row);
+      return { field: f, element: row };
+    });
+    form.append(section);
+    return { group, element: section, rows };
+  });
   function render() {
     navigation.replaceChildren();
     for (const group of ["全部", ...groups]) {
@@ -265,48 +308,16 @@ export function parameterForm({ title, fields, values, apply, autoSave = false, 
       b.setAttribute("aria-current", String(selected === group));
       navigation.append(b);
     }
-    form.replaceChildren();
     const query = search.value.trim().toLowerCase();
-    for (const group of groups) {
-      if (selected !== "全部" && selected !== group) continue;
-      const matches = fields.filter(
-        (f) =>
-          (f.group || "Parameters") === group &&
-          `${f.label} ${group}`.toLowerCase().includes(query),
-      );
-      if (!matches.length) continue;
-      const section = document.createElement("section");
-      const h = document.createElement("h4");
-      h.textContent = group;
-      section.append(h);
-      for (const f of matches) {
-        renderField(section, f, draft[f.input], (v) => {
-          draft[f.input] = v;
-          changed();
-        });
-        if (f.control)
-          scalar(
-            section,
-            {
-              label: `${f.label} · control`,
-              type: "COMBO",
-              options: {
-                values: VALUE_CONTROL_MODES,
-              },
-            },
-            modes[f.input].mode,
-            (mode) => {
-              modes[f.input].mode = mode;
-              changed();
-            },
-          );
-      }
-      form.append(section);
+    for (const { group, element, rows } of sections) {
+      for (const row of rows)
+        row.element.hidden = !`${row.field.label} ${group}`.toLowerCase().includes(query);
+      element.hidden = (selected !== "全部" && selected !== group) || rows.every((r) => r.element.hidden);
     }
   }
   search.oninput = render;
   const finish = async () => {
-    if (!form.reportValidity() || saving) return;
+    if (saving) return;
     saving = cancel.disabled = true;
     if (submit) submit.disabled = true;
     status.textContent = "正在保存…";

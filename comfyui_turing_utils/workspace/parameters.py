@@ -43,6 +43,7 @@ def validate_definition(port, depth=0):
         port["type"] not in {"INT", "FLOAT", "COMBO"}
         or not isinstance(port["control"], dict)
         or port["control"].get("mode") not in VALUE_CONTROL_MODES
+        or "filter" in port["control"] and not isinstance(port["control"]["filter"], str)
     ):
         raise ValueError("Invalid endpoint value-control mode")
     if not isinstance(options, dict):
@@ -122,6 +123,10 @@ def parameter_default(port):
     return {"INT": 0, "FLOAT": 0.0, "BOOLEAN": False, "STRING": ""}.get(port["type"])
 
 
+def same_option(value, choice):
+    return value == choice and (type(value) is bool) == (type(choice) is bool)
+
+
 def validate_parameter(port, value):
     type_ = port["type"]
     if type_ == DYNAMIC_COMBO:
@@ -152,8 +157,10 @@ def validate_parameter(port, value):
             if (
                 path not in paths
                 or not isinstance(control, dict)
-                or set(control) != {"mode"}
+                or "mode" not in control
+                or set(control) - {"mode", "filter"}
                 or control["mode"] not in VALUE_CONTROL_MODES
+                or "filter" in control and not isinstance(control["filter"], str)
             ):
                 raise ValueError("Invalid DynamicCombo value-control mode")
         return value
@@ -162,7 +169,10 @@ def validate_parameter(port, value):
         "FLOAT": type(value) is int or type(value) is float and math.isfinite(value),
         "BOOLEAN": type(value) is bool,
         "STRING": isinstance(value, str),
-        "COMBO": value in parameter_options(port).get("values", [])
+        "COMBO": any(
+            same_option(value, choice)
+            for choice in parameter_options(port).get("values", [])
+        )
         or not parameter_options(port).get("values")
         and value is None,
     }.get(type_, False)

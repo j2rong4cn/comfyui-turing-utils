@@ -7,7 +7,7 @@ import secrets
 import nodes
 
 from .compiler import is_link
-from .parameters import VALUE_CONTROL_MODES as MODES
+from .parameters import VALUE_CONTROL_MODES as MODES, same_option
 
 SAFE_INTEGER_MAX = 2**50  # Same numeric cap as the native value-control widget.
 
@@ -47,9 +47,10 @@ def _control_name(options):
 
 def control_definition(type_, options, control):
     if type_ in ("INT", "FLOAT"):
+        minimum, maximum = options.get("min", 0), options.get("max", 1)
         definition = {
-            "min": max(-SAFE_INTEGER_MAX, options.get("min", 0)),
-            "max": min(SAFE_INTEGER_MAX, options.get("max", 1)),
+            "min": max(-SAFE_INTEGER_MAX, minimum if minimum is not None else -SAFE_INTEGER_MAX),
+            "max": min(SAFE_INTEGER_MAX, maximum if maximum is not None else SAFE_INTEGER_MAX),
             "step": options.get("step", 1),
             "integer": type_ == "INT",
         }
@@ -166,7 +167,7 @@ def next_value(value, options):
             ]
         if not values:
             return value
-        index = values.index(value) if value in values else -1
+        index = next((i for i, choice in enumerate(values) if same_option(value, choice)), -1)
         if mode == "randomize":
             index = secrets.randbelow(len(values))
         else:

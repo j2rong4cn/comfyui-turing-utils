@@ -102,7 +102,7 @@ export function dynamicDefinition(node, widget) {
     else branch[key] = current;
     const control = linkedControl(node.widgets.find((w) => w.name === path));
     if (controlPath && control)
-      (value.controls ||= {})[controlPath] = { mode: control.mode };
+      (value.controls ||= {})[controlPath] = { ...control };
   });
   return { type: DYNAMIC_COMBO, kind: "parameter", options: spec[1], default: value };
 }
@@ -139,10 +139,21 @@ export function dynamicParameterWidget(node, name, value, callback, options) {
       if (control && controlPath) {
         const saved = state.controls?.[controlPath];
         if (saved) control.value = saved.mode;
+        const filter = widget.linkedWidgets.find(
+          (w) => w !== control && ["string", "text"].includes(w.type),
+        );
+        if (filter) {
+          if (saved?.filter !== undefined) filter.value = saved.filter;
+          filter.serialize = false;
+          filter.callback = (value) => {
+            (state.controls ||= {})[controlPath] = { ...state.controls?.[controlPath], mode: control.value, filter: value };
+            return callback(JSON.parse(JSON.stringify(state)));
+          };
+        }
         control.serialize = false;
         control.options = { ...control.options, serialize: false };
         control.callback = (mode) => {
-          (state.controls ||= {})[controlPath] = { mode };
+          (state.controls ||= {})[controlPath] = { ...state.controls[controlPath], mode };
           return callback(JSON.parse(JSON.stringify(state)));
         };
       }

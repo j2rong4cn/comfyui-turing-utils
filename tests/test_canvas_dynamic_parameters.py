@@ -195,6 +195,7 @@ class DynamicParametersTest(unittest.TestCase):
             ):
                 parse_ports(json.dumps([dict(port, slot=0)]))
         for mutate in (
+            lambda v: v.update(controls={"number.count": {"mode": "fixed", "filter": 3}}),
             lambda v: v.update(selected="unknown"),
             lambda v: v["branches"].pop("empty"),
             lambda v: v["branches"]["number"].update(count=True),
@@ -207,6 +208,9 @@ class DynamicParametersTest(unittest.TestCase):
             mutate(state)
             with self.assertRaises(ValueError):
                 validate_parameter(self.port, state)
+        state = copy.deepcopy(self.port["default"])
+        state["controls"] = {"number.count": {"mode": "fixed", "filter": "keep"}}
+        validate_parameter(self.port, state)
         port = copy.deepcopy(self.port)
         port["options"]["options"][2]["inputs"]["required"]["file"] = [
             "COMBO",

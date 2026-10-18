@@ -92,7 +92,7 @@ def set_parameter(workflow, port_id, value=None, *, control=None):
     if control is None:
         port["default"] = copy.deepcopy(value)
     else:
-        port["control"] = copy.deepcopy(control)
+        port["control"] = {**port.get("control", {}), **copy.deepcopy(control)}
     set_input(workflow, key, "ports", json.dumps(ports, ensure_ascii=False))
 
 

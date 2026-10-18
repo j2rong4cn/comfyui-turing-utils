@@ -35,7 +35,8 @@ from comfyui_turing_utils.workspace.endpoints import (
 )
 from comfyui_turing_utils.workspace.cards import describe, flatten
 from comfyui_turing_utils.workspace.editor import select_material
-from comfyui_turing_utils.workspace import workflow_files, projection
+from comfyui_turing_utils.workspace import workflow_files, projection, workflow_state
+from comfyui_turing_utils.workspace.parameters import validate_parameter
 from comfyui_turing_utils.workspace.templates import (
     material_template,
     new_card_template,
@@ -45,6 +46,7 @@ from comfyui_turing_utils.workspace.value_controls import (
     workflow_controls,
     advance_inputs,
     next_value,
+    control_definition,
 )
 from comfyui_turing_utils.workspace.materials import material_files
 import torch
@@ -101,6 +103,33 @@ class SeedText:
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_combo_validation_matches_frontend_scalar_identity(self):
+        for choices, value in (([0], False), ([1], True), ([False], 0), ([True], 1), (["1"], 1)):
+            with self.subTest(choices=choices, value=value), self.assertRaises(ValueError):
+                validate_parameter({"type": "COMBO", "options": {"values": choices}}, value)
+        for choices, value in (([0], 0.0), ([1.0], 1), ([False], False), (["1"], "1"), ([], None)):
+            self.assertEqual(validate_parameter({"type": "COMBO", "options": {"values": choices}}, value), value)
+        mixed = {"values": [0, False, "last"], "mode": "increment"}
+        self.assertEqual(next_value(False, mixed), "last")
+        self.assertIs(next_value(0, mixed), False)
+
+    def test_serialized_unbounded_float_control_keeps_finite_execution_limits(self):
+        control = control_definition("FLOAT", {"min": None, "max": None, "step": 0.25}, {"mode": "increment"})
+        self.assertEqual((control["min"], control["max"]), (-2**50, 2**50))
+        self.assertEqual(next_value(0.125, control), 0.375)
+
+    def test_mode_change_preserves_an_existing_combo_filter(self):
+        workflow, prompt = material_template(("text",))
+        ports = json.loads(prompt["1"]["inputs"]["ports"])
+        ports.append(dict(id="choice", slot=len(ports), name="Choice", type="COMBO", kind="parameter",
+                          options={"values": ["keep-a", "skip", "keep-b"]}, default="keep-a",
+                          control={"mode": "fixed", "filter": "keep"}))
+        prompt["1"]["inputs"]["ports"] = json.dumps(ports)
+        packed = workflow_files.pack(workflow, prompt)
+        workflow_state.set_parameter(packed, "choice", control={"mode": "increment"})
+        saved = json.loads(packed["extra"]["turing_card"]["prompt"]["1"]["inputs"]["ports"])[-1]
+        self.assertEqual(saved["control"], {"mode": "increment", "filter": "keep"})
+
     def test_native_control_modes_clamp_steps_and_combo_choices(self):
         options = dict(min=-1, max=1, step=0.25, integer=False)
         self.assertEqual(next_value(0.9, {**options, "mode": "increment"}), 1)

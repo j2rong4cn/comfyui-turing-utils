@@ -28,7 +28,7 @@ export function valueControlWidget(node, target, control, callback) {
   });
   target.linkedWidgets = [widget];
   widget.label = `${target.label || target.name} · control`;
-  widget.callback = (mode) => callback({ mode });
+  widget.callback = (mode) => callback({ ...control, mode });
   widget._valueControlTarget = target;
   return widget;
 }

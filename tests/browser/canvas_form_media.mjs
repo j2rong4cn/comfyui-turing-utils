@@ -47,11 +47,12 @@ try {
     const original = {
       group: {
         selected: "first",
-        branches: { first: { text: "initial" }, second: { count: 2 } },
+        branches: { first: { text: "initial" }, second: { count: 2, amount: 0 } },
         controls: { "second.count": { mode: "randomize" } },
       },
       seed: 7,
       enabled: false,
+      scale: 0,
     };
     const dialog = parameterForm({
       title: "Dynamic test",
@@ -69,7 +70,10 @@ try {
               },
               {
                 key: "second",
-                inputs: { required: { count: ["INT", { min: 0, max: 10, step: 1 }] } },
+                inputs: { required: {
+                  count: ["INT", { min: 0, max: 10, step: 1 }],
+                  amount: ["FLOAT", { min: -10, max: 10, step: 1 }],
+                } },
               },
             ],
           },
@@ -82,6 +86,7 @@ try {
           options: { min: 0 },
         },
         { input: "enabled", label: "Enabled", type: "BOOLEAN" },
+        { input: "scale", label: "Scale", type: "FLOAT", options: { min: -2, max: 2, step2: 1, round: 0.1 } },
       ],
       values: original,
       apply: async (values, modes) => {
@@ -108,6 +113,18 @@ try {
     );
     count.value = "5";
     count.dispatchEvent(new Event("input", { bubbles: true }));
+    const amount = dialog.querySelector('input[aria-label="amount"]');
+    amount.value = "-0.12345";
+    amount.dispatchEvent(new Event("input", { bubbles: true }));
+    check(amount.checkValidity(), "Dynamic FLOAT imposed a decimal grid from its step hint");
+    const scale = dialog.querySelector('input[aria-label="Scale"]');
+    scale.value = "2.1";
+    check(scale.validity.rangeOverflow, "FLOAT upper bound was lost");
+    scale.value = "-2.1";
+    check(scale.validity.rangeUnderflow, "FLOAT lower bound was lost");
+    scale.value = "0.00001";
+    scale.dispatchEvent(new Event("input", { bubbles: true }));
+    check(scale.checkValidity(), "FLOAT inherited an integer-only step hint");
     const control = dialog.querySelector('select[aria-label="count · control"]');
     control.value = "1";
     control.dispatchEvent(new Event("change", { bubbles: true }));
@@ -131,6 +148,7 @@ try {
         saved.values.enabled === true,
       "Control modes lost",
     );
+    check(saved.values.scale === 0.00001 && saved.values.group.branches.second.amount === -0.12345, "Fractional values were rounded during submission");
     check(
       original.group.selected === "first" && original.group.branches.second.count === 2,
       "Draft mutated caller state",

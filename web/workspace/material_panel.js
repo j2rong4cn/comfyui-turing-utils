@@ -47,7 +47,7 @@ export function materialField(node, material, { select, importMedia, run }) {
     label: material.name,
     type: "MATERIAL",
     group: "隐藏素材",
-    render(parent) {
+    render(parent, changed) {
       if (!element) {
         element = document.createElement("section");
         element.style.cssText = "padding:10px 0;border-bottom:1px solid var(--border-color,#555)";
@@ -63,6 +63,7 @@ export function materialField(node, material, { select, importMedia, run }) {
           content.rows = 6;
           content.setAttribute("aria-label", material.name);
           content.oninput = () => {
+            changed?.();
             clearTimeout(timer);
             status.textContent = "等待保存…";
             timer = setTimeout(() => flush().catch(() => {}), 300);

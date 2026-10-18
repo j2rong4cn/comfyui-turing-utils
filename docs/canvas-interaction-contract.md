@@ -234,6 +234,7 @@ canvas_randomize.mjs 用真实 CPU 生成检查表单随机化、递增、模式
 canvas_run_all.mjs 检查右键入口、逆显示顺序的拓扑执行、未导出桩、重复点击和循环/空输出停止。
 canvas_compact.mjs 检查两种界面的隐藏参数、项目设置应用/取消、Key 遮蔽、Ctrl+S/新模板归属及删除确认。
 hidden_parameter_autosave.mjs 检查字符串/数值和隐藏文字素材的自动保存、运行前等待、失败重试/放弃及关闭/Esc。
+parameter_form_validation.mjs 检查小数/整数、搜索及分组校验、动态分支隔离、排队期间的新编辑、选项类型与控制过滤条件。
 template_files.mjs 检查重命名/保存竞态、侧边栏和原生标签复制、非活动标签另存为、冲突保护及未完成草稿。
 canvas_form_media.mjs 检查动态分支/控制模式草稿和单时间轴裁剪、播放区间及精确输入。
 material_picker.mjs 检查两种渲染器的素材选择、保存重开及项目历史隔离；
