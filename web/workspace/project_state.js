@@ -10,6 +10,9 @@ export const ROOT = "TuringCanvasProject",
   CARD = "TuringCanvasCard",
   jobs = new Map();
 const saves = new Map();
+// Response ordering must also survive closing the canvas while its card editor
+// stays open. The native canvas tab is not always available as a revision owner.
+const parameterRevisions = new Map();
 export const project = () => app.graph.extra?.turing_project;
 export const editor = () => app.graph.extra?.turing_editor;
 export function projectState(directory) {
@@ -20,6 +23,12 @@ export function projectState(directory) {
 }
 
 export function restoreSavedValues(directory, saved) {
+  const state = projectState(directory);
+  if (Number.isInteger(saved.revision)) {
+    const revision = Math.max(state?.revision ?? -1, parameterRevisions.get(directory) ?? -1);
+    parameterRevisions.set(directory, Math.max(revision, saved.revision));
+    if (revision > saved.revision) return;
+  }
   const editing = editor();
   if (
     editing?.directory === directory &&
@@ -75,7 +84,6 @@ export function restoreSavedValues(directory, saved) {
     restore(app.rootGraph);
     editing.parameters = parameters;
   }
-  const state = projectState(directory);
   if (!state || !Number.isInteger(saved.revision) || state.revision > saved.revision)
     return;
   state.revision = saved.revision;
@@ -303,7 +311,7 @@ export function setProjectStatus(directory, status, statistics, root) {
   }
   const saved = root.widgets.find((w) => w.name === "保存状态");
   if (saved) {
-    const value = `${status} · ${[...jobs.values()].filter((j) => j.directory === directory).length} 个任务`;
+    const value = `${status} · ${[...jobs.values()].filter((j) => j.directory === directory && (!j.status || ["queued", "running"].includes(j.status.status))).length} 个任务`;
     if (saved.value !== value) {
       saved.value = value;
       changed = true;

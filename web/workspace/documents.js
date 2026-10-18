@@ -21,15 +21,17 @@ import {
 export { documentPath, fileReference } from "./document_session.js";
 
 const documents = new WeakMap();
+const loadedReferences = new WeakMap();
+const captures = new SerialWrites();
 
 export async function flushActiveDocument() {
   const tab = app.extensionManager.workflow.activeWorkflow;
-  if (tab && documents.has(tab)) await tab.save({ automatic: true });
+  if (tab && documents.has(tab)) await tab.save({ automatic: true, settle: true });
 }
 
 export function fileTab(reference) {
   return app.extensionManager.workflow.openWorkflows.find((tab) => {
-    const other = fileReference(tab.activeState) || documents.get(tab);
+    const other = documents.get(tab) || fileReference(tab.activeState);
     return (
       other &&
       reference.directory === other.directory &&
@@ -40,31 +42,56 @@ export function fileTab(reference) {
   });
 }
 
-export async function snapshotCard(graph = app.rootGraph, { draft = false } = {}) {
+export function refreshDocumentReference(tab, reference) {
+  // A fresh revision applies only after its graph replaces the old draft.
+  if (documents.has(tab))
+    loadedReferences.set(tab, JSON.parse(JSON.stringify(reference)));
+}
+
+function graphIdentity(graph) {
+  const reference = fileReference(graph);
+  return reference ? documentPath(reference) : graph.id;
+}
+
+export function snapshotCard(graph = app.rootGraph, options = {}) {
+  const identity = graphIdentity(graph);
+  return captures.run(() => {
+    if (graphIdentity(graph) !== identity) throw Error("工作流已切换，请重新保存或执行");
+    return captureCard(graph, options);
+  });
+}
+
+async function captureCard(graph, { draft = false } = {}) {
+  const identity = graphIdentity(graph);
+  const options = { sortNodes: app.extensionManager.setting.get("Comfy.Workflow.SortNodeIdOnSave") };
   // The API's workflow copy compresses widget sockets and renumbers link slots.
   // Cards are editable files, not execution metadata: persist the native editor
   // snapshot including empty Autogrow slots and nested graphs. Keep API inputs
   // separate so they still receive the normal endpoint/DynamicCombo expansion.
-  const workflow = structuredClone(
-    graph.serialize({
-      sortNodes: app.extensionManager.setting.get("Comfy.Workflow.SortNodeIdOnSave"),
-    }),
-  );
+  const workflow = structuredClone(graph.serialize(options));
   captureValueControls(graph, workflow);
+  let task;
   try {
     assertWorkflowLinks(workflow);
     normalizeAutogrowLayouts(workflow);
-    const task = await app.graphToPrompt(graph);
-    return { ...task, workflow };
+    task = await app.graphToPrompt(graph);
   } catch (error) {
     if (!draft) throw error;
-    return { workflow, output: null, error: error.message };
+    task = { output: null, error: error.message };
   }
+  if (graphIdentity(graph) !== identity) throw Error("工作流已切换，请重新保存或执行");
+  if (sourceSignature(graph.serialize(options)) !== sourceSignature(workflow))
+    return captureCard(graph, { draft });
+  return { ...task, workflow };
 }
 
-async function promptForTab(tab, options, loadGraph) {
+function promptForTab(tab, options, loadGraph) {
+  return captures.run(() => captureTab(tab, options, loadGraph));
+}
+
+async function captureTab(tab, options, loadGraph) {
   const store = app.extensionManager.workflow;
-  if (tab === store.activeWorkflow) return snapshotCard(app.rootGraph, options);
+  if (tab === store.activeWorkflow) return captureCard(app.rootGraph, options);
   // Native subgraph constructors are bound to app.rootGraph. A parallel LGraph
   // silently reuses stale definitions, so compile an inactive file by loading
   // its native tab and then restoring the previous tab (including its draft).
@@ -73,7 +100,7 @@ async function promptForTab(tab, options, loadGraph) {
   const workflow = JSON.parse(JSON.stringify(tab.activeState));
   try {
     await loadGraph.call(app, workflow, true, true, tab);
-    return await snapshotCard(app.rootGraph, options);
+    return await captureCard(app.rootGraph, options);
   } finally {
     // Do not override a tab the user selected while prompt generation awaited.
     if (store.activeWorkflow === tab)
@@ -92,7 +119,16 @@ function sourceSignature(workflow) {
   // These are file identity/derived snapshots, not edits to the workflow.
   delete source.extra?.turing_editor;
   delete source.extra?.turing_card;
+  delete source.extra?.ds;
   if (source.extra && !Object.keys(source.extra).length) delete source.extra;
+  // Control metadata and execution order are derived during serialization and
+  // prompt construction, without an edit to the live workflow.
+  for (const graph of [source, ...(source.definitions?.subgraphs || [])])
+    for (const node of graph.nodes) {
+      delete node.properties?.turing_value_controls;
+      delete node.order;
+    }
+  normalizeAutogrowLayouts(source);
   return JSON.stringify(source);
 }
 
@@ -133,7 +169,7 @@ export function installDocumentStorage({ save, load, saveAs }) {
   document.addEventListener("visibilitychange", () => {
     const tab = store.activeWorkflow;
     if (document.hidden && tab && documents.has(tab) && !restoring)
-      tab.save({ automatic: true }).catch(report);
+      tab.save({ automatic: true, settle: true }).catch(report);
   });
   const persistReferences = () => {
     if (restoring || !writable || !manager.setting.get("Comfy.Workflow.Persist"))
@@ -157,7 +193,8 @@ export function installDocumentStorage({ save, load, saveAs }) {
   };
   const bindTab = (tab, reference, legacyDraft) => {
     if (documents.has(tab)) {
-      documents.set(tab, reference);
+      // Canvas revisions are maintained by the project's write queue.
+      if (reference.directory && !reference.id) documents.set(tab, reference);
       return;
     }
     const nativeLoad = tab.load;
@@ -168,14 +205,16 @@ export function installDocumentStorage({ save, load, saveAs }) {
     // Native close/save must not route an existing project file through its
     // temporary-workflow Save As dialog. Paths are tab keys, never userdata writes.
     tab.size = Math.max(0, tab.size);
-    const saveTab = async function ({ automatic = false } = {}) {
+    const saveTab = async function ({ automatic = false, settle = false } = {}) {
       clearTimeout(record.timer); clearTimeout(record.maximum);
       record.timer = record.maximum = null;
-      const reference =
-        fileReference(
-          this === store.activeWorkflow ? app.rootGraph : this.activeState,
-        ) || documents.get(this);
-      documents.set(this, reference);
+      // File identity and the last accepted revision belong to the tab, not
+      // native undo snapshots, which may contain an older revision or draft name.
+      let reference = documents.get(this);
+      if (reference.directory && !reference.id) {
+        reference = fileReference(this === store.activeWorkflow ? app.rootGraph : this.activeState);
+        documents.set(this, reference);
+      }
       if (automatic && reference.directory && !reference.id) return this;
       if (reference.directory) {
         await settleMaterials(reference.directory);
@@ -198,12 +237,17 @@ export function installDocumentStorage({ save, load, saveAs }) {
       if (previousPath !== documentPath(reference))
         await store.renameWorkflow(this, documentPath(reference));
       const current =
-        this === store.activeWorkflow ? app.rootGraph.serialize() : this.activeState;
+        this === store.activeWorkflow
+          ? app.rootGraph.serialize({
+              sortNodes: manager.setting.get("Comfy.Workflow.SortNodeIdOnSave"),
+            })
+          : this.activeState;
       if (task && sourceSignature(current) !== submitted) {
         // A native close waits on save(). Never mark newer edits as saved or
         // allow close to discard them just because the earlier snapshot succeeded.
         this.isModified = true;
         if (automatic) {
+          if (settle) return saveTab.call(this, { automatic, settle });
           schedule();
           return this;
         }
@@ -216,6 +260,11 @@ export function installDocumentStorage({ save, load, saveAs }) {
       this.isModified = false;
       record.signature = task ? sourceSignature(task.workflow) : null;
       status(this, "已保存");
+      if (!automatic && task) manager.toast.add({
+        severity: "success",
+        summary: "已保存卡片文件",
+        life: 3000,
+      });
       persistReferences();
       // The native draft watcher removes the now-clean saved graph. Otherwise
       // an older draft could reappear on the next page refresh.
@@ -234,6 +283,7 @@ export function installDocumentStorage({ save, load, saveAs }) {
       if (!force && this.isLoaded) return this;
       const reference = documents.get(this);
       const workflow = await load(reference);
+      loadedReferences.set(this, fileReference(workflow));
       this.content = this.originalContent = JSON.stringify(workflow);
       this.isModified = false;
       // Initialize the native tracker/draft overlay from in-memory content,
@@ -250,6 +300,9 @@ export function installDocumentStorage({ save, load, saveAs }) {
         }
         legacyDraft = undefined;
         return this;
+      } catch (error) {
+        loadedReferences.delete(this);
+        throw error;
       } finally {
         this.size = this.content.length;
       }
@@ -265,11 +318,17 @@ export function installDocumentStorage({ save, load, saveAs }) {
         throw Error("这个文件由画布管理；卡片副本请使用另存为");
       };
   };
-  const bind = () => {
+  const bind = ({ loaded = false } = {}) => {
     const tab = store.activeWorkflow;
     const reference = fileReference(app.rootGraph);
     if (!tab || !reference) { savedLabel.textContent = ""; return; }
+    if (loaded && loadedReferences.has(tab)) {
+      documents.set(tab, loadedReferences.get(tab));
+      loadedReferences.delete(tab);
+    }
     bindTab(tab, reference);
+    const key = reference.directory && !reference.id ? "turing_project" : "turing_editor";
+    app.rootGraph.extra[key] = documents.get(tab);
     savedLabel.textContent = tab.turingSaveStatus || "已保存";
     if (restored) restoring = false;
     persistReferences();
@@ -337,15 +396,34 @@ export function installDocumentStorage({ save, load, saveAs }) {
   // different tab to compile its graph, and ordinary workflows retain native IO.
   app.loadGraphData = async function (...args) {
     const tab = store.activeWorkflow;
-    if (!restoring && !app.configuringGraph && tab && documents.has(tab))
-      await tab.save({ automatic: true });
-    return loadGraph.apply(this, args);
+    const target = args[3];
+    const reloading = target === tab && loadedReferences.has(tab);
+    try {
+      if (!restoring && !app.configuringGraph && tab && documents.has(tab) && !reloading) {
+        try {
+          await tab.save({ automatic: true, settle: true });
+        } catch (error) {
+          // Native navigation preserves the dirty tab/draft, and its close
+          // dialog already owns the user's Save/Discard/Cancel decision.
+          report(error);
+        }
+      }
+      return await loadGraph.apply(this, args);
+    } finally {
+      if (target) loadedReferences.delete(target);
+    }
   };
   const closeWorkflow = store.closeWorkflow;
   store.closeWorkflow = async function (...args) {
     const tab = store.activeWorkflow;
-    if (!restoring && tab && documents.has(tab))
-      await tab.save({ automatic: true });
+    if (!restoring && tab && documents.has(tab)) {
+      try {
+        await tab.save({ automatic: true, settle: true });
+      } catch (error) {
+        // Keep the native Save/Discard/Cancel choice available after a failure.
+        report(error);
+      }
+    }
     return closeWorkflow.apply(this, args);
   };
   for (const id of ["Comfy.SaveWorkflow", "Comfy.SaveWorkflowAs"]) {

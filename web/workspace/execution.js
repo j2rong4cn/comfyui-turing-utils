@@ -132,38 +132,45 @@ export async function restoreTasks(directory) {
 
 export function installLocalExecution() {
   const queue = app.queuePrompt;
-  let active;
+  const active = new Map();
   app.queuePrompt = function (...args) {
     const editing = editor();
     const state = project();
     if (!editing?.id && !state) {
       if (!editing) return queue.apply(this, args);
-      return fileTab(editing).save({ automatic: true })
-        .then(() => queue.apply(this, args));
+      const tab = fileTab(editing);
+      return tab.save({ automatic: true, settle: true })
+        .then(() => {
+          if (tab !== app.extensionManager.workflow.activeWorkflow)
+            throw Error("工作流已切换，请回到原工作流后重新运行");
+          return queue.apply(this, args);
+        });
     }
-    if (active) return active;
-    active = (async () => {
-      const count = args[1] ?? 1;
+    const count = args[1] ?? 1;
+    const cards = state ? [...app.canvas.selectedItems]
+      .filter((n) => n.type === CARD)
+      .map((n) => n.properties.instance) : null;
+    const key = JSON.stringify([editing?.directory || state.directory, editing?.id, cards && [...cards].sort(), count]);
+    if (active.has(key)) return active.get(key);
+    const running = (async () => {
       for (let i = 0; i < count; i++) {
         if (editing?.id) {
-          await fileTab(editing).save({ automatic: true });
+          await fileTab(editing).save({ automatic: true, settle: true });
           const current =
             projectState(editing.directory) ||
             (await request("project/open", { directory: editing.directory }))
               .workflow.extra.turing_project;
           await runCardMaterials(current, editing.id);
         } else {
-          const cards = [...app.canvas.selectedItems]
-            .filter((n) => n.type === CARD)
-            .map((n) => n.properties.instance);
           if (!cards.length) throw Error("请先选择要运行的卡片");
           await runSelectedCards(state, cards);
         }
       }
     })().catch(report).finally(() => {
-      active = null;
+      active.delete(key);
     });
-    return active;
+    active.set(key, running);
+    return running;
   };
   api.addEventListener("reconnected", () => {
     if (project()) restoreTasks(project().directory).catch(report);

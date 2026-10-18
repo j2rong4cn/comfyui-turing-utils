@@ -224,6 +224,8 @@ def install_routes():
                         raise Conflict(
                             "Template exists or changed; open it before replacing it"
                         )
+                elif data.get("revision") is not None:
+                    raise Conflict("Template was deleted; save the draft under a new name")
                 if data.get("create_only"):
                     workflow = export_card(
                         data["workflow"],

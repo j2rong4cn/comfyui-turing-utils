@@ -13,6 +13,7 @@ import {
   documentPath,
   fileReference,
   fileTab,
+  refreshDocumentReference,
   flushActiveDocument,
   installDocumentStorage,
   snapshotCard,
@@ -68,6 +69,7 @@ export async function openTab(workflow, name) {
     // routes all file operations to the project/library, never userdata.
     await store.renameWorkflow(tab, documentPath(reference));
   }
+  if (reference) refreshDocumentReference(tab, reference);
   await app.loadGraphData(workflow, true, true, tab || name);
 }
 const directoryPicker = (create, options) =>
@@ -379,7 +381,7 @@ function installEditorMaterials(graph, editing) {
   installProjectMaterials(graph, editing, async (node, target) => {
     // Use the same local task flow as outer cards, including missing upstream
     // materials. The editor never submits a full workflow run.
-    await fileTab(editing).save({ automatic: true });
+    await fileTab(editing).save({ automatic: true, settle: true });
     const state =
       projectState(editing.directory) ||
       (await request("project/open", { directory: editing.directory })).workflow.extra
@@ -447,11 +449,6 @@ async function saveCard(editing = editor(), task, { automatic = false } = {}) {
     // do not require reloading the tab to replace the instance-wide file list.
     if (editor() === editing) installEditorMaterials(app.rootGraph, editing);
   }
-  if (!automatic) app.extensionManager.toast.add({
-    severity: "success",
-    summary: "已保存卡片文件",
-    life: 3000,
-  });
 }
 async function saveTemplate() {
   if (project()) throw Error("请在卡片工作流中保存模板");
@@ -480,6 +477,7 @@ async function editTemplate(name) {
 
 async function saveCurrentCard() {
   if (project()) throw Error("请在卡片工作流中保存卡片");
+  if (editor()) return app.extensionManager.command.execute("Comfy.SaveWorkflow");
   return saveTemplate();
 }
 export async function deleteTemplate(name) {
@@ -495,9 +493,13 @@ export async function deleteTemplate(name) {
     message: `从卡片库删除“${name}”？已放入画布的副本不受影响。文件会移入 .trash，可恢复。`,
   });
   if (!confirmed) return;
+  if (tab?.isModified) throw Error("模板有未保存修改，请先保存或关闭编辑页");
+  if (tab) await tab.save({ automatic: true, settle: true });
   const source = await request("template/open", { name });
   await request("template/delete", { name, revision: source.revision });
-  if (tab) await app.extensionManager.workflow.closeWorkflow(tab);
+  if (tab === app.extensionManager.workflow.activeWorkflow)
+    tab.changeTracker.captureCanvasState();
+  if (tab && !tab.isModified) await app.extensionManager.workflow.closeWorkflow(tab);
   api.dispatchCustomEvent("turing_card_library_changed", {});
 }
 async function copyTemplate() {
@@ -836,7 +838,7 @@ app.registerExtension({
     }
   },
   afterLoadGraph() {
-    bindDocument?.();
+    bindDocument?.({ loaded: true });
     if (project())
       for (const node of app.rootGraph._nodes)
         if (node.type === CARD) node.copyIfNeeded();

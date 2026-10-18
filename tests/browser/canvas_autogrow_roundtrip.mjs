@@ -167,12 +167,12 @@ try {
     await workspace.openProject(directory, true);
     const added = await workspace.addCard({ name });
     let card = app.rootGraph._nodes.find((n) => n.properties.instance === added.id);
-    await card.widgets.find((w) => w.name === "编辑工作流").callback();
+    await card.getExtraMenuOptions().find((option) => option.content === "编辑工作流").callback();
     await audit("project editor");
     await command("Comfy.SaveWorkflow");
     await workspace.openProject(directory);
     card = app.rootGraph._nodes.find((n) => n.properties.instance === added.id);
-    await card.widgets.find((w) => w.name === "编辑工作流").callback();
+    await card.getExtraMenuOptions().find((option) => option.content === "编辑工作流").callback();
     await audit("saved project editor");
     // Dynamic slot metadata must also survive native subgraphs; the editor file
     // keeps definitions, while the derived API prompt uses execution IDs.
@@ -202,7 +202,7 @@ try {
     );
     await workspace.openProject(directory);
     card = app.rootGraph._nodes.find((n) => n.properties.instance === added.id);
-    await card.widgets.find((w) => w.name === "编辑工作流").callback();
+    await card.getExtraMenuOptions().find((option) => option.content === "编辑工作流").callback();
     const loaded = app.rootGraph.getNodeById(nested.node.id).subgraph.getNodeById(id);
     check(
       JSON.stringify(loaded.inputs.map((s) => s.name)) ===

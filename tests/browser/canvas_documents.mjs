@@ -195,12 +195,22 @@ try {
     editingText.title = "Edited title";
     app.graph.change();
     await command("Comfy.SaveWorkflow");
+    check(
+      editorTab.turingSaveStatus === "已保存" && !editorTab.isModified,
+      "Prompt execution-order changes were mistaken for a user edit during save",
+    );
     const updated = await workspace.request("card/open", { directory, id });
     check(
       updated.workflow.nodes.find((n) => String(n.id) === String(editingText.id))
         .title === "Edited title",
       "Editor Ctrl+S wrote the wrong file",
     );
+    const canvasTab = app.extensionManager.workflow.openWorkflows.find(
+      (tab) => tab.activeState?.extra?.turing_project?.directory === directory,
+    );
+    await app.loadGraphData(canvasTab.activeState, true, true, canvasTab);
+    await canvasTab.save();
+    check(canvasTab.turingSaveStatus === "已保存", "Returning to the canvas restored an obsolete project revision");
     await workspace.openProject(`${directory}/canvas.json`);
     card = app.graph._nodes.find((n) => n.properties.instance === id);
     check(
