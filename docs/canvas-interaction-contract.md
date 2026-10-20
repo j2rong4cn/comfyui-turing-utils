@@ -147,7 +147,11 @@
   展示选项保存在节点 properties，投影读取，不进入执行输入或模型缓存。
 - 卡片保留已保存尺寸及 Inputs 的交错顺序。先预留每项最小高度，再按图片/视频、文本、音频、表单顺序分配空间；
   同级预览公平扩展到实际素材比例需要的高度，空预览和音频不占用多余高度。画面 contain，不裁掉原件。
-  card_layout.js 只调整卡片实例的控件高度；经典布局和 Nodes 2.0 网格共享分配逻辑，不修改全局原型或从 DOM 反推 node.setSize。
+  card_layout.js 管理卡片实例的内容高度和最小尺寸，端点与内容共享主体高度；观察器不从 DOM 反推 node.setSize。
+  仅显式“适应内容”按素材比例和原生界面余量一次性调整尺寸；经典 DOM 控件的 margin 计入分配高度。
+  card_ports.js 只调整画布卡片的端点展示，左右按原接口顺序居中排列；原生插槽保留稳定 ID、名称、类型和接线交互。
+  经典模式仅覆盖卡片插槽的运行时 renderingLabel，名称在主体外绘制；Nodes 2.0 保留原生插槽组件与坐标测量。
+  端点标签不占布局空间、不接收鼠标事件、不写入文件；隐藏预览不改变接口，普通工作流编辑页不使用卡片样式。
   比例来自既有缩略图/播放元信息；缩放不请求媒体。观察器、动画帧和播放器随卡片移除释放。
 - Chat URL 选择凭据所有者：空 URL 使用项目 URL/Key，非空 URL 仅使用卡片 Key，Model 独立回退。
   仅 Canvas 编译替换为私有 Chat 适配器，通过项目引用在执行时读取全局设置，普通 Chat 不变。
@@ -180,7 +184,7 @@
 
 - web/material_workspace.js：命令、文件/视图编排和项目交互入口。
 - web/workspace/card_nodes.js：原生项目/卡片的展示节点，不拥有任务提交实现。
-- web/workspace/card_layout.js：素材优先的空间分配及两种渲染器的卡片局部布局，不拥有内容或尺寸持久化。
+- web/workspace/card_layout.js、card_ports.js：素材优先的空间分配、两种渲染器的卡片局部布局与端点展示，不拥有内容或尺寸持久化。
 - web/workspace/execution.js：任务请求、轻量状态观察与重连；不承担推理调度或分段编译。
 - web/workspace/api.js、project_state.js、material_controls.js：请求反馈、保存队列和预览生命周期。
 - web/workspace/documents.js：托管文件的原生标签页保存/加载边界。
@@ -259,6 +263,8 @@ text_history.mjs 检查文本历史、合并、重做分叉与容量边界；can
 本机 headless CDP 键盘派发在普通原生文本框上也不生效，该测试显式派发 DOM 事件，不替代物理键盘验收。
 card_layout.mjs 检查分配优先级、公平性及边界；canvas_layout.mjs 检查两种渲染器的横竖图/长文本混排、
 空预览、缩放稳定性、真实视频上传播放/释放，以及项目保存后尺寸恢复。
+canvas_card_ports.mjs 检查两种渲染器的端点/连线/命中一致、原生拖线事件、渲染器切换、隐藏预览、折叠、尺寸恢复和独立复制，
+并验证编辑工作流节点没有继承卡片布局；当前主机的 CDP 物理鼠标事件不送达，测试不替代真实鼠标验收。
 canvas_hd_preview.mjs 检查经典与 Nodes 2.0 的放大高清、阈值回滞、视频 PNG 原帧、无自动播放及离屏释放；
 image_hover.mjs 检查高分屏/留白密度、抢占、队列上限和大原件临时槽释放。
 

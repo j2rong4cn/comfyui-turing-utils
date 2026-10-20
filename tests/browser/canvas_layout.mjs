@@ -37,6 +37,7 @@ try {
       kind: "parameter",
       type: "STRING",
       default: "Long form text\n".repeat(100),
+      canvas_hidden: false,
       options: { multiline: true },
     });
     syncPorts(input, ports);
@@ -46,6 +47,8 @@ try {
     );
     const portrait = LiteGraph.createNode("TuringMaterialImage");
     app.rootGraph.add(portrait);
+    for (const material of [landscape, portrait])
+      material.properties.canvas_show_generate = true;
     input.connect(
       input.outputs.findIndex((s) => s._append),
       portrait,

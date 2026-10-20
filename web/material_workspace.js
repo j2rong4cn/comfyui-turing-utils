@@ -5,6 +5,7 @@ import { DirectoryPicker } from "./lib/directory_picker.js";
 import { setWidgetValue } from "./lib/parameter_widget.js";
 import { installTitleActionDom } from "./lib/title_action.js";
 import { installPreviewZoom } from "./lib/image_hover.js";
+import { installCardPortsDom } from "./workspace/card_ports.js";
 import {
   assertWorkflowLinks,
   normalizeAutogrowLayouts,
@@ -196,7 +197,7 @@ export async function addCard(spec, position) {
       title: added.document.cards[0].title,
       properties: { instance: added.id },
       pos: position || [360, 20],
-      size: [320, 300],
+      size: [320, 0],
     };
     configureCard(definition, added.document.cards[0], added.document, directory);
     if (project()?.directory === directory) {
@@ -712,6 +713,7 @@ app.registerExtension({
   ],
   setup() {
     installTitleActionDom(app);
+    installCardPortsDom(app);
     installPreviewZoom(app);
     installSidebar({
       openCanvas: openProject,

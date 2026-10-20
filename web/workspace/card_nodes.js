@@ -108,6 +108,7 @@ export function registerCanvasNodes({
     constructor() {
       super("Canvas Card");
       this.removable = false;
+      this.widgets_start_y = 8;
       this.cardLayout = new CardLayout(this);
       this.materialActions = { select, importMedia, run };
       this.runAll = titleAction(
@@ -122,6 +123,7 @@ export function registerCanvasNodes({
           ? [{ content: "隐藏参数…", callback: action(() => hiddenParameters(this, { select, importMedia, run })) }]
           : []),
         { content: "卡片显示…", callback: action(() => cardPresentation(this, refreshCard)) },
+        { content: "适应内容", callback: () => this.cardLayout.fit() },
         { content: "运行卡片", disabled: this.runAll.disabled, callback: action(() => run(this)) },
         {
           content: "编辑工作流",
@@ -268,8 +270,53 @@ export function registerCanvasNodes({
       refreshCanvasInstances();
     }
     arrange() {
+      if (!LiteGraph.vueNodesMode) this.cardLayout?.ports.arrange();
       super.arrange();
       this.cardLayout?.arrange();
+    }
+    computeSize() {
+      return this.cardLayout?.minimum() || super.computeSize();
+    }
+    onResize(size) {
+      if (!this.cardLayout) return;
+      const minimum = this.cardLayout.minimum(size[0]);
+      size[0] = Math.max(size[0], minimum[0]);
+      size[1] = Math.max(size[1], minimum[1]);
+      if (!LiteGraph.vueNodesMode) this.cardLayout.ports.arrange();
+      this.cardLayout.request();
+    }
+    drawSlots(ctx, options) {
+      // This runtime display override is local to projected card sockets. Keep
+      // their names/labels and native shapes, menus and link handling intact.
+      for (const slot of [...this.inputs, ...this.outputs])
+        if (slot.renderingLabel)
+          Object.defineProperty(slot, "renderingLabel", { value: "", configurable: true });
+      super.drawSlots(ctx, options);
+      this.cardLayout.ports.drawLabels(ctx, options);
+    }
+    getInputOnPos(pos) {
+      if (this.flags.collapsed) return super.getInputOnPos(pos);
+      return this.inputs[this.cardLayout.ports.at(pos, true)];
+    }
+    getOutputOnPos(pos) {
+      if (this.flags.collapsed) return super.getOutputOnPos(pos);
+      return this.outputs[this.cardLayout.ports.at(pos, false)];
+    }
+    getConnectionPos(input, index, out = [0, 0]) {
+      if (index < 0) return super.getConnectionPos(input, index, out);
+      const p = input ? this.getInputPos(index) : this.getOutputPos(index);
+      out[0] = p[0];
+      out[1] = p[1];
+      return out;
+    }
+    onMouseMove(event, pos) {
+      if (LiteGraph.vueNodesMode) return;
+      const point = [this.pos[0] + pos[0], this.pos[1] + pos[1]];
+      const input = this.cardLayout.ports.at(point, true);
+      this.cardLayout.ports.hover(input >= 0, input >= 0 ? input : this.cardLayout.ports.at(point, false));
+    }
+    onMouseLeave() {
+      this.cardLayout.ports.hover(true, -1);
     }
     releasePlayer() {
       releasePlayer(this);

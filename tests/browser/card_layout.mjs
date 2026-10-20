@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { allocateHeights } from "../../web/workspace/card_layout.js";
+import { portHeight, portPositions } from "../../web/workspace/card_ports.js";
 
 const requests = [
   { min: 96, max: 240, priority: 0 },
@@ -18,4 +19,9 @@ assert.deepEqual(
   requests.map((r) => r.min),
 );
 assert.deepEqual(allocateHeights([], 1000), []);
+assert.deepEqual(portPositions(0, 200), []);
+assert.deepEqual(portPositions(1, 200), [100]);
+assert.deepEqual(portPositions(3, 200), [76, 100, 124]);
+assert.equal(portHeight(0), 0);
+assert.deepEqual(portPositions(10, 40), portPositions(10, portHeight(10)));
 console.log("Card layout priorities, fairness and bounds passed");

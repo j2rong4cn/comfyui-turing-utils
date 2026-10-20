@@ -107,6 +107,7 @@ try {
       throw Error("Project duplicated its tab");
     await m.openTab(starter, `compute-${Date.now()}.json`);
     const target = app.graph._nodes.find((n) => n.type === "TuringMaterialText");
+    target.properties.canvas_show_generate = true;
     const constant = LiteGraph.createNode("PrimitiveString");
     app.graph.add(constant);
     constant.widgets.find((w) => w.name === "value").value = "computed";
@@ -176,17 +177,8 @@ try {
       prompt: linked.output,
     });
     await m.openProject(directory);
-    const submenu = app.canvas.getCanvasMenuOptions()[0].submenu.options;
-    const option = submenu.find((o) => o?.content === linkedName);
-    if (!option || !submenu.some((o) => o?.content === "图片"))
-      throw Error("Missing native Add Node submenu");
-    await option.callback();
-    const added = {
-      id: app.graph._nodes.find(
-        (n) => n.properties.card?.title === linkedName.slice(0, -5),
-      )?.properties.instance,
-    };
-    if (!added.id) throw Error("Menu did not add a card instance");
+    // The asynchronous Add Node menu has dedicated canvas_card_menu coverage.
+    const added = await m.addCard({ name: linkedName });
     const from = app.graph._nodes.find(
       (n) => n.properties.instance === card.properties.instance,
     );
@@ -247,7 +239,7 @@ try {
         for (const [index, port] of ports.entries())
           if (
             slots[index].label !== port.name ||
-            slots[index].renderingLabel !== port.name
+            slots[index].name !== port.name
           )
             throw Error("Projected card lost its explicit interface label");
       }
@@ -410,11 +402,11 @@ try {
     .dispatchEvent("click");
   await page.waitForFunction(() =>
     [...document.querySelectorAll(".turing-directory-picker button")].some(
-      (b) => b.textContent === "创建项目" && !b.disabled,
+      (b) => b.textContent === "创建画布" && !b.disabled,
     ),
   );
   await page
-    .getByRole("button", { name: "创建项目", exact: true })
+    .getByRole("button", { name: "创建画布", exact: true })
     .dispatchEvent("click");
   assert.equal(await page.evaluate(() => window.pickerResult), pickerDirectory);
   console.log(JSON.stringify({ directoryColumns: true, emptyFolderSelection: true }));
@@ -444,7 +436,7 @@ try {
     () =>
       window.folderPromptReleasedModal &&
       [...document.querySelectorAll(".turing-directory-picker button")].some(
-        (b) => b.textContent === "创建项目" && !b.disabled,
+        (b) => b.textContent === "创建画布" && !b.disabled,
       ),
   );
   await page.getByRole("button", { name: "取消", exact: true }).dispatchEvent("click");
@@ -463,6 +455,10 @@ try {
     const media = app.graph._nodes.find((n) =>
       n.properties.materials?.some((m) => m.kind === "text"),
     );
+    const beforeText = await m.request("project/open", { directory });
+    const savedX = beforeText.workflow.nodes.find(
+      (n) => n.properties.instance === media.properties.instance,
+    ).pos[0];
     media.pos = [710, 270];
     const text = media.properties.materials.find((m) => m.kind === "text");
     await media.widgets.find((w) => w._materialId === text.id).callback("autosaved");
@@ -470,9 +466,9 @@ try {
     if (
       data.workflow.nodes.find(
         (n) => n.properties.instance === media.properties.instance,
-      ).pos[0] !== 710
+      ).pos[0] !== savedX || data.document.selections[text.id].text !== "autosaved"
     )
-      throw Error("Text publication did not autosave layout");
+      throw Error("Text publication did not preserve layout ownership");
     if (data.workflow.nodes[0].properties.settings.name !== "Browser smoke")
       throw Error("Global settings did not persist");
     if (data.workflow.nodes[0].properties.settings.max_megapixels !== 3)
