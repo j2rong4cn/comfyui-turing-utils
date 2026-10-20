@@ -13,6 +13,8 @@ from comfy_execution.caching import BasicCache, LRUCache, RAMPressureCache, Null
 from comfy_execution.graph_utils import ExecutionBlocker, is_link
 from execution import PromptExecutor
 from .store import Project
+from .chat import chat_settings, resolve_chat
+from ..runtime.node_context import binding_for, execution_scope
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +53,15 @@ class TaskContinuation:
                     continue
                 # A waiting reader may be released, but already completed
                 # inputs and ordinary computations remain frozen for this run.
+                binding, previous = binding_for(node), binding_for(before)
                 allowed = (
-                    node["class_type"].startswith("_TuringMaterialRead")
-                    and before["inputs"].get("source_state") in {"current", "waiting"}
-                    and node["inputs"].get("source_state") == "resumed"
+                    binding and previous and binding["role"] == "read"
+                    and previous.get("source_state") in {"current", "waiting"}
+                    and binding.get("source_state") == "resumed"
                 )
-                normalized = {
-                    **node,
-                    "inputs": {
-                        **node["inputs"],
-                        "source_state": before["inputs"].get("source_state"),
-                    },
-                }
+                normalized = copy.deepcopy(node)
+                if allowed:
+                    normalized["_meta"]["turing_binding"]["source_state"] = previous["source_state"]
                 if not allowed or normalized != before or node_id in self.completed:
                     raise ValueError(
                         "A prompt hook changed completed task inputs during dependency retry"
@@ -114,9 +113,7 @@ def task_owned(dynamic, node_id):
     current = node_id
     while current is not None:
         node = dynamic.get_node(current)
-        if node.get("_meta", {}).get("turing_material_fresh") or node[
-            "class_type"
-        ].startswith(("_TuringMaterialRead", "_TuringMaterialWrite")):
+        if node.get("_meta", {}).get("turing_material_fresh"):
             return True
         current = dynamic.get_parent_node_id(current)
     return False
@@ -155,7 +152,7 @@ def install_task_cleanup():
     @wraps(original)
     async def execute(self, prompt, prompt_id, *args, **kwargs):
         workspace = any(
-            n.get("class_type", "").startswith("_TuringMaterialWrite")
+            (binding_for(n) or {}).get("role") == "write"
             for n in prompt.values()
         )
         restored = []
@@ -231,7 +228,8 @@ def install_task_cleanup():
                     )
                     setattr(cache, name, replacement)
         try:
-            return await original(self, prompt, prompt_id, *args, **kwargs)
+            with execution_scope(prompt_id, prompt, resolve_options):
+                return await original(self, prompt, prompt_id, *args, **kwargs)
         finally:
             for cache, name, native, local in reversed(restored):
                 if local:
@@ -271,3 +269,10 @@ def install_task_cleanup():
     execute._turing_material_cleanup = True
     execute._turing_material_continuations = continuations
     PromptExecutor.execute_async = execute
+
+
+def resolve_options(binding, options):
+    if binding["role"] != "chat":
+        return options
+    settings = Project(binding["directory"]).settings(private=True)
+    return resolve_chat(options, chat_settings(settings.get("chat", {})))

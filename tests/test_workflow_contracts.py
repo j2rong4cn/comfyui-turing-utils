@@ -23,6 +23,10 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
     expected = json.loads(
         (Path(__file__).parent / "fixtures/node_contracts.json").read_text()
     )
+    removed = {"_TuringCanvasChat", *(f"_TuringMaterial{role}{kind}"
+        for role in ("Read", "Write") for kind in ("Text", "Image", "Video", "Audio"))}
+    assert not (removed & NODE_CLASS_MAPPINGS.keys())
+    expected = {name: contract for name, contract in expected.items() if name not in removed}
     actual = {}
     with patch("folder_paths.get_filename_list", return_value=["contract.safetensors"]):
         # The pre-refactor snapshot freezes existing workflows, not additions.
@@ -55,16 +59,6 @@ def test_registered_node_interfaces_match_pre_refactor_workflows():
         assert material["inputs"]["optional"].pop("run_on_dependency") == [
             "BOOLEAN",
             {"default": False},
-        ]
-        reader = actual[f"_TuringMaterialRead{kind}"]["inputs"]["optional"][
-            "source_state"
-        ][0]
-        assert reader.pop(reader.index("saved")) == "saved"
-        contract = actual[f"_TuringMaterialWrite{kind}"]
-        assert contract["input_order"]["optional"].pop() == "configuration"
-        assert contract["inputs"]["optional"].pop("configuration") == [
-            "STRING",
-            {"default": ""},
         ]
     # Adding a strategy does not change the serialized inputs of any existing
     # mode. Check Spark separately and keep the old-mode snapshot frozen.

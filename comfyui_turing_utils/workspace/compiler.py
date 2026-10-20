@@ -36,6 +36,14 @@ def is_link(value):
     )
 
 
+def material_inputs(kind):
+    file_input = "text" if kind == "text" else "audio" if kind == "audio" else "file"
+    inputs = {"stub_id": "", file_input: ""}
+    if kind == "video":
+        inputs.update(fps=30, bit_depth="auto", color_space="sRGB", codec="h264")
+    return inputs
+
+
 class MissingMaterial(ValueError):
     def __init__(self, target, kind):
         super().__init__(f"{kind.title()} material {target} has no saved content")
@@ -154,39 +162,24 @@ def compile_segment(
                     )
                 )
             )
-            if kind == "text":
-                if not selected.get("text") and not allow_missing:
-                    raise MissingMaterial(key, kind)
-                compiled[output_key] = {
-                    "class_type": "_TuringMaterialReadText",
-                    "inputs": {
-                        # Bind to the material identity, not a submit-time file
-                        # or text snapshot. The native reader resolves it later.
-                        "text": "",
-                        "run_id": run_id,
-                        "directory": directory,
-                        "target": key,
-                        "source_state": "waiting" if refresh else "saved",
-                    },
-                }
-                return output_key
-            if not selected.get("asset") and not allow_missing:
+            if not selected.get("text" if kind == "text" else "asset") and not allow_missing:
                 raise MissingMaterial(key, kind)
             compiled[output_key] = {
-                "class_type": "_TuringMaterialRead" + kind.title(),
-                "inputs": {
-                    "directory": directory,
-                    "asset": "",
-                    "start": selected.get("start", 0),
-                    "end": selected.get("end", 0),
-                    "run_id": run_id,
-                    "target": key,
-                    "source_state": "waiting" if refresh else "saved",
-                    **(
-                        {"max_megapixels": max_megapixels}
-                        if max_megapixels is not None
-                        else {}
-                    ),
+                "class_type": node["class_type"],
+                "inputs": material_inputs(kind),
+                "_meta": {
+                    "turing_material_fresh": True,
+                    "turing_binding": {
+                        "role": "read",
+                        "directory": directory,
+                        "target": key,
+                        "run_id": run_id,
+                        "source_state": "waiting" if refresh else "saved",
+                        **(
+                            {"max_megapixels": max_megapixels}
+                            if max_megapixels is not None else {}
+                        ),
+                    },
                 },
             }
             return output_key
@@ -197,44 +190,35 @@ def compile_segment(
         visiting.add(key)
         inputs = copy.deepcopy(node.get("inputs", {}))
         if destination:
-            if kind == "text":
-                inputs["value"] = inputs.pop("text", None)
-            if kind == "video" and "images" in inputs:
-                inputs["value"] = inputs.pop("images")
-            if kind != "video":
-                inputs.pop("audio", None)
+            value_name = "text" if kind == "text" else "images" if kind == "video" else "value"
             inputs = {
-                k: v
-                for k, v in inputs.items()
-                if k in {"value", "audio", "fps", "bit_depth", "color_space", "codec"}
+                k: v for k, v in inputs.items()
+                if k in {value_name, "fps", "bit_depth", "color_space", "codec"}
+                or (kind == "video" and k == "audio")
             }
-            if "value" not in inputs or not is_link(inputs["value"]):
+            if value_name not in inputs or not is_link(inputs[value_name]):
                 raise ValueError("This material has no connected computation input")
+            inputs = {**material_inputs(kind), **inputs}
         for value in inputs.values():
             if is_link(value):
                 value[0] = visit(value[0])
         visiting.remove(key)
+        metadata = {
+            **copy.deepcopy(node.get("_meta", {})),
+            "turing_material_fresh": destination or key not in preparation,
+        }
         if destination:
-            inputs.update(
-                directory=directory,
-                target=target,
-                run_id=run_id,
-                revision=revision,
+            metadata["turing_binding"] = dict(
+                role="write", directory=directory, target=target,
+                run_id=run_id, revision=revision,
                 prefix=node.get("inputs", {}).get("prefix", kind),
             )
-            class_type = "_TuringMaterialWrite" + kind.title()
-        else:
-            class_type = node["class_type"]
-            if class_type == "TuringUtilsMultimodalPromptChat":
-                class_type = "_TuringCanvasChat"
-                inputs["directory"] = directory
+        elif node["class_type"] == "TuringUtilsMultimodalPromptChat":
+            metadata["turing_binding"] = dict(role="chat", directory=directory, run_id=run_id)
         compiled[key] = {
-            "class_type": class_type,
+            "class_type": node["class_type"],
             "inputs": inputs,
-            "_meta": {
-                **copy.deepcopy(node.get("_meta", {})),
-                "turing_material_fresh": destination or key not in preparation,
-            },
+            "_meta": metadata,
         }
         return key
 

@@ -15,6 +15,85 @@ from ..adapters.minimax.latent_upscaler import (
 H3LatentUpscaleModel = io.Custom("TURING_UTILS_H3_LATENT_UPSCALE_MODEL")
 
 
+def _loader_schema():
+    return io.Schema(
+        node_id="_TuringUtilsH3UpscaleLoader",
+        display_name="H3 Upscale Loader (Internal)",
+        is_dev_only=True,
+        category="",
+        description=INTERNAL_NODE_NOTE
+        + (
+            "Load an attention-free 3D MiniMax H3 latent upscaler from "
+            "models/latent_upscale_models with ComfyUI-managed VRAM offloading."
+        ),
+        inputs=[
+            io.Combo.Input(
+                "model_name",
+                options=folder_paths.get_filename_list("latent_upscale_models"),
+            ),
+            io.Combo.Input(
+                "precision",
+                options=["auto", "fp16", "bf16", "fp32"],
+                default="auto",
+                tooltip=(
+                    "Auto selects the efficient native compute type for the current device. "
+                    "FP16 is normally preferred on Turing."
+                ),
+            ),
+        ],
+        outputs=[H3LatentUpscaleModel.Output(display_name="upscale_model")],
+    )
+
+
+def _apply_schema():
+    return io.Schema(
+        node_id="_TuringUtilsH3UpscaleApply",
+        is_dev_only=True,
+        display_name="MiniMax H3 Latent Upscale Apply (Internal)",
+        category="",
+        description=INTERNAL_NODE_NOTE
+        + (
+            "Learned spatial pixel-count upscale for MiniMax H3 AV latents. The video stream and "
+            "optional FL2AV keyframe latents are enlarged together; audio and Ref2AV "
+            "references remain unchanged. Video noise_mask uses conservative spatial maximum "
+            "coverage; time and audio masks are preserved."
+        ),
+        inputs=[
+            H3LatentUpscaleModel.Input("upscale_model"),
+            io.Latent.Input("latent"),
+            io.Conditioning.Input(
+                "conditioning",
+                optional=True,
+                tooltip="Optional FL2AV conditioning whose first/last keyframe latents should follow the same spatial upscale.",
+            ),
+            io.Float.Input(
+                "scale",
+                default=2.0,
+                min=1.0,
+                max=16.0,
+                step=0.1,
+                tooltip=(
+                    "Total spatial pixel/token multiplier. For example, 2.0 scales H/W "
+                    "by sqrt(2), while 4.0 scales H/W by 2. Time and audio are preserved. "
+                    "Output H/W are rounded up to H3's 2x2 latent patch grid."
+                ),
+            ),
+        ],
+        outputs=[
+            io.Latent.Output(display_name="latent"),
+            io.Conditioning.Output(display_name="conditioning"),
+            io.Int.Output(
+                "width",
+                tooltip="Aligned pixel width produced by the upscaled H3 video latent.",
+            ),
+            io.Int.Output(
+                "height",
+                tooltip="Aligned pixel height produced by the upscaled H3 video latent.",
+            ),
+        ],
+    )
+
+
 class H3AddNoise(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -59,33 +138,7 @@ class H3AddNoise(io.ComfyNode):
 class _H3UpscaleLoader(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        return io.Schema(
-            node_id="_TuringUtilsH3UpscaleLoader",
-            display_name="H3 Upscale Loader (Internal)",
-            is_dev_only=True,
-            category="",
-            description=INTERNAL_NODE_NOTE
-            + (
-                "Load an attention-free 3D MiniMax H3 latent upscaler from "
-                "models/latent_upscale_models with ComfyUI-managed VRAM offloading."
-            ),
-            inputs=[
-                io.Combo.Input(
-                    "model_name",
-                    options=folder_paths.get_filename_list("latent_upscale_models"),
-                ),
-                io.Combo.Input(
-                    "precision",
-                    options=["auto", "fp16", "bf16", "fp32"],
-                    default="auto",
-                    tooltip=(
-                        "Auto selects the efficient native compute type for the current device. "
-                        "FP16 is normally preferred on Turing."
-                    ),
-                ),
-            ],
-            outputs=[H3LatentUpscaleModel.Output(display_name="upscale_model")],
-        )
+        return _loader_schema()
 
     @classmethod
     def execute(cls, model_name: str, precision: str) -> io.NodeOutput:
@@ -95,52 +148,7 @@ class _H3UpscaleLoader(io.ComfyNode):
 class _H3UpscaleApply(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        return io.Schema(
-            node_id="_TuringUtilsH3UpscaleApply",
-            is_dev_only=True,
-            display_name="MiniMax H3 Latent Upscale Apply (Internal)",
-            category="",
-            description=INTERNAL_NODE_NOTE
-            + (
-                "Learned spatial pixel-count upscale for MiniMax H3 AV latents. The video stream and "
-                "optional FL2AV keyframe latents are enlarged together; audio and Ref2AV "
-                "references remain unchanged. Video noise_mask uses conservative spatial maximum "
-                "coverage; time and audio masks are preserved."
-            ),
-            inputs=[
-                H3LatentUpscaleModel.Input("upscale_model"),
-                io.Latent.Input("latent"),
-                io.Conditioning.Input(
-                    "conditioning",
-                    optional=True,
-                    tooltip="Optional FL2AV conditioning whose first/last keyframe latents should follow the same spatial upscale.",
-                ),
-                io.Float.Input(
-                    "scale",
-                    default=2.0,
-                    min=1.0,
-                    max=16.0,
-                    step=0.1,
-                    tooltip=(
-                        "Total spatial pixel/token multiplier. For example, 2.0 scales H/W "
-                        "by sqrt(2), while 4.0 scales H/W by 2. Time and audio are preserved. "
-                        "Output H/W are rounded up to H3's 2x2 latent patch grid."
-                    ),
-                ),
-            ],
-            outputs=[
-                io.Latent.Output(display_name="latent"),
-                io.Conditioning.Output(display_name="conditioning"),
-                io.Int.Output(
-                    "width",
-                    tooltip="Aligned pixel width produced by the upscaled H3 video latent.",
-                ),
-                io.Int.Output(
-                    "height",
-                    tooltip="Aligned pixel height produced by the upscaled H3 video latent.",
-                ),
-            ],
-        )
+        return _apply_schema()
 
     @classmethod
     def execute(
@@ -158,19 +166,19 @@ class _H3UpscaleApply(io.ComfyNode):
 class MiniMaxH3LatentUpscale(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        schema = _H3UpscaleApply.define_schema()
+        schema = _apply_schema()
         schema.node_id = "TuringUtilsMiniMaxH3LatentUpscale"
         schema.display_name = "MiniMax H3 Latent Upscale"
         schema.is_dev_only = False
         schema.description = schema.description.removeprefix(INTERNAL_NODE_NOTE)
         schema.category = "Turing Utils/MiniMax H3"
-        schema.inputs = _H3UpscaleLoader.define_schema().inputs + schema.inputs[1:]
+        schema.inputs = _loader_schema().inputs + schema.inputs[1:]
         return schema
 
     @classmethod
     def execute(
         cls, model_name, latent, precision="auto", conditioning=None, scale=2.0
     ):
-        return _H3UpscaleApply.execute(
+        return io.NodeOutput(*upscale_h3_latent(
             load_h3_latent_upscaler(model_name, precision), latent, conditioning, scale
-        )
+        ))

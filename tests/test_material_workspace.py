@@ -1,4 +1,5 @@
 import asyncio
+from functools import partial
 import copy
 import json
 from pathlib import Path
@@ -20,7 +21,9 @@ from comfy_extras.nodes_qwen import TextEncodeQwenImage21
 from execution import validate_prompt, _async_map_node_over_list
 from comfyui_turing_utils.workspace.compiler import compile_segment, material_order
 from comfyui_turing_utils.workspace.tasks import compile_task, plan_card
-from comfyui_turing_utils.workspace.nodes import PUBLIC_NODES, INTERNAL_NODES
+from comfyui_turing_utils.workspace.nodes import PUBLIC_NODES
+from comfyui_turing_utils.workspace.material_execution import read_material, publish_material
+from comfyui_turing_utils.runtime.node_context import binding_for
 from comfyui_turing_utils.workspace.materials import material_path, read_selected
 from comfyui_turing_utils.workspace.directories import (
     list_directory,
@@ -36,6 +39,7 @@ from comfyui_turing_utils.workspace.endpoints import (
 from comfyui_turing_utils.workspace.cards import describe, flatten
 from comfyui_turing_utils.workspace.editor import select_material
 from comfyui_turing_utils.workspace import workflow_files, projection, workflow_state
+from comfyui_turing_utils.workspace import material_execution
 from comfyui_turing_utils.workspace.parameters import validate_parameter
 from comfyui_turing_utils.workspace.templates import (
     material_template,
@@ -432,7 +436,7 @@ class WorkspaceTest(unittest.TestCase):
         self.project.select(upstream, {"text": "ready"})
         result = compile_task(self.project, target, revision)
         self.assertEqual(
-            result["prompt"][upstream]["class_type"], "_TuringMaterialReadText"
+            result["prompt"][upstream]["class_type"], "TuringMaterialText"
         )
         self.assertNotIn(identity + ":node:5", result["prompt"])
 
@@ -787,7 +791,7 @@ class WorkspaceTest(unittest.TestCase):
     def test_audio_crop_keeps_duration_and_empty_intervals_fail(self):
         value = {"waveform": torch.ones(1, 2, 44100), "sample_rate": 44100}
         run = self.project.begin_run("audio", 0)
-        asset = INTERNAL_NODES["_TuringMaterialWriteAudio"]().write(
+        asset = publish_material("audio",
             "test", "audio", run, 0, "audio", value
         )["result"][0]
         cropped = read_selected("audio", "test", asset, 0.2, 0.5)[0]
@@ -1047,7 +1051,7 @@ class WorkspaceTest(unittest.TestCase):
         images = torch.stack(
             [torch.full((8, 12, 4), value) for value in (0.2, 0.6, 0.9)]
         )
-        result = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+        result = publish_material("image",
             "test", target, run, 0, "batch", images
         )
         history = self.project.history("image", limit=0)
@@ -1059,9 +1063,9 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(tuple(value.shape), (1, 8, 12, 4))
         self.assertAlmostEqual(float(value[0, 0, 0, 0]), 0.2, places=2)
         self.project.select(target, {"asset": history[2]["id"]})
-        reader = INTERNAL_NODES["_TuringMaterialReadImage"]()
+        reader = partial(read_material, "image")
         self.assertGreater(
-            float(reader.read(directory="test", target=target)[0][0, 0, 0, 0]), 0.85
+            float(reader(directory="test", target=target)[0][0, 0, 0, 0]), 0.85
         )
 
     def test_trim_persists_and_does_not_block_a_new_publication(self):
@@ -1071,9 +1075,9 @@ class WorkspaceTest(unittest.TestCase):
         )
         target = identity + ":" + graph["3"]["inputs"]["stub_id"]
         audio = {"waveform": torch.zeros(1, 2, 44100), "sample_rate": 44100}
-        writer = INTERNAL_NODES["_TuringMaterialWriteAudio"]()
+        writer = partial(publish_material, "audio")
         run = self.project.begin_run(target, 0)
-        writer.write("test", target, run, 0, "audio", audio)
+        writer("test", target, run, 0, "audio", audio)
         source = self.project.selection(target)
         original = self.project.path(source["asset"]).read_bytes()
         run = self.project.begin_run(target, 1)
@@ -1084,12 +1088,12 @@ class WorkspaceTest(unittest.TestCase):
             {"start": 0.25, "end": 0.5},
             source["revision"],
         )
-        reader = INTERNAL_NODES["_TuringMaterialReadAudio"]()
-        value = reader.read(directory="test", target=target, start=0, end=0)[0]
+        reader = partial(read_material, "audio")
+        value = reader(directory="test", target=target, start=0, end=0)[0]
         self.assertEqual(value["waveform"].shape[-1], 11025)
         self.assertEqual(self.project.path(source["asset"]).read_bytes(), original)
         self.assertTrue(
-            writer.write("test", target, run, 1, "audio", audio)["ui"]["material"][0][
+            writer("test", target, run, 1, "audio", audio)["ui"]["material"][0][
                 "selected"
             ]
         )
@@ -1478,7 +1482,7 @@ class WorkspaceTest(unittest.TestCase):
         torch.testing.assert_close(loaded.cpu().float(), image, atol=1 / 255, rtol=0)
 
         run = self.project.begin_run("rgba", 0)
-        asset = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+        asset = publish_material("image",
             "test", "rgba", run, 0, "rgba", image
         )["result"][0]
         selected = read_selected("image", "test", asset)[0]
@@ -1534,7 +1538,7 @@ class WorkspaceTest(unittest.TestCase):
                 image = torch.tensor([25, 51, 76, 64], dtype=torch.float32).div(255)
                 image = image.expand(1, height, width, 4).clone()
                 run = self.project.begin_run("reference", 0)
-                asset = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+                asset = publish_material("image",
                     "test", "reference", run, 0, "reference", image
                 )["result"][0]
                 reference = read_selected("image", "test", asset)[0]
@@ -1560,7 +1564,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def test_project_media_write_and_statistics(self):
         run = self.project.begin_run("image", 0)
-        result = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+        result = publish_material("image",
             "test", "image", run, 0, "portrait", torch.ones(1, 16, 32, 3)
         )
         asset = result["result"][0]
@@ -1574,11 +1578,93 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(stats["materials"]["text"], 0)
         self.assertGreater(stats["bytes"], 0)
         self.assertEqual(
-            INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+            publish_material("image",
                 "test", "image", run, 0, "portrait", torch.ones(1, 16, 32, 3)
             )["result"][0],
             asset,
         )
+
+    def test_bound_public_media_outputs_keep_native_types_and_encode_once(self):
+        class Server:
+            client_id = None
+            last_node_id = None
+
+            def send_sync(self, *args):
+                pass
+
+        install_task_cleanup()
+        images = torch.ones(3, 32, 32, 3)
+        audio = {"waveform": torch.zeros(1, 2, 6000), "sample_rate": 48000}
+        for kind, value, source_type, name in (
+            ("text", "bound", "STRING", "text"),
+            ("image", images[:1], "IMAGE", "value"),
+            ("audio", audio, "AUDIO", "value"),
+            ("video", images, "IMAGE", "images"),
+        ):
+            with self.subTest(kind=kind):
+                workflow, graph = material_template((kind,))
+                graph["source"] = {"class_type": "BoundSource", "inputs": {}}
+                graph["3"]["inputs"][name] = ["source", 0]
+                if kind == "video":
+                    graph["3"]["inputs"].update(fps=24, audio=["source", 1])
+                card = workflow_files.add_instance(
+                    self.project.root, workflow_files.pack(workflow, graph), kind
+                )
+                target = card + ":" + graph["3"]["inputs"]["stub_id"]
+                prepared = compile_task(self.project, target, self.project.document()["revision"])
+                prompt = prepared["prompt"]
+                prompt["inspect"] = {
+                    "class_type": "BoundInspect", "inputs": {"value": [target, 0]},
+                }
+                received = []
+
+                class Source:
+                    FUNCTION = "read"
+                    RETURN_TYPES = (source_type, "AUDIO") if kind == "video" else (source_type,)
+
+                    @classmethod
+                    def INPUT_TYPES(cls):
+                        return {"required": {}}
+
+                    def read(self):
+                        return (value, audio) if kind == "video" else (value,)
+
+                class Inspect:
+                    FUNCTION = "read"
+                    RETURN_TYPES = ("STRING",)
+                    OUTPUT_NODE = True
+
+                    @classmethod
+                    def INPUT_TYPES(cls):
+                        return {"required": {"value": ("VIDEO" if kind == "video" else source_type,)}}
+
+                    def read(self, value):
+                        if kind == "video":
+                            parts = value.get_components()
+                            self_case.assertEqual(tuple(parts.images.shape), tuple(images.shape))
+                            self_case.assertEqual(float(parts.frame_rate), 24)
+                            self_case.assertIsNotNone(parts.audio)
+                        elif kind == "image":
+                            self_case.assertEqual(tuple(value.shape), (1, 32, 32, 3))
+                        elif kind == "audio":
+                            self_case.assertEqual(value["sample_rate"], 48000)
+                        else:
+                            self_case.assertEqual(value, "bound")
+                        received.append(kind)
+                        return ("ok",)
+
+                self_case = self
+                with mock.patch.dict(nodes.NODE_CLASS_MAPPINGS, {"BoundSource": Source, "BoundInspect": Inspect}), mock.patch.object(
+                    material_execution, "create_video", wraps=material_execution.create_video
+                ) as encode:
+                    valid = asyncio.run(validate_prompt("media", prompt, ["inspect"]))
+                    self.assertTrue(valid[0], valid)
+                    executor = execution.PromptExecutor(Server(), cache_args={"ram": 0, "ram_inactive": 0})
+                    executor.execute(prompt, "media", {}, ["inspect"])
+                    self.assertTrue(executor.success, executor.status_messages)
+                    self.assertEqual(encode.call_count, int(kind == "video"))
+                self.assertEqual(received, [kind])
+                self.assertEqual(self.project.run(prepared["run_id"])["status"], "success")
 
     def test_project_settings_pixel_limit_and_conflict(self):
         self.assertEqual(self.project.settings()["max_megapixels"], 4.0)
@@ -1594,7 +1680,7 @@ class WorkspaceTest(unittest.TestCase):
                     {"name": "Scene", "max_megapixels": pixels}, 1
                 )
         run = self.project.begin_run("image", 0)
-        asset = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+        asset = publish_material("image",
             "test", "image", run, 0, "image", torch.ones(1, 64, 64, 3)
         )["result"][0]
         value = read_selected("image", "test", asset)[0]
@@ -1622,7 +1708,7 @@ class WorkspaceTest(unittest.TestCase):
         images = torch.ones(3, 50, 100, 3)
         audio = {"waveform": torch.zeros(1, 2, 4410), "sample_rate": 44100}
         run = self.project.begin_run("video", 0)
-        asset = INTERNAL_NODES["_TuringMaterialWriteVideo"]().write(
+        asset = publish_material("video",
             "test", "video", run, 0, "video", images, audio=audio, fps=29.97
         )["result"][0]
         self.project.save_settings(
@@ -1670,7 +1756,6 @@ class WorkspaceTest(unittest.TestCase):
             nodes.NODE_CLASS_MAPPINGS,
             {
                 **PUBLIC_NODES,
-                **INTERNAL_NODES,
                 "WorkspaceTest": AddText,
                 "WorkspaceTestV3": AddTextV3,
                 "WorkspaceSeedText": SeedText,
@@ -1774,9 +1859,11 @@ class WorkspaceTest(unittest.TestCase):
         before = copy.deepcopy(self.prompt)
         compiled = self.compile()
         self.assertNotIn("0", compiled)
-        self.assertEqual(compiled["1"]["class_type"], "_TuringMaterialReadText")
+        self.assertEqual(compiled["1"]["class_type"], "TuringMaterialText")
+        self.assertEqual(binding_for(compiled["1"])["role"], "read")
         self.assertEqual(self.prompt, before)
-        self.assertEqual(compiled["3"]["class_type"], "_TuringMaterialWriteText")
+        self.assertEqual(compiled["3"]["class_type"], "TuringMaterialText")
+        self.assertEqual(binding_for(compiled["3"])["role"], "write")
 
     def test_feedback_reads_previous_material(self):
         self.project.select("3", {"text": "hello"})
@@ -1784,7 +1871,7 @@ class WorkspaceTest(unittest.TestCase):
         compiled = self.compile()
         source = compiled["2"]["inputs"]["text"][0]
         self.assertNotEqual(source, "3")
-        self.assertEqual(compiled[source]["class_type"], "_TuringMaterialReadText")
+        self.assertEqual(compiled[source]["class_type"], "TuringMaterialText")
 
     def test_connected_model_configuration_stays_cacheable(self):
         self.prompt["model"] = {
@@ -1856,7 +1943,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def test_text_writer(self):
         run = self.project.begin_run("3", 0)
-        result = INTERNAL_NODES["_TuringMaterialWriteText"]().write(
+        result = publish_material("text",
             "test", "3", run, 0, "prompt", "new"
         )
         self.assertTrue(result["ui"]["material"][0]["selected"])

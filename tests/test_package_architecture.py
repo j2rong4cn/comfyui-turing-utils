@@ -257,15 +257,6 @@ class PackageArchitectureTest(unittest.TestCase):
                 "TuringMaterialAudio",
                 "TuringCanvasInputs",
                 "TuringCanvasOutputs",
-                "_TuringCanvasChat",
-                "_TuringMaterialReadText",
-                "_TuringMaterialWriteText",
-                "_TuringMaterialReadImage",
-                "_TuringMaterialWriteImage",
-                "_TuringMaterialReadVideo",
-                "_TuringMaterialWriteVideo",
-                "_TuringMaterialReadAudio",
-                "_TuringMaterialWriteAudio",
             ),
         )
 

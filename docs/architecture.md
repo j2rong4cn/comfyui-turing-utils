@@ -197,6 +197,7 @@ from the node module that happens to consume them.
 | `cache.py` | task-scoped intermediate eviction; preserves native node identity and model preparation |
 | `store.py`, `runs.py` | media index, selection revisions and recoverable publication |
 | `materials.py` | native media loading, import copying, serialization and selected-content decoding |
+| `material_execution.py` | selected-content reads and revision-checked publication, without node schemas |
 | `previews.py` | lazy still posters with bounded concurrent decoding and request deduplication |
 | `directories.py`, `routes.py` | instance-owned filesystem operations and HTTP adapters respectively |
 | `web/workspace/project_state.js` | per-project save queue and request-local native graph snapshots |
@@ -255,6 +256,16 @@ global cache clearing into media, UI or model services.
 Ordinary `class_type` values remain unchanged. Stage Barrier and shared-loader
 transforms run before the material cut; only task-owned intermediates bypass
 local/external cache reuse. Ordinary workflow provider behavior is unchanged.
+Canvas material and Chat nodes keep their public types, inputs and outputs.
+Request-local bindings in the compiled prompt carry roles and project identity;
+native node fingerprints include these bindings so dependency resume also
+invalidates blocked model preparation. `runtime/node_context.py` scopes binding
+lookup to the native prompt/node identity and shares only its ContextVar across
+plugin import aliases. It owns no persistent tensor/model cache. Chat request
+options resolve project credentials at execution time without serializing keys.
+Nine former Canvas adapter types are no longer registered. Saved public
+workflows remain compatible; old captured execution prompts containing private
+adapter types must be regenerated from their saved workflows before replay.
 Within a logical task only, completed branch frontiers survive a missing-material
 retry. Consumed ancestors are released; blocked results are never reused. The
 service closes this continuation on success, error or cancellation. The installed

@@ -21,7 +21,9 @@ from comfyui_turing_utils.prompt.chat import SameOriginRedirect
 from comfyui_turing_utils.workspace.chat import resolve_chat
 from comfyui_turing_utils.workspace.compiler import compile_segment
 from comfyui_turing_utils.workspace.endpoints import parse_ports
-from comfyui_turing_utils.workspace.nodes import CanvasChat
+from comfyui_turing_utils.runtime.node_context import execution_scope
+from comfyui_turing_utils.workspace.cache import resolve_options
+from comfy_execution.utils import CurrentNodeContext
 from comfyui_turing_utils.workspace.store import Project
 from comfyui_turing_utils.workspace.templates import export_card, material_template
 from comfyui_turing_utils.workspace import workflow_files
@@ -171,19 +173,26 @@ class CanvasConfigurationTest(unittest.TestCase):
         settings = self.project.settings()
         settings["chat"].update(base_url="http://global.example", model="global", api_key="secret")
         self.project.save_settings(settings, self.project.document()["revision"])
-        with mock.patch.object(MultimodalPromptChat, "execute", new_callable=mock.AsyncMock) as execute:
-            asyncio.run(CanvasChat.execute(directory="project", base_url="", model="", api_key="", prompt="hello"))
-            self.assertEqual(execute.call_args.kwargs["api_key"], "secret")
-            self.assertEqual(execute.call_args.kwargs["model"], "global")
-            asyncio.run(CanvasChat.execute(directory="project", base_url="http://other.example", model="", api_key="", prompt="hello"))
-            self.assertEqual(execute.call_args.kwargs["api_key"], "")
         graph = {
             "chat": dict(class_type="TuringUtilsMultimodalPromptChat", inputs=dict(base_url="", model="", api_key="", prompt="hello")),
             "target": dict(class_type="TuringMaterialText", inputs={"text": ["chat", 0]}),
         }
         compiled = compile_segment(graph, "target", {}, "project", "run", 0)
-        self.assertEqual(compiled["chat"]["class_type"], "_TuringCanvasChat")
+        self.assertEqual(compiled["chat"]["class_type"], "TuringUtilsMultimodalPromptChat")
         self.assertNotIn("secret", json.dumps(compiled))
+        response = {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
+        async def invoke(url):
+            with execution_scope("test", compiled, resolve_options), CurrentNodeContext("test", "chat"):
+                return await MultimodalPromptChat.execute(
+                    base_url=url, model="", api_key="", prompt="hello", system_prompt="system",
+                )
+        with mock.patch("comfyui_turing_utils.nodes.multimodal_chat.request_chat_completion", return_value=response) as request:
+            asyncio.run(invoke(""))
+            self.assertEqual(request.call_args.args[1], "secret")
+            self.assertEqual(request.call_args.args[2]["model"], "global")
+            asyncio.run(invoke("http://other.example"))
+            self.assertEqual(request.call_args.args[1], "not-needed")
+
         self.assertEqual(graph["chat"]["class_type"], "TuringUtilsMultimodalPromptChat")
 
     def test_canvas_hidden_parameter_keeps_identity_value_and_execution(self):
@@ -241,7 +250,7 @@ class CanvasConfigurationTest(unittest.TestCase):
         settings["chat"].update(base_url="http://global.example", model="global", api_key="secret")
         self.project.save_settings(settings, self.project.document()["revision"])
         inputs = dict(
-            directory="project", prompt="hello", system_prompt="system",
+            prompt="hello", system_prompt="system",
             base_url="", model="", api_key="", cache_buster=0, thinking=False,
         )
         response = {
@@ -249,11 +258,13 @@ class CanvasConfigurationTest(unittest.TestCase):
         }
 
         async def invoke():
-            pending = await _async_map_node_over_list(
-                "canvas", "chat", CanvasChat,
-                {name: [value] for name, value in inputs.items()}, CanvasChat.FUNCTION,
-            )
-            return await pending[0]
+            graph = {"chat": {"_meta": {"turing_binding": {"role": "chat", "directory": "project"}}}}
+            with execution_scope("canvas", graph, resolve_options):
+                pending = await _async_map_node_over_list(
+                    "canvas", "chat", MultimodalPromptChat,
+                    {name: [value] for name, value in inputs.items()}, MultimodalPromptChat.FUNCTION,
+                )
+                return await pending[0]
 
         with mock.patch(
             "comfyui_turing_utils.nodes.multimodal_chat.request_chat_completion",

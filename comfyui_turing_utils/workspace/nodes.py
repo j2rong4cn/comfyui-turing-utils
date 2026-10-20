@@ -1,23 +1,16 @@
-"""Material boundaries and private execution adapters using normal ComfyUI nodes."""
+"""Public material boundaries for ordinary workflows and bound Canvas tasks."""
 
 from pathlib import Path
-import json
 import folder_paths
-from comfy_api.latest import Types, io
-from comfy_execution.graph import ExecutionBlocker
+from comfy_api.latest import Types, InputImpl
 from .store import Project
 from .endpoints import ENDPOINT_NODES, POSITION
-from ..nodes import INTERNAL_NODE_NOTE
-from ..nodes.multimodal_chat import MultimodalPromptChat
-from .chat import resolve_chat, chat_settings
 from .protocol import MATERIAL_TYPES
+from ..runtime.node_context import current_binding
+from .material_execution import read_material, publish_material
 from .materials import (
-    create_video,
     resolve_material,
     material_path,
-    read_selected,
-    save_media,
-    save_images,
 )
 
 
@@ -100,7 +93,19 @@ class Material:
         ]
 
     @classmethod
+    def VALIDATE_INPUTS(cls, file="", audio=None):
+        # Remote upload combos have no static options. An empty file is valid
+        # when a computation input or an execution binding provides the value.
+        selected = audio if cls.KIND == "audio" else file
+        if isinstance(selected, str) and selected:
+            return True if material_path(selected).is_file() else "Material file does not exist"
+        return True
+
+    @classmethod
     def IS_CHANGED(cls, file="", **kwargs):
+        binding = current_binding()
+        if binding:
+            return binding
         if cls.KIND == "audio":
             file = kwargs.get("audio", "")
         if file and kwargs.get("value") is None and kwargs.get("images") is None:
@@ -109,6 +114,25 @@ class Material:
         return None
 
     def read(self, file="", **kwargs):
+        binding = current_binding()
+        if binding:
+            settings = {k: v for k, v in binding.items() if k != "role"}
+            if binding["role"] == "read":
+                return read_material(self.KIND, **settings)
+            value_name = "text" if self.KIND == "text" else "images" if self.KIND == "video" else "value"
+            value = kwargs.get(value_name)
+            result = publish_material(
+                self.KIND, **settings, value=value,
+                **{
+                    name: kwargs[name]
+                    for name in ("audio", "fps", "bit_depth", "color_space", "codec")
+                    if name in kwargs and (name != "audio" or self.KIND == "video")
+                },
+            )
+            if self.KIND == "video":
+                path = Project(settings["directory"]).path(result["result"][0])
+                value = InputImpl.VideoFromFile(str(path))
+            return {"ui": result["ui"], "result": (value,)}
         if self.KIND == "text":
             text = kwargs.get("text", "")
             return {"ui": {"material_text": [text]}, "result": (text,)}
@@ -131,230 +155,10 @@ class Material:
         return {"ui": data, "result": (value,)}
 
 
-class Read:
-    FUNCTION = "read"
-    CATEGORY = ""
-    DEV_ONLY = True
-    DESCRIPTION = INTERNAL_NODE_NOTE
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        if cls.KIND == "text":
-            return {
-                "required": {"text": ("STRING",), "run_id": ("STRING",)},
-                "optional": {
-                    "directory": ("STRING",),
-                    "target": ("STRING",),
-                    "source_state": (["current", "saved", "waiting", "resumed"],),
-                },
-            }
-        return {
-            "required": {
-                "directory": ("STRING",),
-                "asset": ("STRING",),
-                "run_id": ("STRING",),
-                "start": ("FLOAT",),
-                "end": ("FLOAT",),
-            },
-            "optional": {
-                "target": ("STRING",),
-                "max_megapixels": ("FLOAT",),
-                "source_state": (["current", "saved", "waiting", "resumed"],),
-            },
-        }
-
-    def read(
-        self,
-        directory="",
-        asset="",
-        run_id="",
-        start=0,
-        end=0,
-        text="",
-        target="",
-        max_megapixels=None,
-        source_state="current",
-    ):
-        if target:
-            project = Project(directory)
-            selected = {} if source_state == "waiting" else project.selection(target)
-            text, asset = selected.get("text", ""), selected.get("asset", "")
-            start, end = selected.get("start", 0), selected.get("end", 0)
-            if not (text if self.KIND == "text" else asset):
-                if source_state == "saved":
-                    raise ValueError(
-                        f"素材 {target} 没有当前内容；请先运行或上传，或开启随依赖执行"
-                    )
-                # Resolve only when this branch actually executes. Successful
-                # reads are retained by the logical task's continuation, while
-                # empty/waiting reads stay unresolved until its dependency ends.
-                project.wait_for_material(run_id, target)
-                return (ExecutionBlocker(None),)
-        if self.KIND == "text":
-            return (text,)
-        return read_selected(self.KIND, directory, asset, start, end, max_megapixels)
-
-
-class Write:
-    FUNCTION = "write"
-    OUTPUT_NODE = True
-    RETURN_TYPES = ("STRING",)
-    CATEGORY = ""
-    DEV_ONLY = True
-    DESCRIPTION = INTERNAL_NODE_NOTE
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "directory": ("STRING",),
-                "target": ("STRING",),
-                "run_id": ("STRING",),
-                "revision": ("INT",),
-                "prefix": ("STRING",),
-                "value": (cls.VALUE_TYPE,),
-            },
-            "optional": {
-                "audio": ("AUDIO",),
-                "fps": ("FLOAT", {"default": 30}),
-                "bit_depth": (["auto", 8, 10],),
-                "color_space": (["sRGB", "HDR", "HDR PQ"],),
-                "codec": (["none", *Types.VideoCodec.as_input()],),
-                "configuration": ("STRING", {"default": ""}),
-            },
-        }
-
-    def write(
-        self,
-        directory,
-        target,
-        run_id,
-        revision,
-        prefix,
-        value,
-        audio=None,
-        fps=30,
-        bit_depth="auto",
-        color_space="sRGB",
-        codec="h264",
-        configuration="",
-    ):
-        project = Project(directory)
-        run = project.run(run_id)
-        if run["target"] != target or run["revision"] != revision:
-            raise ValueError("Execution destination mismatch")
-        if run["status"] == "success":
-            return {"ui": {"material": [run]}, "result": (run["asset"] or "",)}
-        parameters = json.loads(configuration) if configuration else None
-        if self.KIND == "text":
-            selected = project.finish_run(
-                run_id,
-                text=value,
-                configuration=parameters,
-            )
-            return {
-                "ui": {
-                    "material": [
-                        {"target": target, "selected": selected, "run_id": run_id}
-                    ]
-                },
-                "result": (value,),
-            }
-        else:
-            extension = {"image": ".png", "video": ".mp4", "audio": ".wav"}[self.KIND]
-            asset, path = project.reserve(self.KIND, extension, prefix)
-            if self.KIND == "video":
-                value = create_video(value, fps, audio, bit_depth, color_space, codec)
-            if self.KIND == "image":
-                path.parent.mkdir(parents=True, exist_ok=True)
-                saved = save_images(value, path)
-                project.register_many(
-                    "image",
-                    [
-                        (
-                            image_path.relative_to(project.root).as_posix(),
-                            {
-                                **metadata,
-                                **(
-                                    {"parameters": parameters}
-                                    if parameters is not None
-                                    else {}
-                                ),
-                            },
-                        )
-                        for image_path, metadata in saved
-                    ],
-                )
-                asset = saved[0][0].relative_to(project.root).as_posix()
-            else:
-                metadata = save_media(self.KIND, value, path, codec)
-                project.register(
-                    asset,
-                    self.KIND,
-                    {
-                        **metadata,
-                        **(
-                            {"parameters": parameters} if parameters is not None else {}
-                        ),
-                    },
-                )
-        selected = project.finish_run(run_id, asset)
-        return {
-            "ui": {
-                "material": [
-                    {
-                        "target": target,
-                        "asset": asset,
-                        "selected": selected,
-                        "run_id": run_id,
-                    }
-                ]
-            },
-            "result": (asset,),
-        }
-
-
-PUBLIC_NODES = {}
-
-
-class CanvasChat(MultimodalPromptChat):
-    @classmethod
-    def define_schema(cls):
-        schema = MultimodalPromptChat.define_schema()
-        schema.node_id = "_TuringCanvasChat"
-        schema.display_name = "Canvas Chat (Internal)"
-        schema.category = ""
-        schema.description = INTERNAL_NODE_NOTE
-        schema.is_dev_only = True
-        schema.search_aliases = []
-        schema.inputs.append(io.String.Input("directory"))
-        return schema
-
-    @classmethod
-    async def execute(cls, directory, **inputs):
-        # Only a project reference enters native queue/history. Global secrets
-        # stay in the private project file and are read at the request boundary.
-        settings = Project(directory).settings(private=True)
-        inputs.update(resolve_chat(inputs, chat_settings(settings.get("chat", {}))))
-        return await MultimodalPromptChat.execute(**inputs)
-
-
-INTERNAL_NODES = {"_TuringCanvasChat": CanvasChat}
-
-
-for _kind, _returns in MATERIAL_TYPES.items():
-    _suffix = _kind.title()
-    PUBLIC_NODES["TuringMaterial" + _suffix] = type(
-        "Material" + _suffix, (Material,), {"KIND": _kind, "RETURN_TYPES": _returns}
+PUBLIC_NODES = {
+    "TuringMaterial" + kind.title(): type(
+        "Material" + kind.title(), (Material,), {"KIND": kind, "RETURN_TYPES": returns}
     )
-    INTERNAL_NODES["_TuringMaterialRead" + _suffix] = type(
-        "Read" + _suffix, (Read,), {"KIND": _kind, "RETURN_TYPES": _returns}
-    )
-    INTERNAL_NODES["_TuringMaterialWrite" + _suffix] = type(
-        "Write" + _suffix,
-        (Write,),
-        {"KIND": _kind, "VALUE_TYPE": "IMAGE" if _kind == "video" else _returns[0]},
-    )
-
-
+    for kind, returns in MATERIAL_TYPES.items()
+}
 PUBLIC_NODES.update(ENDPOINT_NODES)

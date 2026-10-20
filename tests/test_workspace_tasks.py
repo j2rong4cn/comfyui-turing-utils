@@ -25,7 +25,9 @@ from comfyui_turing_utils.nodes.logic import LazyIfElse, StageBarrier, StagePath
 from comfyui_turing_utils.workspace.cache import install_task_cleanup
 from comfyui_turing_utils.workspace.compiler import compile_segment
 from comfyui_turing_utils.workspace.execution import MaterialTasks
-from comfyui_turing_utils.workspace.nodes import PUBLIC_NODES, INTERNAL_NODES
+from comfyui_turing_utils.workspace.nodes import PUBLIC_NODES
+from comfyui_turing_utils.workspace.material_execution import publish_material
+from comfyui_turing_utils.runtime.node_context import binding_for
 from comfyui_turing_utils.workspace.store import Project
 from comfyui_turing_utils.workspace.templates import material_template
 from comfyui_turing_utils.workspace.tasks import compile_task
@@ -122,7 +124,6 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
             nodes.NODE_CLASS_MAPPINGS,
             {
                 **PUBLIC_NODES,
-                **INTERNAL_NODES,
                 "TaskText": Text,
                 "TaskJoin": LazyJoin,
                 "TaskSeed": SeedText,
@@ -589,11 +590,11 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
         targets = [card + ":" + prompt[str(i)]["inputs"]["stub_id"] for i in (3, 4)]
         original = torch.tensor([0.2, 0.4, 0.6, 0.8]).expand(1, 48, 80, 4).clone()
         run = self.project.begin_run(targets[1], 0)
-        older = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+        older = publish_material("image",
             "project", targets[1], run, 0, "older", original
         )["result"][0]
         run = self.project.begin_run(targets[1], 1)
-        newer = INTERNAL_NODES["_TuringMaterialWriteImage"]().write(
+        newer = publish_material("image",
             "project", targets[1], run, 1, "newer", torch.zeros(1, 16, 16, 3)
         )["result"][0]
         self.assertEqual(self.project.selections()[targets[1]]["asset"], newer)
@@ -601,7 +602,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
             "project", self.project.document()["revision"], target=targets[0]
         )
         submitted = await self.queued()
-        self.assertEqual(submitted[targets[1]]["inputs"]["asset"], "")
+        self.assertNotIn("asset", binding_for(submitted[targets[1]]))
         self.project.select(targets[1], {"asset": older})
         self.worker = asyncio.create_task(self.work())
         result = await self.finished(operation)

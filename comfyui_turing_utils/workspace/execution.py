@@ -13,6 +13,7 @@ from .tasks import compile_task, plan_card
 from .compiler import material_order
 from .cache import TaskContinuation
 from . import workflow_files
+from ..runtime.node_context import binding_for
 
 
 class MaterialInterrupted(ValueError):
@@ -204,9 +205,9 @@ class MaterialTasks:
         prompt = prepared["prompt"]
         run_id = prepared["run_id"]
         reads = [
-            node["inputs"]
+            binding_for(node)
             for node in prompt.values()
-            if node["class_type"].startswith("_TuringMaterialRead")
+            if (binding_for(node) or {}).get("role") == "read"
         ]
         pending_sources = dict(snapshot.get("pending_materials", {}))
         generated = snapshot.setdefault(
@@ -361,7 +362,7 @@ class MaterialTasks:
                         for part in binding["path"][:-1]:
                             parent = parent[part]
                         parent[binding["path"][-1]] = value
-            prepared["prompt"][prepared["target"]]["inputs"]["configuration"] = (
+            binding_for(prepared["prompt"][prepared["target"]])["configuration"] = (
                 json.dumps(parameters, ensure_ascii=False) if parameters else ""
             )
         native_id = str(uuid.uuid4())
