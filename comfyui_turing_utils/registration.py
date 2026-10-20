@@ -6,6 +6,7 @@ from .nodes.bernini import BerniniContextWindowsCore, BerniniInpaintCondition
 from .nodes.krea2 import Krea2IdentityEditConditioning
 from .nodes.latent import SetVideoLatentNoiseMask, VideoLatentCompositeMasked
 from .nodes.loaders import ConvRotCLIPLoader, ConvRotDiffusionModelLoader
+from .nodes.qwen_image21 import QwenImage21Optimize, QwenImage21Conditioning
 from .nodes.logic import IsInputPresent, LazyIfElse, StageBarrier, StagePath
 from .nodes.media import ResizeImageIfPresent, VideoMotionContactSheet
 from .nodes.sigmas import SigmasToString
@@ -57,6 +58,8 @@ NODE_CLASS_MAPPINGS = {
     "TuringUtilsAttentionStrategy": AttentionStrategy,
     "TuringUtilsConvRotDiffusionModelLoader": ConvRotDiffusionModelLoader,
     "TuringUtilsConvRotCLIPLoader": ConvRotCLIPLoader,
+    "TuringUtilsQwenImage21Optimize": QwenImage21Optimize,
+    "TuringUtilsQwenImage21Conditioning": QwenImage21Conditioning,
     "TuringUtilsSetVideoLatentNoiseMask": SetVideoLatentNoiseMask,
     "TuringUtilsVideoLatentCompositeMasked": VideoLatentCompositeMasked,
     "TuringUtilsBerniniContextWindowsCore": BerniniContextWindowsCore,
@@ -106,6 +109,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TuringUtilsAttentionStrategy": "Configure Attention Strategy",
     "TuringUtilsConvRotDiffusionModelLoader": "Load ConvRot DiT",
     "TuringUtilsConvRotCLIPLoader": "Load ConvRot CLIP",
+    "TuringUtilsQwenImage21Optimize": "Qwen Image 2.1 多图优化",
+    "TuringUtilsQwenImage21Conditioning": "Qwen Image 2.1 多图条件",
     "TuringUtilsSetVideoLatentNoiseMask": "Set Video Latent Noise Mask",
     "TuringUtilsVideoLatentCompositeMasked": "Video Latent Composite Masked",
     "TuringUtilsBerniniContextWindowsCore": "Bernini Context Windows",

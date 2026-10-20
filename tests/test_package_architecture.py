@@ -144,7 +144,7 @@ class PackageArchitectureTest(unittest.TestCase):
 
         bootstrap_builtin_integrations()
         bootstrap_builtin_integrations()
-        self.assertEqual(registered_model_adapters(), ("minimax_h3", "wan"))
+        self.assertEqual(registered_model_adapters(), ("minimax_h3", "wan", "qwen_image21"))
 
     def test_package_root_uses_explicit_bootstrap(self):
         source = (ROOT / "comfyui_turing_utils" / "__init__.py").read_text(
@@ -207,6 +207,8 @@ class PackageArchitectureTest(unittest.TestCase):
                 "TuringUtilsAttentionStrategy",
                 "TuringUtilsConvRotDiffusionModelLoader",
                 "TuringUtilsConvRotCLIPLoader",
+                "TuringUtilsQwenImage21Optimize",
+                "TuringUtilsQwenImage21Conditioning",
                 "TuringUtilsSetVideoLatentNoiseMask",
                 "TuringUtilsVideoLatentCompositeMasked",
                 "TuringUtilsBerniniContextWindowsCore",

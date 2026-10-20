@@ -82,7 +82,7 @@ class NodeConfigurationTest(unittest.TestCase):
                 self.assertEqual(len(category.split("/")), 2, name)
                 self.assertTrue(category.startswith("Turing Utils/"), name)
                 categories.add(category.split("/")[1])
-        self.assertEqual((public, internal), (46, 15))
+        self.assertEqual((public, internal), (48, 15))
         self.assertEqual(
             categories,
             {

@@ -27,6 +27,7 @@ def bootstrap_builtin_integrations() -> None:
         from .adapters.minimax.acceleration import install_minimax_attention_sites
         from .adapters.minimax.layout import ensure_minimax_attention_layout_provider
         from .adapters.registry import ModelAdapter, register_model_adapter
+        from .adapters.qwen_image21 import apply_qwen_image21_adapter
         from .adapters.wan import apply_wan_adapter, install_wan_attention_sites
         from .adapters.wan_layout import ensure_wan_attention_layout_provider
         from .attention.integration import register_attention_site_installer
@@ -43,6 +44,7 @@ def bootstrap_builtin_integrations() -> None:
         register_attention_site_installer(install_wan_attention_sites)
         register_model_adapter(ModelAdapter("minimax_h3", apply_minimax_adapter))
         register_model_adapter(ModelAdapter("wan", apply_wan_adapter))
+        register_model_adapter(ModelAdapter("qwen_image21", apply_qwen_image21_adapter))
         install_stage_barrier_scheduler()
         install_stage_barrier_prompt_compiler()
         install_shared_loader_compiler()

@@ -20,6 +20,7 @@ import comfy.utils
 
 from ..adapters.dynamic_vram import install_dynamic_vram_sample_fence
 from ..adapters.registry import apply_model_adapters
+from ..adapters.qwen_image21 import apply_qwen_image21_clip_adapter
 from ..adapters.minimax.nvfp4 import install_nvfp4_mlp_fusions
 from ..kernel_api import load_nvfp4_backend
 from ..quantization.nvfp4 import nvfp4_operations
@@ -313,6 +314,7 @@ def load_convrot_clip(
         loaded.w6a8,
     )
     install_clip_operator_scope(clip)
+    apply_qwen_image21_clip_adapter(clip)
     clip.patcher.cached_patcher_init = (
         load_convrot_clip_patcher,
         (

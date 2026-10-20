@@ -3,7 +3,7 @@
 Compatibility and performance extensions for CUDA Tensor Core GPUs. The plugin
 currently provides ConvRot W8A8/W4A8/W4A4 support, exact-sm75 BF16 activation
 storage, bundled sm75+ W8A8 attention, exact-sm75 Sage, native sm75+ Sol and
-fixed-Top-K SLA and Spark-H3 sparse attention, and focused Krea2/Wan/Bernini utilities.
+fixed-Top-K SLA and Spark-H3 sparse attention, and focused Qwen Image 2.1/Krea2/Wan/Bernini utilities.
 
 ## Requirements
 
@@ -39,6 +39,15 @@ Python-only plugin updates never invoke a compiler or JIT; rebuild the kernel
 only after its CUDA sources or required version change.
 
 ## Nodes
+
+### Qwen Image 2.1
+
+`Load ConvRot DiT` automatically reuses Qwen 2.1 reference preparation and shares
+compatible W8A8 QKV input quantization. `Load ConvRot CLIP` scopes quantized
+encoding to the Qwen 2.1 text encoder. `Qwen Image 2.1 多图优化` exposes a
+model-local switch and preserves native reference cache settings.
+For CFG 1, `Qwen Image 2.1 多图条件` avoids encoding an unused negative prompt.
+See [integration, limits and matched measurements](docs/qwen-image21.md).
 
 ### Shared application models
 
