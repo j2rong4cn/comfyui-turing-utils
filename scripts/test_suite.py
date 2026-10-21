@@ -32,7 +32,7 @@ SAMPLED = {
             "test_download_is_pinned_while_delete_is_pending",
             "test_restart_removes_previous_session_and_keeps_unrelated_files",
             "test_native_progress_is_live_without_polling_and_isolated_from_queued_job",
-            "test_template_listing_and_path_traversal",
+            "test_invalid_bindings_formats_and_native_validation_leave_no_files",
         )
     ),
     "tests/test_nvfp4_routes.py": ("tests/gpu/test_nvfp4_bounds.py",),
@@ -48,7 +48,7 @@ AREAS = {
         "tests/test_canvas_dynamic_parameters.py",
         *SAMPLED["tests/test_workspace_tasks.py"],
     ),
-    "api": ("tests/test_job_progress.py", *SAMPLED["tests/test_job_api.py"]),
+    "api": ("tests/test_job_discovery.py", "tests/test_job_progress.py", "tests/test_job_project.py", *SAMPLED["tests/test_job_api.py"]),
     "media": (
         "tests/test_video_latent_mask.py",
         "tests/test_video_mask_roi.py",
@@ -131,6 +131,8 @@ def areas_for(path):
         or path == "tests/turing_test_support/h3.py"
     ):
         return {"sampling"}
+    if path.startswith("skills/turing-workflow/"):
+        return {"api"}
     if path.startswith(("scripts/", "tests/unit/")):
         return set()
     if path.startswith(("web/", "tests/browser/")):

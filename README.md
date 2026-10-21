@@ -543,11 +543,13 @@ original loading functions; callers bypassing the prompt server must invoke
   poster only until playback is requested. Creating a project requires an empty
   folder; opening one requires its valid `canvas.json`. The standalone page is removed.
   See [Material Workspace](docs/material-canvas.md) for usage and validation limits.
-- **Temporary Job API** submits a card template, parameters and image/video/audio
+- **Temporary Job API** submits a native ComfyUI API workflow and image/video/audio
   attachments in one multipart request, then downloads results by job ID. It uses
   the native queue, clears inputs after execution, supports explicit/expired-result
   cleanup, and removes every previous API session's tasks on startup.
   See [Temporary Job API](docs/job-api.md) for the HTTP contract and Python client.
+  The [project workflow skill](skills/turing-workflow/SKILL.md) guides local
+  capability authoring and maintained usage notes, with all project assets under `turing/`.
 - `Configure Attention Strategy` selects Sol, SLA, Veda, Spark, or `none`.
   H3 Image Sol and Static Virtual KV have been removed, including their node IDs.
   Its dynamic selector exposes only

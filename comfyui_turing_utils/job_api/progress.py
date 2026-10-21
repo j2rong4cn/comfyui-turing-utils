@@ -34,19 +34,33 @@ class Node:
 
     def snapshot(self, now):
         remaining = None
-        if self.state == "running" and len(self.rates) >= 2 and self.value < self.maximum:
+        if (
+            self.state == "running"
+            and len(self.rates) >= 2
+            and self.value < self.maximum
+        ):
             rate = median(self.rates)
             if rate > 0 and max(self.rates) <= min(self.rates) * 2:
                 estimate = (self.maximum - self.value) * rate - (now - self.updated)
                 if estimate > 0:
                     remaining = round(estimate, 3)
         return {
-            "id": self.id, "class_type": self.class_type, "title": self.title,
+            "id": self.id,
+            "class_type": self.class_type,
+            "title": self.title,
             "value": self.value if self.reported else None,
             "max": self.maximum if self.reported else None,
-            "fraction": min(1, max(0, self.value / self.maximum)) if self.reported else None,
-            "elapsed_seconds": round(max(0, (now if self.state == "running" else self.updated) - self.started), 3),
-            "eta_seconds": remaining, "eta_source": "step_rate" if remaining is not None else None,
+            "fraction": min(1, max(0, self.value / self.maximum))
+            if self.reported
+            else None,
+            "elapsed_seconds": round(
+                max(
+                    0, (now if self.state == "running" else self.updated) - self.started
+                ),
+                3,
+            ),
+            "eta_seconds": remaining,
+            "eta_source": "step_rate" if remaining is not None else None,
         }
 
 
@@ -67,7 +81,9 @@ class Progress:
     def transition(self, phase, now=None):
         now = time.monotonic() if now is None else now
         if self.finished is None:
-            self.durations[self.phase] = self.durations.get(self.phase, 0) + max(0, now - self.changed)
+            self.durations[self.phase] = self.durations.get(self.phase, 0) + max(
+                0, now - self.changed
+            )
             self.phase, self.changed = phase, now
 
     def finish(self, status):
@@ -75,10 +91,16 @@ class Progress:
         self.finished, self.finished_at = self.changed, time.time()
 
     def seconds(self, phase, now):
-        return self.durations.get(phase, 0) + (max(0, now - self.changed) if self.phase == phase and self.finished is None else 0)
+        return self.durations.get(phase, 0) + (
+            max(0, now - self.changed)
+            if self.phase == phase and self.finished is None
+            else 0
+        )
 
     def processing_seconds(self, now):
-        return sum(self.seconds(phase, now) for phase in ("executing", "finalizing", "cleanup"))
+        return sum(
+            self.seconds(phase, now) for phase in ("executing", "finalizing", "cleanup")
+        )
 
     def event(self, event, data, now, graph=None):
         if self.finished is not None:
@@ -101,7 +123,10 @@ class Progress:
                     continue
                 node = self.nodes.get(identity)
                 if node is None:
-                    kind, title = self.graph.get(identity, self.graph.get(entry.get("real_node_id"), (None, None)))
+                    kind, title = self.graph.get(
+                        identity,
+                        self.graph.get(entry.get("real_node_id"), (None, None)),
+                    )
                     node = self.nodes[identity] = Node(identity, kind, title, now, now)
                 # Registry start/finish values (0/1, 1/1) are not actual steps.
                 if state == "running" and (entry["value"] != 0 or entry["max"] != 1):
@@ -111,9 +136,14 @@ class Progress:
         elif event in {"execution_success", "execution_error", "execution_interrupted"}:
             for node in self.nodes.values():
                 if node.state == "running":
-                    node.state, node.updated = "finished" if event == "execution_success" else "failed", now
+                    node.state, node.updated = (
+                        "finished" if event == "execution_success" else "failed",
+                        now,
+                    )
             self.completed_executions += event == "execution_success"
-            self.transition("queued" if event == "execution_success" else "cleanup", now)
+            self.transition(
+                "finalizing" if event == "execution_success" else "cleanup", now
+            )
 
     def snapshot(self, history):
         now = self.finished if self.finished is not None else time.monotonic()
@@ -132,28 +162,56 @@ class Progress:
                 estimate_status = "overdue" if prediction <= 0 else "estimating"
         return {
             "progress": {
-                "phase": self.phase, "prompt_id": self.prompt_id,
-                "executions_started": self.executions, "executions_completed": self.completed_executions,
-                "nodes": {"known": len(self.graph.keys() | self.nodes.keys()), "completed": sum(n.state == "finished" and n.id not in self.cached for n in self.nodes.values()), "cached": len(self.cached)},
-                "active_nodes": [node.snapshot(now) for node in self.nodes.values() if node.state == "running"],
-                "outputs": {"completed": len(self.completed_targets), "total": len(self.targets)},
+                "phase": self.phase,
+                "prompt_id": self.prompt_id,
+                "executions_started": self.executions,
+                "executions_completed": self.completed_executions,
+                "nodes": {
+                    "known": len(self.graph.keys() | self.nodes.keys()),
+                    "completed": sum(
+                        n.state == "finished" and n.id not in self.cached
+                        for n in self.nodes.values()
+                    ),
+                    "cached": len(self.cached),
+                },
+                "active_nodes": [
+                    node.snapshot(now)
+                    for node in self.nodes.values()
+                    if node.state == "running"
+                ],
+                "outputs": {
+                    "completed": len(self.completed_targets),
+                    "total": len(self.targets),
+                },
             },
             "timing": {
-                "started_at": self.started_at, "finished_at": self.finished_at,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
                 "elapsed_seconds": round(max(0, now - self.created), 3),
                 "queue_seconds": round(self.seconds("queued", now), 3),
                 "execution_seconds": round(self.processing_seconds(now), 3),
                 "eta_seconds": remaining,
-                "estimated_finish": time.time() + remaining if estimate_status == "available" else None,
+                "estimated_finish": time.time() + remaining
+                if estimate_status == "available"
+                else None,
                 "eta_source": "history" if estimate_status == "available" else None,
-                "eta_scope": "processing", "confidence": "low" if estimate_status == "available" else None,
-                "estimate_status": estimate_status, "history_samples": len(samples),
+                "eta_scope": "processing",
+                "confidence": "low" if estimate_status == "available" else None,
+                "estimate_status": estimate_status,
+                "history_samples": len(samples),
             },
         }
 
 
 class Observer:
-    EVENTS = {"execution_start", "execution_cached", "progress_state", "execution_success", "execution_error", "execution_interrupted"}
+    EVENTS = {
+        "execution_start",
+        "execution_cached",
+        "progress_state",
+        "execution_success",
+        "execution_error",
+        "execution_interrupted",
+    }
 
     def __init__(self, server, jobs):
         self.server, self.jobs = server, jobs
@@ -168,12 +226,24 @@ class Observer:
                 graph = None
                 if event == "execution_start":
                     running, _ = self.server.prompt_queue.get_current_queue_volatile()
-                    item = next((item for item in running if item[1] == data["prompt_id"]), None)
-                    if item is not None and item[3].get("turing_material_run", {}).get("directory") == self.jobs[sid].directory:
-                        graph = {identity: (node["class_type"], node.get("_meta", {}).get("title")) for identity, node in item[2].items()}
-                loop.call_soon_threadsafe(self.event, sid, event, data, time.monotonic(), graph)
-            elif event == "turing_material_changed":
-                loop.call_soon_threadsafe(self.material, data["directory"], data["target"])
+                    item = next(
+                        (item for item in running if item[1] == data["prompt_id"]), None
+                    )
+                    if (
+                        item is not None
+                        and item[1] == sid
+                        and item[3].get("turing_api_job") == sid
+                    ):
+                        graph = {
+                            identity: (
+                                node["class_type"],
+                                node.get("_meta", {}).get("title"),
+                            )
+                            for identity, node in item[2].items()
+                        }
+                loop.call_soon_threadsafe(
+                    self.event, sid, event, data, time.monotonic(), graph
+                )
             return self.original(event, data, sid)
 
         self.installed = self.server.send_sync = send
@@ -184,20 +254,22 @@ class Observer:
 
     def event(self, identity, event, data, now, graph):
         job = self.jobs.get(identity)
-        if job is not None and job.progress.finished is None and (event != "execution_start" or graph is not None):
+        if (
+            job is not None
+            and job.progress.finished is None
+            and (event != "execution_start" or graph is not None)
+        ):
             if event == "execution_start":
                 job.status = "running"
             job.progress.event(event, data, now, graph)
 
-    def material(self, directory, target):
-        for job in self.jobs.values():
-            if job.directory == directory and target in job.progress.targets:
-                job.progress.completed_targets.add(target)
-                break
-
     def remember(self, job):
         progress = job.progress
-        if job.status == "succeeded" and progress.signature is not None and progress.executions:
+        if (
+            job.status == "succeeded"
+            and progress.signature is not None
+            and progress.executions
+        ):
             samples = self.history.setdefault(progress.signature, deque(maxlen=5))
             samples.append(progress.processing_seconds(progress.finished))
             self.history.move_to_end(progress.signature)

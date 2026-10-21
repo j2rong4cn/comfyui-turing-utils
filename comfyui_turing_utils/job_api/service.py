@@ -1,6 +1,7 @@
 """Process-scoped API jobs; disk ownership is independent of task status."""
 
 import asyncio
+import copy
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -17,12 +18,10 @@ if os.name == "nt":
 else:
     import fcntl
 
-from ..media.files import probe
+from execution import SENSITIVE_EXTRA_DATA_KEYS, validate_prompt
+
 from ..log import get_logger
-from ..workspace import workflow_files
-from ..workspace.protocol import MATERIALS
-from ..workspace.store import Project
-from .templates import prepare
+from .workflow import prepare, result_files
 from .progress import Observer, Progress
 
 OWNER = {"owner": "turing-job-api", "format": 1}
@@ -45,7 +44,6 @@ class Job:
     id: str
     owner: str
     root: Path
-    directory: str
     status: str = "receiving"
     created: float = field(default_factory=time.time)
     expires: float | None = None
@@ -62,10 +60,10 @@ class Job:
 
 
 class Jobs:
-    def __init__(self, server, tasks, output_root, *, result_ttl=3600, sweep_interval=60):
+    def __init__(self, server, output_root, *, result_ttl=3600, sweep_interval=60):
         if not math.isfinite(result_ttl) or result_ttl <= 0 or sweep_interval <= 0:
             raise ValueError("Job retention and sweep interval must be positive")
-        self.server, self.tasks = server, tasks
+        self.server = server
         self.output_root = Path(output_root).resolve()
         self.root = self.output_root / ".turing-api-jobs"
         self.result_ttl, self.sweep_interval = result_ttl, sweep_interval
@@ -81,7 +79,9 @@ class Jobs:
             raise ValueError("API job root must not be a symbolic link")
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         marker = self.root / ".owner.json"
-        if marker.is_symlink() or (marker.exists() and json.loads(marker.read_text()) != OWNER):
+        if marker.is_symlink() or (
+            marker.exists() and json.loads(marker.read_text()) != OWNER
+        ):
             raise ValueError("API job directory ownership mismatch")
         if not marker.exists():
             if any(self.root.iterdir()):
@@ -104,7 +104,11 @@ class Jobs:
             for child in self.root.iterdir():
                 if child.name in {".owner.json", ".lock"}:
                     continue
-                if not re.fullmatch(r"[a-f0-9]{32}", child.name) or child.is_symlink() or not child.is_dir():
+                if (
+                    not re.fullmatch(r"[a-f0-9]{32}", child.name)
+                    or child.is_symlink()
+                    or not child.is_dir()
+                ):
                     raise ValueError("Unexpected entry in API job directory")
                 shutil.rmtree(child)
             (self.root / self.session_id).mkdir(mode=0o700)
@@ -153,8 +157,17 @@ class Jobs:
         supplied = request.get("session_id")
         if supplied is not None and supplied != self.session_id:
             raise ValueError("Server restarted; submit a new task")
-        identity = str(uuid.UUID(request["request_id"])) if request.get("request_id") else str(uuid.uuid4())
-        signature = (owner, hashlib.sha256(json.dumps(request, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
+        identity = (
+            str(uuid.UUID(request["request_id"]))
+            if request.get("request_id")
+            else str(uuid.uuid4())
+        )
+        signature = (
+            owner,
+            hashlib.sha256(
+                json.dumps(request, sort_keys=True, ensure_ascii=False).encode()
+            ).hexdigest(),
+        )
         if identity in self.requests:
             if self.requests[identity] != signature:
                 raise ValueError("request_id was already used for another request")
@@ -162,7 +175,7 @@ class Jobs:
                 raise ValueError("This request was deleted; use a new request_id")
             return self.jobs[identity], False
         root = self.root / self.session_id / uuid.UUID(identity).hex
-        job = Job(identity, owner, root, (root / "project").relative_to(self.output_root).as_posix())
+        job = Job(identity, owner, root)
         job.receiver = asyncio.current_task()
         self.requests[identity], self.jobs[identity] = signature, job
         try:
@@ -180,81 +193,150 @@ class Jobs:
     def state(self, job):
         running, queued = self.server.prompt_queue.get_current_queue_volatile()
         ordered = sorted(queued, key=lambda item: item[0])
-        position = next((index + 1 for index, item in enumerate(ordered) if item[3].get("turing_material_run", {}).get("directory") == job.directory), None)
-        status = "running" if job.status in TERMINAL and job.progress.finished is None else job.status
+        position = next(
+            (
+                index + 1
+                for index, item in enumerate(ordered)
+                if item[1] == job.id and item[3].get("turing_api_job") == job.id
+            ),
+            None,
+        )
+        status = (
+            "running"
+            if job.status in TERMINAL and job.progress.finished is None
+            else job.status
+        )
         return {
-            "id": job.id, "session_id": self.session_id,
+            "id": job.id,
+            "session_id": self.session_id,
             "status": "deleting" if job.delete_requested else status,
-            "created": job.created, "expires": job.expires,
-            "error": job.error, "cleanup_error": job.cleanup_error,
-            "outputs": [{k: v for k, v in item.items() if k != "path"} for item in job.outputs],
-            "queue": {"position": position, "ahead": len(running) + position - 1 if position is not None else None},
+            "created": job.created,
+            "expires": job.expires,
+            "error": job.error,
+            "cleanup_error": job.cleanup_error,
+            "outputs": [
+                {k: v for k, v in item.items() if k != "path"} for item in job.outputs
+            ],
+            "queue": {
+                "position": position,
+                "ahead": len(running) + position - 1 if position is not None else None,
+            },
             **job.progress.snapshot(self.observer.history),
         }
-
-    def _prepare(self, job, workflow, request, uploads):
-        prepared, schema, selections = prepare(workflow, request.get("parameters", {}), request.get("files", {}))
-        project_root = job.root / "project"
-        project_root.mkdir()
-        project = Project.create(job.directory)
-        card = workflow_files.add_instance(project.root, prepared, "API task")
-        registered = {}
-        media = {}
-        for stub, selection in selections.items():
-            if "upload" in selection:
-                key = selection["upload"], selection["kind"]
-                if key not in registered:
-                    source = uploads[key[0]]
-                    metadata = probe(source, key[1])
-                    media[str(key)] = metadata
-                    asset, destination = project.reserve(key[1], source.suffix, "input")
-                    shutil.copyfile(source, destination)
-                    project.register(asset, key[1], metadata)
-                    registered[key] = asset
-                selection = {"asset": registered[key]}
-            project.select(f"{card}:{stub}", selection)
-        data, interface = workflow_files.unpack(prepared)
-        outputs = {}
-        for name, entry in schema["outputs"].items():
-            port = next(p for p in interface["outputs"] if p["id"] == entry["id"])
-            source = data["prompt"][interface["output_node"]]["inputs"][f"port_{port['slot']}"][0]
-            stub = data["prompt"][source]["inputs"]["stub_id"]
-            outputs[name] = (f"{card}:{stub}", MATERIALS[data["prompt"][source]["class_type"]])
-        revision = workflow_files.load_json(project.root / "canvas.json")["revision"]
-        signature = hashlib.sha256(json.dumps({"workflow": workflow, "parameters": request.get("parameters", {}), "files": request.get("files", {}), "media": media}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        return card, revision, outputs, (job.owner, signature)
 
     async def launch(self, job, workflow, request, uploads):
         job.status = "preparing"
         job.progress.transition("preparing")
-        card, revision, outputs, signature = await disk(self._prepare, job, workflow, request, uploads)
-        job.progress.signature, job.progress.targets = signature, {target for target, _ in outputs.values()}
+        prompt, signature = await disk(prepare, workflow, request, uploads, job.root)
+        data = self.server.trigger_on_prompt(
+            {"prompt": prompt, "client_id": job.id, "extra_data": {}}
+        )
+        prompt = data["prompt"]
+        self.server.node_replace_manager.apply_replacements(prompt)
+        targets = list(
+            dict.fromkeys(entry["node_id"] for entry in request["outputs"].values())
+        )
+        valid = await validate_prompt(job.id, prompt, targets)
+        if not valid[0] or set(valid[2]) != set(targets):
+            raise ValueError(
+                json.dumps(
+                    {"error": valid[1], "node_errors": valid[3]}, ensure_ascii=False
+                )
+            )
+        job.progress.signature, job.progress.targets = (
+            (job.owner, signature),
+            set(targets),
+        )
         if job.delete_requested:
-            await self.discard(job)
             return
-        job.status, job.receiver = "queued", None
+        extra = {
+            **data.get("extra_data", {}),
+            "client_id": job.id,
+            "create_time": int(time.time() * 1000),
+            "turing_api_job": job.id,
+        }
+        sensitive = {
+            key: extra.pop(key) for key in SENSITIVE_EXTRA_DATA_KEYS if key in extra
+        }
+        if "number" in data:
+            number = float(data["number"])
+        else:
+            number = -self.server.number if data.get("front") else self.server.number
+            self.server.number += 1
+        job.status, job.receiver, job.native_active = "queued", None, True
         job.progress.transition("queued")
-        job.runner = asyncio.create_task(self._execute(job, outputs, card, revision))
+        queue = self.server.prompt_queue
+        with queue.mutex:
+            running, queued = queue.get_current_queue_volatile()
+            if job.id in queue.history or any(
+                item[1] == job.id for item in (*running, *queued)
+            ):
+                job.native_active = False
+                raise ValueError(
+                    "request_id conflicts with an existing native prompt ID"
+                )
+            queue.put((number, job.id, prompt, extra, valid[2], sensitive))
+        job.runner = asyncio.create_task(self._execute(job, request["outputs"]))
 
-    async def _execute(self, job, outputs, card, revision):
+    def interrupt(self, job):
+        queue = self.server.prompt_queue
+        with queue.mutex:
+            queue.delete_queue_item(
+                lambda item: item[1] == job.id
+                and item[3].get("turing_api_job") == job.id
+            )
+            running, _ = queue.get_current_queue_volatile()
+            if any(
+                item[1] == job.id and item[3].get("turing_api_job") == job.id
+                for item in running
+            ):
+                queue.interrupt_if_running(job.id)
+
+    async def _execute(self, job, outputs):
         try:
-            if job.delete_requested:
-                return
-            job.native_active = True
-            operation = await self.tasks.start(job.directory, revision, card=card, identity=job.id, client_id=job.id)
-            if job.delete_requested:
-                self.tasks.interrupt(job.directory, job.id)
-            result = await self.tasks.wait(job.directory, operation["id"])
+            while True:
+                queue = self.server.prompt_queue
+                with queue.mutex:
+                    record = queue.history.get(job.id)
+                    if (
+                        record is not None
+                        and record["prompt"][3].get("turing_api_job") != job.id
+                    ):
+                        raise ValueError("Native task ownership mismatch")
+                    if record is not None:
+                        record = copy.deepcopy(record)
+                    running, queued = queue.get_current_queue_volatile()
+                    active = any(item[1] == job.id for item in (*running, *queued))
+                if record is not None:
+                    if record["status"]["status_str"] != "success":
+                        details = next(
+                            (
+                                data
+                                for event, data in reversed(
+                                    record["status"]["messages"]
+                                )
+                                if event in {"execution_error", "execution_interrupted"}
+                            ),
+                            {},
+                        )
+                        raise ValueError(
+                            details.get("exception_message")
+                            or "Workflow execution failed or was interrupted"
+                        )
+                    break
+                if not active:
+                    raise ValueError(
+                        "Native task was cancelled or removed from the queue"
+                    )
+                await asyncio.sleep(0.05)
             job.native_active = False
-            if result["status"] != "success":
-                raise ValueError(result.get("error") or "Workflow execution failed")
             if not job.delete_requested:
                 job.progress.transition("finalizing")
-                job.outputs = await disk(self._results, job, outputs)
+                job.outputs = await disk(self._results, job, outputs, record)
                 job.progress.completed_targets.update(job.progress.targets)
         except asyncio.CancelledError:
             job.status, job.error = "failed", "Job worker stopped"
-            self.tasks.interrupt(job.directory, job.id)
+            self.interrupt(job)
             raise
         except Exception as error:
             job.native_active = False
@@ -281,55 +363,79 @@ class Jobs:
             if not job.delete_requested:
                 self.observer.remember(job)
 
-    def _results(self, job, outputs):
-        project = Project(job.directory)
+    def _results(self, job, outputs, record):
         destination = job.root / "outputs"
         destination.mkdir()
         result = []
-        for name, (target, kind) in outputs.items():
-            selected = project.selection(target)
-            assets = [selected.get("asset")]
-            if kind == "image":
-                batch = project.asset(assets[0])["metadata"].get("batch")
-                if batch:
-                    with project.connect() as db:
-                        assets = [row["id"] for row in db.execute(
-                            "SELECT id FROM materials WHERE kind='image' AND json_extract(metadata,'$.batch')=? ORDER BY json_extract(metadata,'$.batch_index')", (batch,),
-                        )]
-            for index, asset in enumerate(assets):
-                identity = uuid.uuid4().hex
-                source = None if kind == "text" else project.path(asset)
-                path = destination / (identity + (source.suffix if source else ".txt"))
-                digest = hashlib.sha256()
-                with path.open("xb") as output:
-                    if source:
-                        with source.open("rb") as stream:
-                            while chunk := stream.read(1024 * 1024):
-                                output.write(chunk)
-                                digest.update(chunk)
-                    else:
-                        chunk = selected.get("text", "").encode("utf-8")
-                        output.write(chunk)
-                        digest.update(chunk)
-                filename = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(". ") or "result"
-                result.append({
-                    "id": identity, "name": name, "index": index,
-                    "kind": kind, "filename": filename + (f"_{index + 1}" if len(assets) > 1 else "") + path.suffix,
-                    "bytes": path.stat().st_size, "sha256": digest.hexdigest(), "path": path,
+        counts = {}
+        for name, source, ui in result_files(record, outputs, job.root):
+            index = counts.get(name, 0)
+            counts[name] = index + 1
+            identity = uuid.uuid4().hex
+            text = ui.get("text") if isinstance(ui, dict) else None
+            is_text = isinstance(text, list) and all(
+                isinstance(item, str) for item in text
+            )
+            suffix = source.suffix if source else ".txt" if is_text else ".json"
+            path = destination / (identity + suffix)
+            digest = hashlib.sha256()
+            with path.open("xb") as output:
+                if source:
+                    with source.open("rb") as stream:
+                        while chunk := stream.read(1024 * 1024):
+                            output.write(chunk)
+                            digest.update(chunk)
+                else:
+                    chunk = (
+                        "\n".join(text)
+                        if is_text
+                        else json.dumps(ui, ensure_ascii=False)
+                    ).encode("utf-8")
+                    output.write(chunk)
+                    digest.update(chunk)
+            filename = (
+                re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(". ") or "result"
+            )
+            filename = filename.encode("utf-8")[:160].decode("utf-8", errors="ignore")
+            extension = suffix.lower()
+            kind = (
+                "image"
+                if extension in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+                else "video"
+                if extension in {".mp4", ".webm", ".mov", ".mkv"}
+                else "audio"
+                if extension in {".flac", ".wav", ".mp3", ".ogg", ".opus", ".m4a"}
+                else "text"
+                if is_text
+                else "json"
+                if source is None
+                else "file"
+            )
+            result.append(
+                {
+                    "id": identity,
+                    "name": name,
+                    "index": index,
+                    "kind": kind,
+                    "filename": f"{filename}_{len(result) + 1}{suffix}",
+                    "bytes": path.stat().st_size,
+                    "sha256": digest.hexdigest(),
+                    "path": path,
                     "url": f"/turing/jobs/{job.id}/outputs/{identity}",
-                })
+                }
+            )
         return result
 
     def _forget_history(self, job):
         queue = self.server.prompt_queue
         with queue.mutex:
-            for identity, record in list(queue.history.items()):
-                if record["prompt"][3].get("turing_material_run", {}).get("directory") == job.directory:
-                    queue.delete_history_item(identity)
+            record = queue.history.get(job.id)
+            if record and record["prompt"][3].get("turing_api_job") == job.id:
+                queue.delete_history_item(job.id)
 
     @staticmethod
     def _clear_work(job):
-        for name in ("uploads", "project"):
+        for name in ("uploads", "work"):
             path = job.root / name
             if path.exists():
                 shutil.rmtree(path)
@@ -344,7 +450,7 @@ class Jobs:
                 job.receiver.cancel()
             return False
         if job.native_active or job.runner and not job.runner.done():
-            self.tasks.interrupt(job.directory, job.id)
+            self.interrupt(job)
             return False
         if job.readers:
             return False
@@ -365,7 +471,9 @@ class Jobs:
         while True:
             await asyncio.sleep(self.sweep_interval)
             for job in list(self.jobs.values()):
-                if job.delete_requested or (job.expires is not None and job.expires <= time.time()):
+                if job.delete_requested or (
+                    job.expires is not None and job.expires <= time.time()
+                ):
                     await self.delete(job)
                 elif job.cleanup_error and job.status in TERMINAL:
                     try:

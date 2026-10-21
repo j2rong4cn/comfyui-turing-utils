@@ -16,13 +16,38 @@ from comfyui_turing_utils.job_api.progress import Node, Observer, Progress
 
 class JobProgressTest(unittest.TestCase):
     def start(self, progress, identity="first", now=10):
-        progress.event("execution_start", {"prompt_id": identity, "timestamp": 100000}, now, {"same": ("Sampler", "Generate")})
+        progress.event(
+            "execution_start",
+            {"prompt_id": identity, "timestamp": 100000},
+            now,
+            {"same": ("Sampler", "Generate")},
+        )
 
-    def update(self, progress, value, maximum=5, now=10, identity="first", node="same", state="running"):
-        progress.event("progress_state", {
-            "prompt_id": identity,
-            "nodes": {node: {"state": state, "value": value, "max": maximum, "real_node_id": "same"}},
-        }, now)
+    def update(
+        self,
+        progress,
+        value,
+        maximum=5,
+        now=10,
+        identity="first",
+        node="same",
+        state="running",
+    ):
+        progress.event(
+            "progress_state",
+            {
+                "prompt_id": identity,
+                "nodes": {
+                    node: {
+                        "state": state,
+                        "value": value,
+                        "max": maximum,
+                        "real_node_id": "same",
+                    }
+                },
+            },
+            now,
+        )
 
     def test_first_slow_step_is_excluded_and_estimate_expires(self):
         node = Node("sampler", "Sampler", None, 0, 0)
@@ -68,20 +93,30 @@ class JobProgressTest(unittest.TestCase):
         self.assertEqual(progress.completed_executions, 1)
 
     def test_elapsed_queue_and_history_eta_are_separate_and_freeze(self):
-        with mock.patch("comfyui_turing_utils.job_api.progress.time.monotonic", return_value=0):
+        with mock.patch(
+            "comfyui_turing_utils.job_api.progress.time.monotonic", return_value=0
+        ):
             progress = Progress()
         progress.transition("queued", 2)
         self.start(progress, now=12)
         progress.signature = ("owner", "workload")
         history = {progress.signature: deque([100, 110])}
-        with mock.patch("comfyui_turing_utils.job_api.progress.time.monotonic", return_value=32):
+        with mock.patch(
+            "comfyui_turing_utils.job_api.progress.time.monotonic", return_value=32
+        ):
             snapshot = progress.snapshot(history)
         self.assertEqual(snapshot["timing"]["queue_seconds"], 10)
         self.assertEqual(snapshot["timing"]["execution_seconds"], 20)
         self.assertEqual(snapshot["timing"]["eta_seconds"], 85)
-        with mock.patch("comfyui_turing_utils.job_api.progress.time.monotonic", return_value=132):
-            self.assertEqual(progress.snapshot(history)["timing"]["estimate_status"], "overdue")
-        with mock.patch("comfyui_turing_utils.job_api.progress.time.monotonic", return_value=42):
+        with mock.patch(
+            "comfyui_turing_utils.job_api.progress.time.monotonic", return_value=132
+        ):
+            self.assertEqual(
+                progress.snapshot(history)["timing"]["estimate_status"], "overdue"
+            )
+        with mock.patch(
+            "comfyui_turing_utils.job_api.progress.time.monotonic", return_value=42
+        ):
             progress.finish("succeeded")
         self.assertEqual(progress.snapshot(history)["timing"]["elapsed_seconds"], 42)
         self.assertEqual(progress.snapshot(history)["timing"]["eta_seconds"], 0)
@@ -91,34 +126,53 @@ class JobProgressTest(unittest.TestCase):
         progress = Progress()
         progress.signature = ("owner", "workload")
         history = {progress.signature: deque([10, 100])}
-        with mock.patch("comfyui_turing_utils.job_api.progress.time.monotonic", return_value=progress.created + 1):
+        with mock.patch(
+            "comfyui_turing_utils.job_api.progress.time.monotonic",
+            return_value=progress.created + 1,
+        ):
             progress.transition("queued")
-            self.assertEqual(progress.snapshot(history)["timing"]["estimate_status"], "queued")
+            self.assertEqual(
+                progress.snapshot(history)["timing"]["estimate_status"], "queued"
+            )
             self.start(progress, now=progress.created + 1)
             self.assertIsNone(progress.snapshot(history)["timing"]["eta_seconds"])
             self.assertIsNone(progress.snapshot({})["timing"]["eta_seconds"])
 
 
 class JobProgressObserverTest(unittest.IsolatedAsyncioTestCase):
-    async def test_worker_thread_events_require_native_ownership_and_still_reach_server(self):
+    async def test_worker_thread_events_require_native_ownership_and_still_reach_server(
+        self,
+    ):
         forwarded = []
-        item = (0, "native", {"node": {"class_type": "Sampler", "inputs": {"secret": "private"}}}, {"turing_material_run": {"directory": "owned"}})
-        server = SimpleNamespace(send_sync=lambda *args: forwarded.append(args), prompt_queue=SimpleNamespace(get_current_queue_volatile=lambda: ([item], [])))
+        item = (
+            0,
+            "job",
+            {"node": {"class_type": "Sampler", "inputs": {"secret": "private"}}},
+            {"turing_api_job": "job"},
+        )
+        server = SimpleNamespace(
+            send_sync=lambda *args: forwarded.append(args),
+            prompt_queue=SimpleNamespace(
+                get_current_queue_volatile=lambda: ([item], [])
+            ),
+        )
         original = server.send_sync
-        job = SimpleNamespace(directory="owned", status="queued", progress=Progress())
+        job = SimpleNamespace(status="queued", progress=Progress())
         jobs = {"job": job}
         observer = Observer(server, jobs)
         observer.install(asyncio.get_running_loop())
         try:
-            data = {"prompt_id": "native", "timestamp": 100000}
-            await asyncio.to_thread(server.send_sync, "execution_start", data, "ordinary-client")
+            data = {"prompt_id": "job", "timestamp": 100000}
+            await asyncio.to_thread(
+                server.send_sync, "execution_start", data, "ordinary-client"
+            )
             await asyncio.sleep(0)
             self.assertEqual(job.status, "queued")
-            job.directory = "another"
+            item[3]["turing_api_job"] = "another"
             await asyncio.to_thread(server.send_sync, "execution_start", data, "job")
             await asyncio.sleep(0)
             self.assertEqual(job.status, "queued")
-            job.directory = "owned"
+            item[3]["turing_api_job"] = "job"
             await asyncio.to_thread(server.send_sync, "execution_start", data, "job")
             await asyncio.sleep(0)
             self.assertEqual(job.status, "running")

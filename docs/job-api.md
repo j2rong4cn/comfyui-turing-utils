@@ -7,82 +7,137 @@
 任务只在本次 ComfyUI 启动期间有效。**每次启动先删除上一次的全部 API 任务，
 包括未完成任务和已完成但尚未下载的结果。** 不恢复执行，不自动重试。
 
-## 定义工作流
+## 发现服务器、节点和模型
 
-在现有卡片编辑器中制作并保存可执行卡片模板，继续使用 Canvas Inputs/Outputs
-和公开的图片、视频、音频、文字素材桩。无需添加 API 专用节点。
+agent 从 `GET /turing/server` 开始。它同时提供状态和简短调用帮助，无需单独的 help API：
 
-- 参数输入使用端点参数；输入图片、视频和音频可以使用素材位置端点，也可以使用
-  IMAGE、VIDEO、AUDIO 值端点。
-- 素材位置端点所绑定的桩如果有计算输入，上传素材会替代这次请求中的计算输入；
-  未上传时按模板原有依赖规则生成。纯加载桩需要上传对应文件。
-- 最终结果通过 Canvas Outputs 导出的素材桩确定。支持多输出和图片批次。
-- 每次执行使用独立模板副本，不继承旧项目的素材选择。显式提供的数值参数使用固定值，
-  不推进原模板的随机／递增游标。
-- 普通 UI 工作流 JSON 或孤立的 API prompt 图不等同于可执行卡片模板。请先在卡片编辑器
-  保存执行快照；外部编辑导致快照过期时也需要重新保存。
+- 原有 `session_id`、`ready`、`error`、Manager 重启字段保持不变。
+- `api_version=2` 标识本插件任务协议；`versions` 返回 ComfyUI 版本和插件 Git 修订。
+  导出安装或没有 Git 时 `plugin_revision=null`；未提交的源码带 `dirty` 标记。
+- `links` 指向节点搜索、原生节点详情、模型类别／文件、任务、下载和详细文档。
+  带 `{class_type}`、`{folder}`、`{id}` 的地址是 URL 模板，替换值需要按路径段编码。
+- `usage` 提供提交格式、示例 JSON、实际上传限制、结果保留时间和清理／重启规则。
+  工作流格式为 `comfy_api_prompt`，直接接收原生 API prompt 图。
+- `runtime` 提供当前设备、已安装内核版本及 W8A8、Sol、SLA、Spark 和映射 K/V 的
+  硬件／二进制能力检测结果。它不加载模型或运行 CUDA 测试；检测失败时仅该字段报告错误。
+  版本和运行能力在进程内缓存，更新源码或依赖后应重启服务。
 
-默认 API 名称使用端点显示名称，实际绑定依赖稳定端点 ID。可以在工作流的
-`extra.turing_api` 中定义别名，再通过编辑器保存刷新执行快照：
+任务 API 未就绪时 `/turing/server` 仍返回以上信息，HTTP 状态继续为 503。
+节点搜索独立于任务清理状态，仍可使用：
 
-```json
-{
-  "inputs": {"source_video": "输入端点ID", "prompt": "提示词端点ID"},
-  "outputs": {"result_video": "输出端点ID"}
-}
+```http
+GET /turing/nodes?query=h3&limit=20
+GET /turing/nodes?category=Turing%20Utils&include_internal=true
+GET /object_info/TuringUtilsMiniMaxH3KSampler
+GET /models
+GET /models/diffusion_models
 ```
 
-名称需要唯一。`GET /turing/templates` 返回当前用户卡片库中的 `.json` 模板名、
-输入输出、默认参数及选项。未完成或失效模板返回各自的错误，不阻断其他模板。
-接口不返回模型图或 Chat 节点的服务凭据；暴露为普通输入的参数默认值会返回给调用方。
+`/turing/nodes` 返回 `items`、过滤后的总数 `total`、`next_cursor` 和元数据读取失败的
+`errors`。每项包含 `class_type`、显示名称、分类、最多 240 字符的 `summary`、内部／废弃／
+实验／远程 API 节点标志及原生 `detail_url`。它只列已注册节点，不表示模型或运行条件已满足。
 
-API 模板应使用受信任节点。最终保存统一走素材桩：`SaveImage`、`SaveVideo`、
-`VHS_VideoCombine` 等独立输出节点会被拒绝。普通第三方计算节点自行写入外部目录、
-启动后台进程或访问外部资源的副作用不受此 API 沙箱保护，需要模板作者移除或适配。
+搜索参数如下；未知参数或非法值返回 400：
+
+| 参数 | 行为 |
+|---|---|
+| `query` | 在节点标识、显示名称、分类、说明和搜索别名中匹配全部搜索词，忽略大小写 |
+| `category` | 指定分类及其子分类，忽略大小写 |
+| `include_internal` | 默认 `false`；`true` 包含开发节点及标识以 `_` 开头的节点 |
+| `include_deprecated` | 默认 `false`；`true` 包含废弃节点 |
+| `limit` | 默认 50，范围 1–100 |
+| `cursor` | 使用上一页的 `next_cursor`，其余筛选条件保持一致 |
+
+结果按 `class_type` 排序，最后一页 `next_cursor=null`。第三方节点元数据损坏时将其列在
+`errors`，其他节点仍可查询。目录不调用旧版节点的 `INPUT_TYPES`；V3 使用 ComfyUI
+已有的 schema 元数据。完整参数及 tooltip 按需从 `detail_url` 读取，保留 DynamicCombo
+分支与 Autogrow 重复输入，不能仅根据搜索摘要拼接工作流。
+
+模型类别和文件继续查询原生 `/models`、`/models/{folder}`。使用返回的相对文件名，
+并结合对应加载器 `/object_info/{class_type}` 中的实际输入选项选择权重。类别中也可能有
+非权重目录；文件存在不能证明模型家族、量化格式、预测器或显存满足执行条件。
+`runtime.support` 同样只报告底层能力，不能替代具体工作流的兼容性检查。
+
+## 定义工作流与本地能力
+
+API v2 执行普通 ComfyUI API prompt 图，不依赖卡片、Canvas Inputs/Outputs、素材桩或
+服务端模板库。`template_id` 和 `/turing/templates` 已移除；旧版请求返回明确的协议错误。
+卡片编辑器和无限画布自己的模板、工作流和执行接口保持原样。
+
+项目能力由本地 `turing/capabilities/<name>/` 下的 `workflow.api.json`、
+`capability.json` 和 `USAGE.md` 定义。配置、素材、结果、运行记录和项目脚本都放在
+项目的 `turing/` 子目录，不占用其他项目目录。参数类型、默认值、范围和节点输入绑定
+保存在 capability.json；客户端按结构修改图，服务器不保存能力定义。
+
+配套 skill 位于 [skills/turing-workflow](../skills/turing-workflow/SKILL.md)，指导 agent
+从零查询节点和模型、搭建工作流，或分析用户提供的工作流并提取可调参数。普通 UI JSON
+需要通过 ComfyUI 原生导出得到 API 格式；不按 widgets_values 位序猜测复杂子图或动态输入。
+USAGE.md 记录输入要求、参数关系、输出行为和已验证问题；运行会保留当时的说明快照。
 
 ## 提交与下载
 
 | 请求 | 行为 |
 |---|---|
-| `GET /turing/server` | 启动 ID、API 就绪状态、Manager 重启路由是否存在 |
-| `GET /turing/templates` | 模板及接口定义 |
-| `POST /turing/jobs` | 提交模板、参数和全部素材，返回 202 和任务 ID |
-| `GET /turing/jobs/{id}` | 查询状态、节点／步数进度、耗时与估计、错误、结果列表 |
+| `GET /turing/server` | 状态、版本、运行能力、接口链接及简短调用帮助 |
+| `GET /turing/nodes` | 可搜索、分页的节点摘要；详情复用原生 `/object_info/{class_type}` |
+| `POST /turing/jobs` | 上传完整原生图和全部素材，返回 202 和任务 ID |
+| `GET /turing/jobs/{id}` | 状态、节点／步数进度、耗时与估计、错误和结果 |
 | `GET /turing/jobs/{id}/outputs/{output_id}` | 下载单个结果，不重新编码 |
 | `DELETE /turing/jobs/{id}` | 取消／清理，完成返回 204，正在停止或下载返回 202 |
 
-提交使用 `multipart/form-data`，第一个字段必须是名为 `request` 的 JSON。
-`files` 的值引用其他 multipart **字段名**，不依赖文件名或服务器路径。
+提交为 multipart/form-data，第一个字段是 `request` JSON。参数已由客户端写入图。
+`workflow` 指向工作流 JSON 字段；每个文件声明 multipart 字段名及一个或多个节点输入。
+输出名称对应原生 OUTPUT_NODE，不是张量输出槽。
 
 ```json
 {
-  "template_id": "h3_replace.json",
+  "api_version": 2,
+  "workflow": "graph",
   "request_id": "ca0ba11d-22d2-4bb7-bb63-1d6474c2aa74",
-  "parameters": {"prompt": "替换人物面部", "seed": 42},
-  "files": {"source_video": "clip", "reference_image": "face"}
+  "files": {
+    "source_video": {
+      "part": "clip",
+      "targets": [{"node_id": "12", "input": "video"}]
+    }
+  },
+  "outputs": {"result_video": {"node_id": "81"}}
 }
 ```
 
 ```bash
 curl http://127.0.0.1:18189/turing/jobs \
   -F 'request=<request.json;type=application/json' \
-  -F 'clip=@source.mp4' \
-  -F 'face=@reference.png'
+  -F 'graph=@workflow.api.json;type=application/json' \
+  -F 'clip=@source.mp4'
 ```
 
-也可以用 `"workflow": "graph"` 替代 `template_id`，并附加
-`-F 'graph=@card.json;type=application/json'`。两种方式只能选一种。
-`request_id` 可省略；同一启动期间，相同 ID 和请求元数据返回原任务，不会重复入队。
-已删除的 ID 不能再次执行；更改素材或参数时使用新 ID。去重不比较重复请求的二进制内容。
-可提交 `session_id` 防止旧请求在重启后意外进入新会话。
+原生图仍是标准 ComfyUI 格式：`{"12":{"class_type":"...","inputs":{...}},...}`。
+嵌套输入可在 target 中增加 `"path":["file"]`；本地参数绑定也使用同一结构，
+例如 `input="sigmas", path=["denoise"]` 只修改动态分支内的 denoise。
+素材流式落盘后绑定输入；默认是带 `[output]` 标记的实例内路径。
+接受绝对路径的加载器可以在 target 中指定 `"path_mode":"absolute"`。绑定必须指向图中
+已有输入，重复绑定会拒绝。运行前执行 ComfyUI 原生校验，任一声明输出无效则整个请求
+失败，不会只执行其余有效输出。正常 prompt hooks、节点替换和原生执行队列继续生效。
 
-素材流式落盘；请求 JSON 最大 8 MiB，所有字段内容总和受 ComfyUI
-`--max-upload-size` 限制，按实际读取字节累计检查。连续 120 秒收不到下一块上传数据则中止。
-此版本不支持上传断点续传，下载中断后可以重新下载。
+支持 SaveImage、SaveAudio、SaveVideo、VHS_VideoCombine 等普通输出节点。
+filename_prefix 被限定到本次任务 work 子目录；VHS 强制 save_output=true。
+PreviewImage、PreviewAudio 在请求副本中分别使用原生 SaveImage、SaveAudio，以便受管清理。
+原生 UI 文件描述支持图片批次、音频、视频及 VHS gifs；文字 UI 结果为 UTF-8 .txt，
+其他无文件 UI 结果为 .json。只有内存数据的节点需连接普通保存节点才能下载文件。
 
-状态为 `receiving`、`preparing`、`queued`、`running`、`succeeded`、`failed` 或 `deleting`。
-结果列表提供 `id`、`name`、批次 `index`、`filename`、`bytes`、`sha256` 和相对下载 `url`。
-文字结果使用 UTF-8 `.txt`。HEAD 请求只读取下载头，不表示已下载，也不会触发删除。
+第三方保存节点须遵守受管 filename_prefix 并报告原生文件描述。返回其他目录文件会明确
+失败，不会复制或删除外部文件；第三方计算节点自行写到外部位置的副作用不在管理范围内。
+不改变全局 input/output/temp 路径，不新增 API 专用节点。
+
+`request_id` 可省略；同次启动中相同 ID 和请求元数据返回原任务，不重复入队。
+去重不比较重复请求的工作流文件或素材二进制内容；修改图或素材必须使用新 ID。
+已删除的 ID 不能再次执行。可提供 session_id，防止旧请求在重启后进入新会话。
+
+请求和工作流 JSON 各最大 8 MiB，所有字段内容总和受 ComfyUI --max-upload-size 限制。
+实际读取字节累计检查；连续 120 秒没有下一块数据中止上传。不支持上传断点续传，
+下载中断可以重试。状态为 receiving、preparing、queued、running、succeeded、failed、deleting。
+结果提供 id、name、批次 index、kind、filename、bytes、sha256 和相对下载 url。
+HEAD 不表示下载完成，不触发删除。
 
 ## 进度与预计时间
 
@@ -90,20 +145,19 @@ curl http://127.0.0.1:18189/turing/jobs \
 
 - `queue.position`：当前下一次原生执行在等待队列中的位置，从 1 开始；
   `ahead` 包括前面的等待项和正在执行的项。尚在编译、执行中或已完成时为 `null`。
-  一个任务可能多次入队，这不是整个任务在队列中的永久编号。
+  每次 API 任务直接提交一次原生执行。
 - `progress.phase`：`receiving`、`preparing`、`queued`、`executing`、`finalizing`、
-  `cleanup`、`succeeded` 或 `failed`。`status=running` 时可能处于原生执行间的排队阶段。
+  `cleanup`、`succeeded` 或 `failed`。整理结果时不再有活动计算节点。
 - `progress.active_nodes`：当前运行节点的 `id`、`class_type`、可用的 `title`、
   `elapsed_seconds`，以及节点主动报告时的 `value`、`max`、`fraction`、`eta_seconds`。
   没有进度上报的节点不会伪造步数；并行异步节点可以同时出现在列表中。
 - `progress.nodes`：**当前这一次原生执行**已知节点数 `known`、实际完成数 `completed`
   和命中缓存数 `cached`，实际完成数不重复计入缓存。动态扩图会增加已知节点数；
   lazy 分支可能不执行全部已知节点，因此不据此生成工作流完成百分比。
-- `progress.executions_started/completed`：本任务累计原生执行次数。依赖和多个输出
-  可能产生多次执行，无法提前确定总次数；直接返回已上传素材时也可能无需原生执行。
-  `progress.outputs` 单独统计导出素材桩的完成数／总数，不是最终文件数。
+- `progress.executions_started/completed`：本任务的原生执行次数，多输出在同一次执行中处理。
+  `progress.outputs` 统计已整理完成的输出节点数／总数，不是最终文件数。
 - `timing`：`started_at/finished_at` 为 Unix 秒时间戳，`elapsed_seconds` 是从接收任务
-  开始的总耗时，`queue_seconds` 是累计等待耗时（包括入队准备和连续执行间的等待），`execution_seconds` 包括原生执行、
+  开始的总耗时，`queue_seconds` 是累计等待耗时，`execution_seconds` 包括原生执行、
   整理结果和清理耗时。完成后耗时冻结，不会随结果保留时间增长。
 
 节点 ETA 使用最近最多 5 个单位的步速，中位数估计剩余时间；忽略首个完成单位之前的
@@ -111,7 +165,7 @@ curl http://127.0.0.1:18189/turing/jobs \
 总步数变化时重新估算；长时间没有进展、原估计已过期时回到 `null`。
 这是当前节点剩余时间，不是整个工作流剩余时间。
 
-整个任务的 `timing.eta_seconds` 使用同一用户、同模板、同参数及同输入素材规格的成功
+整个任务的 `timing.eta_seconds` 使用同一用户、同工作流、同参数、同素材内容及绑定的成功
 记录估算。至少需要两次记录，取最近最多 5 次的中位数，明显不稳定时不显示。
 `eta_scope=processing` 表示不包含未知的后续排队；只有估计可用时才有
 `estimated_finish`、`eta_source=history` 和 `confidence=low`。`estimate_status` 为
@@ -123,46 +177,45 @@ curl http://127.0.0.1:18189/turing/jobs \
 进度采集独立于查询频率，按原生任务 ID 和所属 API 任务归集，不读取其他任务的
 节点进度，也不改变普通画布的执行方式。此版本通过状态轮询获取，不新增 WebSocket 服务。
 
-## Python 客户端
+## Python 客户端和项目工具
 
-客户端位于 `comfyui_turing_utils/job_api/client.py`，只依赖 aiohttp 和标准库，
-可以独立复制给调用项目使用，无需安装 ComfyUI 或模型环境。
-
-```python
-import asyncio
-from comfyui_turing_utils.job_api.client import Client
-
-async def main():
-    async with Client("http://127.0.0.1:18189") as client:
-        result = await client.run(
-            template_id="h3_replace.json",
-            parameters={"prompt": "替换人物面部", "seed": 42},
-            files={"source_video": "source.mp4", "reference_image": "reference.png"},
-            timeout=3600,
-            on_progress=lambda state: print(state["progress"], state["timing"]),
-        )
-        paths = await client.download_all(result["id"], "results")
-        print(paths)
-
-asyncio.run(main())
-```
-
-`run` 和 `wait` 的 `on_progress` 支持普通函数或异步函数。需要自己控制展示时：
+`comfyui_turing_utils/job_api/client.py` 仅依赖 aiohttp 和标准库，可独立复制使用。
+导入该模块不加载 ComfyUI、Torch 或模型。发现方法为 server()、nodes()、node_info()、
+models()；完整节点 schema 和模型目录复用原生接口。
 
 ```python
-job = await client.submit(template_id="h3_replace.json", files={"source_video": "clip.mp4"})
-async for state in client.watch(job["id"], timeout=3600):
-    print(state["status"], state["progress"]["active_nodes"], state["timing"]["eta_seconds"])
+async with Client("http://127.0.0.1:18189") as client:
+    result = await client.run(
+        workflow="workflow.api.json",  # 也可直接传入已渲染的 dict
+        outputs={"video": {"node_id": "81"}},
+        files={"source": {"path": "source.mp4", "targets": [{"node_id": "12", "input": "video"}]}},
+        timeout=3600,
+        on_progress=lambda state: print(state["progress"], state["timing"]),
+    )
+    paths = await client.download_all(result["id"], "results")
 ```
 
-`watch` 会包含最后一次成功／失败／删除中的状态；`wait/run` 在失败或取消时抛出异常。
-默认每 0.5 秒查询一次，可以通过 `Client(..., poll_interval=1)` 调整。
+submit() 提交后可用 watch() 异步迭代或 wait() 等待；run() 合并提交与等待。
+回调支持普通或异步函数；默认每 0.5 秒查询一次，可设置 poll_interval。
+等待超时不会取消、重交或删除任务。失败／取消会抛异常。
 
-`download_all` 先下载到本地 `.partial` 文件，核对大小和 SHA256 后改名，全部成功后
-自动 DELETE 服务端任务。下载或校验失败时保留服务端结果，删除本地未完成文件。
-重试下载会验证并跳过已经完整保存的同名结果；不会覆盖内容不同的本地文件。
-使用 `delete=False` 可以保留服务端结果；之后调用 `await client.delete(job_id)`。
-服务重启后查询旧任务会抛出 `ServerRestarted`，不会自动重新提交。
+项目工具无需客户端项目安装 ComfyUI，通过插件内 skill 的脚本运行：
+
+```bash
+python skills/turing-workflow/scripts/turing.py --project /path/to/project init --url http://127.0.0.1:18189
+python skills/turing-workflow/scripts/turing.py --project /path/to/project show video-edit
+python skills/turing-workflow/scripts/turing.py --project /path/to/project run video-edit --set 'seed=42' --file source=source.mp4
+```
+
+init 只创建项目下的 turing/，拒绝覆盖已有配置。show 返回参数定义和使用说明。
+check 检查本地类型、绑定和文件，原生校验发生在提交时。run 在 turing/runs/<id>/ 保存
+渲染工作流、能力定义、说明快照和运行记录，下载到 turing/outputs/<id>/。
+`--set NAME=JSON` 保留数值、布尔和字符串类型；文件使用 --file NAME=PATH。
+
+下载先写 .partial，核对 bytes/SHA256 后改名，全部成功后 DELETE。
+下载失败保留服务器结果并清理本地未完成文件。重试会核对并跳过已有完整文件，
+不覆盖不同内容的本地同名文件。download_all(delete=False) 可保留远端结果。
+服务重启后客户端通过 session_id 识别旧任务失效，不自动重新提交。
 
 ## 文件生命周期与重启
 
@@ -170,8 +223,7 @@ async for state in client.watch(job["id"], timeout=3600):
 此目录由插件创建所有权标记并取得独占文件锁，不能指向符号链接或接管其他非空目录。
 同一实例误启动第二个进程时，该 API 不就绪，不会清理第一个进程的任务。
 
-执行成功后先把所有结果固化到独立 `outputs`，再删除上传、中间素材、工作流副本和
-任务项目数据库；直通输入和保留原音频的结果也不会依赖被清理的输入文件。
+执行成功后先把所有结果固化到独立 `outputs`，再删除上传、受管中间文件和工作流临时副本；直通输入和保留原音频的结果也不会依赖被清理的输入文件。
 失败则删除任务文件，暂时保留不含素材内容的错误状态。原生队列中属于该 API 任务的
 历史记录也会移除，不清空其他任务历史或卸载全局模型。
 

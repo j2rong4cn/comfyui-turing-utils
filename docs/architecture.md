@@ -296,6 +296,22 @@ there is no supported single-definition API in frontend 1.53.6.
 
 ## Maintaining the structure
 
+`job_api/workflow.py` binds native API prompts to job-owned uploads and saver paths.
+The service submits directly to the native queue and observes its history/events;
+it does not construct Canvas projects, persist card templates or use material tasks.
+`job_api/project.py` owns local typed capability rendering and run snapshots, without
+importing ComfyUI. Project assets live below one `turing/` subdirectory; usage notes
+evolve per capability and are snapshotted with each run. The repository skill guides
+authoring, verification and maintenance through the same lightweight HTTP client.
+
+`job_api/discovery.py` owns the small server manifest and searchable node
+summaries. `/turing/server` includes usage guidance; full node schemas and model
+lists stay on native ComfyUI routes. Legacy input enumeration is excluded from
+catalog searches, V3 metadata comes from the native schema, and runtime facts
+reuse capability resolution without running models or kernels. Protocol limits
+are shared with submission handling, and discovery remains readable when job
+cleanup prevents execution.
+
 Use the owning implementation module directly. Do not add compatibility
 re-exports of private helpers to make old tests pass; patch a dependency where
 its consumer actually looks it up. A coherent numerical operation may remain

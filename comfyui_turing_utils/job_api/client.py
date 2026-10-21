@@ -7,6 +7,7 @@ import inspect
 import json
 from pathlib import Path
 import uuid
+from urllib.parse import quote
 
 import aiohttp
 
@@ -32,7 +33,8 @@ class Client:
 
     async def __aenter__(self):
         self.http = aiohttp.ClientSession(
-            headers=self.headers, connector=self.connector,
+            headers=self.headers,
+            connector=self.connector,
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=180),
         )
         return self
@@ -41,7 +43,9 @@ class Client:
         await self.http.close()
 
     async def _json(self, method, path, **kwargs):
-        async with self.http.request(method, self.base_url + path, **kwargs) as response:
+        async with self.http.request(
+            method, self.base_url + path, **kwargs
+        ) as response:
             text = await response.text()
             if response.status >= 400:
                 raise ApiError(response.status, text)
@@ -50,33 +54,72 @@ class Client:
     async def server(self):
         return await self._json("GET", "/turing/server")
 
-    async def templates(self):
-        return (await self._json("GET", "/turing/templates"))["items"]
-
-    async def submit(self, *, template_id=None, workflow=None, parameters=None, files=None, request_id=None):
-        if (template_id is None) == (workflow is None):
-            raise ValueError("Provide exactly one template_id or workflow path")
-        if self.session_id is None:
-            self.session_id = (await self.server())["session_id"]
-        request = {
-            "parameters": parameters or {}, "files": {},
-            "request_id": request_id or str(uuid.uuid4()), "session_id": self.session_id,
+    async def nodes(
+        self,
+        query="",
+        *,
+        category="",
+        include_internal=False,
+        include_deprecated=False,
+        limit=50,
+        cursor=None,
+    ):
+        parameters = {
+            "query": query,
+            "category": category,
+            "limit": limit,
+            "include_internal": str(include_internal).lower(),
+            "include_deprecated": str(include_deprecated).lower(),
         }
-        if template_id is not None:
-            request["template_id"] = template_id
-        else:
-            request["workflow"] = "workflow"
+        if cursor is not None:
+            parameters["cursor"] = cursor
+        return await self._json("GET", "/turing/nodes", params=parameters)
+
+    async def node_info(self, class_type):
+        data = await self._json("GET", "/object_info/" + quote(class_type, safe=""))
+        if class_type not in data:
+            raise ApiError(404, f"Unknown node: {class_type}")
+        return data[class_type]
+
+    async def models(self, folder=None):
+        path = "/models" if folder is None else "/models/" + quote(folder, safe="")
+        return await self._json("GET", path)
+
+    async def submit(self, *, workflow, outputs, files=None, request_id=None):
+        if self.session_id is None:
+            server = await self.server()
+            if server["api_version"] != 2:
+                raise ValueError("This client requires job API v2")
+            self.session_id = server["session_id"]
+        request = {
+            "api_version": 2,
+            "workflow": "workflow",
+            "outputs": outputs,
+            "files": {},
+            "request_id": request_id or str(uuid.uuid4()),
+            "session_id": self.session_id,
+        }
         paths = {}
-        for index, (name, path) in enumerate((files or {}).items()):
+        for index, (name, entry) in enumerate((files or {}).items()):
             field = f"file_{index}"
-            request["files"][name], paths[field] = field, Path(path)
-        if workflow is not None:
-            paths["workflow"] = Path(workflow)
+            request["files"][name] = {"part": field, "targets": entry["targets"]}
+            paths[field] = Path(entry["path"])
         body = aiohttp.FormData()
         body.add_field("request", json.dumps(request), content_type="application/json")
+        if isinstance(workflow, dict):
+            body.add_field(
+                "workflow",
+                json.dumps(workflow),
+                filename="workflow.api.json",
+                content_type="application/json",
+            )
+        else:
+            paths["workflow"] = Path(workflow)
         with ExitStack() as stack:
             for field, path in paths.items():
-                body.add_field(field, stack.enter_context(path.open("rb")), filename=path.name)
+                body.add_field(
+                    field, stack.enter_context(path.open("rb")), filename=path.name
+                )
             return await self._json("POST", "/turing/jobs", data=body)
 
     async def status(self, job_id):
@@ -85,12 +128,19 @@ class Client:
         except ApiError as error:
             if error.status == 404:
                 current = await self.server()
-                if self.session_id is not None and current["session_id"] != self.session_id:
-                    raise ServerRestarted("ComfyUI restarted; previous jobs and files were removed") from error
+                if (
+                    self.session_id is not None
+                    and current["session_id"] != self.session_id
+                ):
+                    raise ServerRestarted(
+                        "ComfyUI restarted; previous jobs and files were removed"
+                    ) from error
             raise
 
     async def watch(self, job_id, *, timeout=None):
-        deadline = asyncio.get_running_loop().time() + timeout if timeout is not None else None
+        deadline = (
+            asyncio.get_running_loop().time() + timeout if timeout is not None else None
+        )
         while True:
             async with asyncio.timeout_at(deadline):
                 state = await self.status(job_id)
@@ -151,7 +201,9 @@ class Client:
                             digest.update(chunk)
                             count += len(chunk)
                 if count != output["bytes"] or digest.hexdigest() != output["sha256"]:
-                    raise ValueError("Downloaded result failed size/SHA256 verification")
+                    raise ValueError(
+                        "Downloaded result failed size/SHA256 verification"
+                    )
                 temporary.replace(path)
             finally:
                 temporary.unlink(missing_ok=True)
@@ -165,7 +217,9 @@ class Client:
         if not before["restart_supported"]:
             raise RuntimeError("ComfyUI-Manager restart is unavailable")
         try:
-            async with self.http.post(self.base_url + before["restart_url"]) as response:
+            async with self.http.post(
+                self.base_url + before["restart_url"]
+            ) as response:
                 if response.status >= 400:
                     raise ApiError(response.status, await response.text())
                 await response.read()
@@ -176,7 +230,10 @@ class Client:
             while True:
                 try:
                     current = await self.server()
-                    if current["ready"] and current["session_id"] != before["session_id"]:
+                    if (
+                        current["ready"]
+                        and current["session_id"] != before["session_id"]
+                    ):
                         self.session_id = current["session_id"]
                         return current
                 except aiohttp.ClientConnectionError:
