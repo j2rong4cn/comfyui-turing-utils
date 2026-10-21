@@ -1,0 +1,219 @@
+diff --git a/comfy_kitchen/backends/cuda/ops/quantize_nvfp4.cu b/comfy_kitchen/backends/cuda/ops/quantize_nvfp4.cu
+index 3c00d13..5779649 100644
+--- a/comfy_kitchen/backends/cuda/ops/quantize_nvfp4.cu
++++ b/comfy_kitchen/backends/cuda/ops/quantize_nvfp4.cu
+@@ -74,7 +74,10 @@ __global__ void quantize_nvfp4_kernel(
+     const size_t orig_cols,
+     const float epsilon) {
+ 
+-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
++    if (idx >= num_rows * num_cols / kValsPerThread) {
++        return;
++    }
+ 
+     // Storage for values - loaded differently based on Misaligned template
+     IType vals[kValsPerThread];
+@@ -222,7 +225,10 @@ __global__ void dequantize_nvfp4_kernel(
+     const size_t num_cols,
+     const size_t num_rows) {
+ 
+-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
++    if (idx >= num_rows * num_cols / kValsPerThread) {
++        return;
++    }
+     
+     // Calculate which block this thread group is processing
+     const size_t global_elem_idx = static_cast<size_t>(idx) * kValsPerThread;
+@@ -434,4 +440,4 @@ void launch_dequantize_nvfp4_kernel(
+     }
+ }
+ 
+-} // extern "C"
+\ No newline at end of file
++} // extern "C"
+diff --git a/pyproject.toml b/pyproject.toml
+index de66cf8..b6cb27c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "comfy-kitchen"
+-version = "0.2.37"
++version = "0.2.37+nvfp4bounds.1"
+ description = "Fast Kernel Library for ComfyUI with multiple compute backends"
+ readme = "README.md"
+ requires-python = ">=3.10"
+diff --git a/setup.py b/setup.py
+index d13b358..2b58049 100644
+--- a/setup.py
++++ b/setup.py
+@@ -305,7 +305,7 @@ def get_cuda_path() -> tuple[pathlib.Path, pathlib.Path] | None:
+     if cuda_home is None:
+         cuda_home = nvcc_bin.parent.parent
+ 
+-    return pathlib.Path(cuda_home), nvcc_bin
++    return pathlib.Path(cuda_home), nvcc_bin.resolve()
+ 
+ # Keep build-time, CMake, and runtime architecture policy in one package resource.
+ # Exact membership is intentional: accepting an unreviewed gfx11xx/gfx12xx target
+diff --git a/tests/test_nvfp4_bounds.py b/tests/test_nvfp4_bounds.py
+new file mode 100644
+index 0000000..e68dd34
+--- /dev/null
++++ b/tests/test_nvfp4_bounds.py
+@@ -0,0 +1,152 @@
++"""NVFP4 vectorized kernels must leave both ends of every buffer intact."""
++
++import math
++
++import pytest
++import torch
++
++from comfy_kitchen.backends import cuda
++from comfy_kitchen.backends.eager import quantization as eager
++
++from .conftest import requires_cuda_backend
++
++
++GUARD = 512
++
++
++def guarded(shape, dtype, value=91):
++    storage = torch.full((math.prod(shape) + GUARD * 2,), value, device="cuda", dtype=dtype)
++    return storage, storage[GUARD:-GUARD].view(shape)
++
++
++def assert_guard(storage, value=91):
++    assert bool((storage[:GUARD] == value).all()), "buffer prefix overwritten"
++    assert bool((storage[-GUARD:] == value).all()), "buffer suffix overwritten"
++
++
++def cpu_input(rows, columns, dtype):
++    return ((torch.arange(rows * columns) % 2) * 2 - 1).reshape(rows, columns).to(dtype)
++
++
++def quantize_raw(x, scale, packed, blocks, pad, hi_first):
++    cuda._C.quantize_nvfp4(
++        *(cuda._wrap_for_dlpack(t) for t in (x, scale, packed, blocks)),
++        0.0, pad, hi_first, torch.cuda.current_stream().cuda_stream,
++    )
++
++
++def dequantize_raw(packed, scale, blocks, output, hi_first):
++    cuda._C.dequantize_nvfp4(
++        *(cuda._wrap_for_dlpack(t) for t in (packed, scale, blocks, output)),
++        cuda.DTYPE_TO_CODE[output.dtype], hi_first, torch.cuda.current_stream().cuda_stream,
++    )
++
++
++@requires_cuda_backend
++class TestNVFP4Bounds:
++    @pytest.mark.parametrize("shape", [(1, 1), (16, 16), (17, 17), (48, 16), (128, 16), (144, 16), (144, 272)])
++    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
++    def test_exact_allocations_for_memcheck(self, shape, dtype):
++        # No guards or oversized backing storage: Compute Sanitizer must also
++        # catch tail reads, which cannot be detected by output sentinels alone.
++        source = cpu_input(*shape, dtype)
++        packed, blocks = cuda.quantize_nvfp4(source.cuda(), torch.ones(1, device="cuda"), pad_16x=True)
++        expected_p, expected_b = eager.quantize_nvfp4(source, torch.ones(1), pad_16x=True)
++        assert torch.equal(packed.cpu(), expected_p)
++        assert torch.equal(blocks.view(torch.uint8).cpu(), expected_b.view(torch.uint8))
++        output = cuda.dequantize_nvfp4(packed, torch.ones(1, device="cuda"), blocks, torch.float32)
++        expected = eager.dequantize_nvfp4(expected_p, torch.ones(1), expected_b, torch.float32)
++        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
++
++    @pytest.mark.parametrize("rows,columns,pad", [
++        (1, 1, True), (1, 17, True), (15, 15, True),
++        (16, 16, False), (16, 16, True), (16, 17, True),
++        (17, 16, True), (17, 17, True), (31, 31, True),
++        (32, 16, False), (33, 17, True), (127, 16, True),
++        (128, 16, False), (129, 16, True), (144, 16, False),
++        (144, 272, False), (145, 17, True),
++    ])
++    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
++    @pytest.mark.parametrize("hi_first", [False, True])
++    def test_quantize_guards_and_cpu_reference(self, rows, columns, pad, dtype, hi_first):
++        source = cpu_input(rows, columns, dtype)
++        x_storage, x = guarded(source.shape, dtype)
++        x.copy_(source)
++        scale = torch.ones(1, device="cuda")
++        out_rows, out_columns = (rows + 15) // 16 * 16, (columns + 15) // 16 * 16
++        p_storage, packed = guarded((out_rows, out_columns // 2), torch.uint8)
++        b_storage, blocks = guarded(((out_rows + 127) // 128 * 128, (out_columns // 16 + 3) // 4 * 4), torch.uint8)
++        blocks.zero_()
++        quantize_raw(x, scale, packed, blocks, pad, hi_first)
++        for storage in (x_storage, p_storage, b_storage):
++            assert_guard(storage)
++        expected_p, expected_b = eager.quantize_nvfp4(source, torch.ones(1), pad_16x=pad, hi_first=hi_first)
++        assert torch.equal(x.cpu(), source)
++        assert torch.equal(packed.cpu(), expected_p)
++        assert torch.equal(blocks.cpu(), expected_b.view(torch.uint8))
++
++    @pytest.mark.parametrize("rows,columns", [
++        (16, 16), (16, 32), (32, 16), (48, 16), (112, 16),
++        (128, 16), (144, 16), (144, 272), (160, 16), (16, 512),
++    ])
++    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
++    @pytest.mark.parametrize("hi_first", [False, True])
++    def test_dequantize_guards_and_cpu_reference(self, rows, columns, dtype, hi_first):
++        packed_cpu, blocks_cpu = eager.quantize_nvfp4(cpu_input(rows, columns, torch.float16), torch.ones(1), hi_first=hi_first)
++        p_storage, packed = guarded(packed_cpu.shape, torch.uint8)
++        b_storage, blocks = guarded(blocks_cpu.shape, torch.uint8)
++        o_storage, output = guarded((rows, columns), dtype)
++        packed.copy_(packed_cpu)
++        blocks.copy_(blocks_cpu.view(torch.uint8))
++        dequantize_raw(packed, torch.ones(1, device="cuda"), blocks, output, hi_first)
++        for storage in (p_storage, b_storage, o_storage):
++            assert_guard(storage)
++        assert torch.equal(packed.cpu(), packed_cpu)
++        assert torch.equal(blocks.cpu(), blocks_cpu.view(torch.uint8))
++        expected = eager.dequantize_nvfp4(packed_cpu, torch.ones(1), blocks_cpu, dtype, hi_first=hi_first)
++        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
++
++    @pytest.mark.parametrize("rows,columns", [(0, 0), (0, 16), (16, 0)])
++    def test_empty_buffers_are_untouched(self, rows, columns):
++        x_storage, x = guarded((rows, columns), torch.float16)
++        p_storage, packed = guarded((rows, columns // 2), torch.uint8)
++        b_storage, blocks = guarded(((rows + 127) // 128 * 128, (columns // 16 + 3) // 4 * 4), torch.uint8)
++        o_storage, output = guarded((rows, columns), torch.float32)
++        scale = torch.ones(1, device="cuda")
++        quantize_raw(x, scale, packed, blocks, False, True)
++        dequantize_raw(packed, scale, blocks, output, True)
++        for storage in (x_storage, p_storage, b_storage, o_storage):
++            assert bool((storage == 91).all())
++
++    @pytest.mark.parametrize("shape", [(16, 16), (144, 16), (17, 17)])
++    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
++    def test_tail_on_side_stream_and_cuda_graph(self, shape, dtype):
++        source = cpu_input(*shape, dtype)
++        x_storage, x = guarded(shape, dtype)
++        x.copy_(source)
++        rows, columns = ((size + 15) // 16 * 16 for size in shape)
++        p_storage, packed = guarded((rows, columns // 2), torch.uint8)
++        b_storage, blocks = guarded(((rows + 127) // 128 * 128, (columns // 16 + 3) // 4 * 4), torch.uint8)
++        o_storage, output = guarded((rows, columns), torch.float32)
++        blocks.zero_()
++        scale = torch.ones(1, device="cuda")
++        stream = torch.cuda.Stream()
++        stream.wait_stream(torch.cuda.current_stream())
++        with torch.cuda.stream(stream):
++            quantize_raw(x, scale, packed, blocks, True, True)
++            dequantize_raw(packed, scale, blocks, output, True)
++        stream.synchronize()
++        graph = torch.cuda.CUDAGraph()
++        with torch.cuda.graph(graph, stream=stream):
++            quantize_raw(x, scale, packed, blocks, True, True)
++            dequantize_raw(packed, scale, blocks, output, True)
++        for _ in range(2):
++            x.neg_()
++            source.neg_()
++            graph.replay()
++            torch.cuda.synchronize()
++            for storage in (x_storage, p_storage, b_storage, o_storage):
++                assert_guard(storage)
++            expected_p, expected_b = eager.quantize_nvfp4(source, torch.ones(1), pad_16x=True)
++            expected = eager.dequantize_nvfp4(expected_p, torch.ones(1), expected_b, torch.float32)
++            torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
