@@ -1,5 +1,7 @@
 """Project JSON owns selected content; SQLite indexes media and execution records."""
 
+from . import transactions
+
 import json
 import math
 import re
@@ -38,7 +40,7 @@ class Project:
     @classmethod
     def create(cls, directory):
         root = inside(folder_paths.get_output_directory(), directory)
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             if not root.is_dir() or any(root.iterdir()):
                 raise ValueError(
                     "Select an existing empty folder to create a Canvas project"
@@ -49,7 +51,7 @@ class Project:
     def __init__(self, directory):
         self.directory = directory
         self.root = inside(folder_paths.get_output_directory(), directory)
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             path = inside(self.root, "canvas.json")
             if not path.is_file():
                 raise ValueError(
@@ -68,7 +70,7 @@ class Project:
             ):
                 raise ValueError("Invalid or unsupported Canvas project")
             uuid.UUID(data["id"])
-        with workflow_files.LOCK, self.connect() as db:
+        with transactions.LOCK, self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > 4:
                 raise ValueError("Unsupported Canvas database version")
@@ -123,7 +125,7 @@ class Project:
             db.close()
 
     def document(self, canvas=None, card_ids=None, *, execution=False):
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             if canvas is None:
                 canvas = workflow_files.load_json(self.root / "canvas.json")
             document = project_document(
@@ -172,7 +174,7 @@ class Project:
         return info
 
     def selections(self, canvas=None, card_ids=None):
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             canvas = canvas or workflow_files.load_json(self.root / "canvas.json")
             result = {}
             for card in canvas["cards"]:
@@ -203,7 +205,7 @@ class Project:
             not isinstance(content["text"], str) or "asset" in content
         ):
             raise ValueError("Text must be an inline string")
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             canvas = workflow_files.load_json(self.root / "canvas.json")
             identity, stub = node.split(":", 1)
             if not any(card["id"] == identity for card in canvas["cards"]):
@@ -246,7 +248,7 @@ class Project:
                     selected.update(start=0, end=0)
             workflow_state.set_selection(workflow, stub, selected, self.directory)
             workflow_state.refresh(workflow)
-            workflow_files.atomic_json(path, workflow)
+            transactions.atomic_json(path, workflow)
             if "text" in selected:
                 with self.connect() as db:
                     db.execute(
@@ -256,7 +258,7 @@ class Project:
 
     def selection(self, node):
         identity, stub = node.split(":", 1)
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             workflow = workflow_files.load_json(
                 workflow_files.card_path(self.root, identity)
             )
@@ -325,7 +327,7 @@ class Project:
         return [dict(row) for row in rows]
 
     def settings(self, canvas=None, *, private=False):
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             if canvas is None:
                 canvas = workflow_files.load_json(self.root / "canvas.json")
             settings = {
@@ -348,7 +350,7 @@ class Project:
         pixels = settings["max_megapixels"]
         if type(pixels) not in {int, float} or not math.isfinite(pixels) or pixels <= 0:
             raise ValueError("Maximum megapixels must be positive and finite")
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             canvas = workflow_files.load_json(self.root / "canvas.json")
             if canvas["revision"] != revision:
                 raise Conflict("Project changed; reopen before changing settings")
@@ -362,7 +364,7 @@ class Project:
                 normalized["api_key"] = previous.get("api_key", "") if same_origin else ""
             settings = {**settings, "chat": normalized}
             canvas["revision"] += 1
-            workflow_files.commit_project(
+            transactions.commit_project(
                 self.root,
                 [
                     (
@@ -380,7 +382,7 @@ class Project:
                 "SELECT kind, count(*) AS count, sum(COALESCE(json_extract(metadata,'$.bytes'),0)) AS bytes FROM materials GROUP BY kind"
             ).fetchall()
             texts = db.execute("SELECT count(*) FROM text_materials").fetchone()[0]
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             if canvas is None:
                 canvas = workflow_files.load_json(self.root / "canvas.json")
         counts = {kind: 0 for kind in ("image", "video", "audio", "text")}

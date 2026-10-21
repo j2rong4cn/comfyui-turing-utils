@@ -1,14 +1,10 @@
-import { pathToFileURL } from "node:url";
+import { browserFixture } from "./harness.mjs";
 import { selectRenderer } from "./renderer.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
+const browser = await browserFixture();
 try {
   const page = await browser.newPage();
-  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18187");
+  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:8188");
   await selectRenderer(page);
   console.log(await page.evaluate(async () => {
     const { assertWorkflowLinks } = await import("/extensions/comfyui-turing-utils/lib/workflow_metadata.js");
@@ -91,7 +87,16 @@ try {
       const widget = node.widgets.find((widget) => widget.name === "sigmas");
       widget.value = "scheduler";
       widget.callback("scheduler");
-      for (const name of ["sigmas.steps", "sigmas.denoise", "mask_grow"]) connect(node, name);
+      const mode = node.widgets.find((widget) => widget.name === "mode");
+      mode.value = "progressive";
+      mode.callback("progressive");
+      for (const name of ["sigmas.steps", "sigmas.denoise", "mode.mask_grow"]) connect(node, name);
+    }));
+    results.push(await exercise("TuringUtilsAttentionStrategy", async (node, connect) => {
+      // Nested selector restoration used to delete the earliest connected
+      // leaves even though saved input names and indices were correct.
+      for (const input of [...node.inputs])
+        if (["INT", "FLOAT", "BOOLEAN"].includes(input.type)) connect(node, input.name);
     }));
     results.push(await exercise("BatchImagesNode", async (node, connect, frame) => {
       for (let i = 0; i < 3; i++) {

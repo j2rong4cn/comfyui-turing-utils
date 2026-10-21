@@ -16,7 +16,7 @@ from comfyui_turing_utils.adapters.minimax.veda.engine import (
 )
 from comfyui_turing_utils.adapters.minimax.veda.plans import PlanTable, TilePlan
 from comfyui_turing_utils.adapters.minimax.veda.tiling import TileShape
-from .veda_reference import official_logits, route_agreement
+from turing_test_support.veda_reference import official_logits, route_agreement
 from comfyui_turing_utils.adapters.minimax.veda.predictor import (
     convert_projection,
     project_features,

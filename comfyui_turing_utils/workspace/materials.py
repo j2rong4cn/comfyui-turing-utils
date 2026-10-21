@@ -36,10 +36,10 @@ def save_images(value, path):
     if len(value) == 0:
         raise ValueError("Image material is empty")
     saved = []
-    temporary_root = Path(folder_paths.base_path) / ".cache" / "tmp"
+    temporary_root = Path(path).parent
     temporary_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix="material-images-", dir=temporary_root
+        prefix=".material-images-", dir=temporary_root
     ) as directory:
         saver = nodes.SaveImage()
         saver.output_dir = directory

@@ -16,9 +16,9 @@ from comfyui_turing_utils.adapters.minimax.veda.predictor import (
     project_features,
     rotate_features,
 )
-from .veda_pooling_reference import pool_video_tiles
-from .veda_selection_reference import select_tiles
-from .veda_tiling_reference import gather_tiles
+from turing_test_support.veda_pooling_reference import pool_video_tiles
+from turing_test_support.veda_selection_reference import select_tiles
+from turing_test_support.veda_tiling_reference import gather_tiles
 from comfyui_turing_utils.adapters.minimax.veda.tiling import (
     TileShape,
     TiledSpan,

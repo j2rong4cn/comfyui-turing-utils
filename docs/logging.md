@@ -16,6 +16,7 @@ plain ComfyUI console readable while preserving standard Python filtering.
 | `wan`, `wan.layout`, `bernini` | model adapter decisions |
 | `stage` | Stage Barrier compilation, planning, and execution |
 | `profile` | opt-in CUDA phase and workflow timeline reports |
+| `jobs` | temporary API job directory ownership and startup cleanup |
 
 INFO records one-time configuration and policy decisions. WARNING identifies a
 degraded path, invalid configuration, or diagnostic failure. Per-call details

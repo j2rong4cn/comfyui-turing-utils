@@ -1,19 +1,15 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
+const browser = await browserFixture();
 try {
   const page = await browser.newPage();
   // Chromium's synthetic pointer also fails on upstream LoadImage in this
   // host's headless run. Invoke real DOM controls, not widget callbacks, in Vue.
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18187");
+  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:8188");
   await selectRenderer(page);
   const fixture = await page.evaluate(async () => {
     const workspace =
@@ -24,7 +20,12 @@ try {
     await workspace.request("directory/create", { directory });
     await workspace.openProject(directory, true);
     await workspace.addCard({ kind: "image" });
-    const card = app.graph._nodes.find((node) => node.type === "TuringCanvasCard");
+    let card = app.graph._nodes.find((node) => node.type === "TuringCanvasCard");
+    const { saveParameters } = await import("/extensions/comfyui-turing-utils/workspace/parameters.js");
+    await saveParameters(card, [{ type: "presentation", id: card.properties.materials[0].id,
+      value: { canvas_show_history: true } }]);
+    await workspace.openProject(directory);
+    card = app.graph._nodes.find((node) => node.type === "TuringCanvasCard");
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = 32;
     const assets = [];
@@ -112,7 +113,7 @@ try {
       throw Error("Selection was not restored");
     if (widget.options.items.filter((item) => item.preview_url).length !== 2)
       throw Error("History changed after reconfigure");
-    await card.widgets.find((widget) => widget.name === "编辑工作流").callback();
+    await card.getExtraMenuOptions().find((option) => option.content === "编辑工作流").callback();
     const materialNode = app.graph._nodes.find(
       (node) => node.type === "TuringMaterialImage",
     );
@@ -214,9 +215,14 @@ try {
     ]) {
       const asset = await importAsset(directory, kind, file);
       const added = await workspace.addCard({ kind });
-      const node = app.graph._nodes.find(
+      let node = app.graph._nodes.find(
         (node) => node.properties.instance === added.id,
       );
+      const { saveParameters } = await import("/extensions/comfyui-turing-utils/workspace/parameters.js");
+      await saveParameters(node, [{ type: "presentation", id: node.properties.materials[0].id,
+        value: { canvas_show_history: true } }]);
+      await workspace.openProject(directory);
+      node = app.graph._nodes.find((node) => node.properties.instance === added.id);
       const widget = node.widgets.find(
         (widget) => widget._materialId === node.properties.materials[0].id,
       );

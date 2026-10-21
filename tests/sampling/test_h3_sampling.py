@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT.parents[1]))
 sys.path.insert(0, str(ROOT))
 
@@ -27,225 +27,15 @@ from comfyui_turing_utils.nodes.minimax_sampler import (
     _H3KSamplerApply,
 )
 from comfyui_turing_utils.runtime.shared_loaders import compile_shared_loaders
-
-
-def latent(height=8, width=12, frames=2, batch=1, audio=True):
-    video = torch.randn(batch, 24, frames, height, width)
-    samples = NestedTensor((video, torch.randn(batch, 32, 2, 9))) if audio else video
-    return {"samples": samples, "batch_index": list(range(batch))}
-
-
-def conditioning(h=None, w=None):
-    options = (
-        {}
-        if h is None
-        else {
-            "minimax_keyframes": [
-                {"latent": torch.randn(1, 24, 1, h, w), "resolved_frame_index": 0}
-            ]
-        }
-    )
-    return [[torch.zeros(1, 2, 4), options]]
-
-
-class TinyDiT(torch.nn.Module):
-    patch_size = (1, 2, 2)
-
-    def __init__(self, device=None, **kwargs):
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.tensor(0.125, device=device))
-        self.calls = []
-
-    @property
-    def dtype(self):
-        return self.weight.dtype
-
-    def preprocess_text_embeds(self, context):
-        return context
-
-    def forward(self, samples, timestep, context=None, **kwargs):
-        assert isinstance(samples, list) and len(samples) == 2
-        progress = kwargs.get("transformer_options", {}).get(SAMPLING_PROGRESS_KEY)
-        self.calls.append(
-            (
-                None if progress is None else (progress.step, progress.total_steps),
-                [t.detach().clone() for t in samples],
-            )
-        )
-        bias = 0 if context is None else context.mean()
-        return [value * self.weight + bias for value in samples]
-
-
-class TinyH3(comfy.model_base.MiniMaxH3):
-    def __init__(self, device):
-        config = comfy.supported_models_base.BASE({"in_channels": 24})
-        config.latent_format = comfy.latent_formats.MiniMaxH3AV()
-        config.sampling_settings = {"shift": 12, "audio_shift": 3}
-        comfy.model_base.BaseModel.__init__(
-            self,
-            config,
-            comfy.model_base.ModelType.FLOW_AV,
-            device=device,
-            unet_model=TinyDiT,
-        )
-
-
-@pytest.fixture
-def patcher():
-    device = torch.device("cpu")
-    return comfy.model_patcher.ModelPatcher(TinyH3(device), device, device)
-
-
-@pytest.fixture(autouse=True)
-def native_test_runtime():
-    with (
-        mock.patch("latent_preview.get_previewer", return_value=None),
-        mock.patch("comfy.model_management.load_models_gpu"),
-    ):
-        yield
-
-
-def shift(patcher, video=12, audio=3):
-    patcher.model.model_sampling.set_parameters(shift=video, audio_shift=audio)
-
-
-def native(
-    patcher,
-    source,
-    curve,
-    positive=None,
-    sampler="euler",
-    seed=17,
-    noise=None,
-    callback=None,
-):
-    return comfy.sample.sample_custom(
-        patcher,
-        (
-            comfy.sample.prepare_noise(
-                source["samples"], seed, source.get("batch_index")
-            )
-            if noise is None
-            else noise
-        ),
-        1,
-        comfy.samplers.sampler_object(sampler),
-        curve,
-        conditioning() if positive is None else positive,
-        [],
-        source["samples"],
-        noise_mask=source.get("noise_mask"),
-        callback=callback,
-        disable_pbar=True,
-        seed=seed,
-    )
-
-
-def assert_streams(actual, expected, **kwargs):
-    a = actual.unbind() if actual.is_nested else [actual]
-    b = expected.unbind() if expected.is_nested else [expected]
-    assert len(a) == len(b)
-    for x, y in zip(a, b):
-        torch.testing.assert_close(x, y, **kwargs)
-
-
-@pytest.mark.parametrize(
-    "preset,literal",
-    [
-        ("3+1", "1,.960058,.857510,.706380,0"),
-        ("4+1", "1,.972973,.923077,.8,.631579,0"),
-        ("4+2", "1,.972973,.923077,.8,.705882,.521739,0"),
-        ("6+2", "1,.983684,.960058,.923077,.857510,.706380,.600539,.414306,0"),
-    ],
+from turing_test_support.h3 import (
+    latent,
+    conditioning,
+    TinyH3,
+    shift,
+    native,
+    assert_streams,
+    nearest_lift,
 )
-def test_dynamic_presets_reconstruct_original_rounded_recipes(patcher, preset, literal):
-    n, extra = map(int, preset.split("+"))
-    actual = sampling.sampling_sigmas(
-        patcher, {"sigmas": "scheduler", "steps": n, "tail_steps": extra}, "euler"
-    )
-    torch.testing.assert_close(
-        actual.cpu(), sampling.parse_sigmas(literal, "curve"), atol=5e-7, rtol=0
-    )
-
-
-@pytest.mark.parametrize("video_shift", [3, 6, 12, 20])
-def test_tail_is_subdivided_in_base_clock_and_original_points_are_preserved(
-    patcher, video_shift
-):
-    shift(patcher, video_shift)
-    actual = sampling.sampling_sigmas(
-        patcher, {"sigmas": "scheduler", "steps": 5, "tail_steps": 1}, "euler"
-    )
-    base = comfy.samplers.KSampler(
-        patcher, 5, patcher.load_device, sampler="euler", scheduler="simple"
-    ).sigmas
-    torch.testing.assert_close(actual[:-2], base[:-1], rtol=0, atol=0)
-    u = comfy.ldm.minimax.model.time_shift_sigma(actual, video_shift, 1)
-    assert float(u[-2]) == pytest.approx(float(u[-3]) / 2, rel=2e-6)
-    assert len(actual) == 7 and float(actual[-1]) == 0
-
-
-@pytest.mark.parametrize("sampler", ["euler", "heun", "dpm_2", "uni_pc"])
-@pytest.mark.parametrize("scheduler", ["simple", "beta", "normal"])
-@pytest.mark.parametrize("denoise", [0, 0.13, 0.5, 1])
-def test_zero_tail_matches_native_scheduler_exactly(
-    patcher, sampler, scheduler, denoise
-):
-    settings = {
-        "sigmas": "scheduler",
-        "steps": 8,
-        "scheduler": scheduler,
-        "denoise": denoise,
-        "tail_steps": 0,
-    }
-    expected = comfy.samplers.KSampler(
-        patcher,
-        8,
-        patcher.load_device,
-        sampler=sampler,
-        scheduler=scheduler,
-        denoise=denoise,
-    ).sigmas
-    actual = sampling.sampling_sigmas(patcher, settings, sampler)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-
-def test_audio_shift_does_not_shift_video_curve_and_manual_values_are_absolute(patcher):
-    initial = sampling.sampling_sigmas(patcher, None, "euler")
-    shift(patcher, 12, 2)
-    torch.testing.assert_close(
-        sampling.sampling_sigmas(patcher, None, "euler"), initial, rtol=0, atol=0
-    )
-    shift(patcher, 6, 2)
-    curve = sampling.sampling_sigmas(
-        patcher, {"sigmas": "manual", "values": ".6,.6,.2,0"}, "euler"
-    )
-    torch.testing.assert_close(curve, torch.tensor([0.6, 0.6, 0.2, 0]), rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("preset,values", sampling.SECOND_PASS_PRESETS)
-def test_second_examples_follow_current_shift(patcher, preset, values):
-    original = torch.tensor(values)
-    torch.testing.assert_close(
-        sampling.sampling_sigmas(patcher, {"preset": preset}, "euler", second=True),
-        original,
-    )
-    shift(patcher, 6, 2)
-    actual = sampling.sampling_sigmas(patcher, {"preset": preset}, "euler", second=True)
-    torch.testing.assert_close(
-        comfy.ldm.minimax.model.time_shift_sigma(actual, 6, 12),
-        original,
-        atol=2e-7,
-        rtol=0,
-    )
-
-
-@pytest.mark.parametrize(
-    "text", ["", "bad", "1,.2", "1,-.1,0", "nan,0", "1,0,0", ".5,.8,0"]
-)
-def test_invalid_manual_curves_report_owner(text):
-    with pytest.raises(ValueError, match="curve:"):
-        sampling.parse_sigmas(text, "curve")
 
 
 @pytest.mark.parametrize("name", comfy.samplers.KSampler.SAMPLERS)
@@ -283,10 +73,6 @@ def test_single_stage_ignores_inactive_stage_parameters_and_zero_denoise_skips(p
     )
     assert result is source
     assert not patcher.model.diffusion_model.calls
-
-
-def nearest_lift(_model, video, h, w):
-    return F.interpolate(video, size=(video.shape[2], h, w), mode="nearest")
 
 
 def test_two_pass_matches_independent_native_calls_and_keeps_final_geometry(patcher):

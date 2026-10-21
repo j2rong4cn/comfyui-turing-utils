@@ -6,8 +6,7 @@ import {
   assertWorkflowLinks,
   normalizeAutogrowLayouts,
 } from "../lib/workflow_metadata.js";
-import { settleMaterials } from "./material_selection.js";
-import { settleProjectWrites, saveProject } from "./project_state.js";
+import { settleProjectState, saveProject } from "./project_state.js";
 import { captureValueControls } from "../lib/value_controls.js";
 import { SerialWrites } from "../lib/serial_writes.js";
 import {
@@ -224,8 +223,7 @@ export function installDocumentStorage({ save, load, saveAs, rename, renameTempl
       }
       if (automatic && reference.directory && !reference.id) return this;
       if (reference.directory) {
-        await settleMaterials(reference.directory);
-        await settleProjectWrites(reference.directory);
+        await settleProjectState(reference.directory);
       }
       const task =
         reference.directory && !reference.id ? null : await promptForTab(this, { draft: true }, loadGraph);

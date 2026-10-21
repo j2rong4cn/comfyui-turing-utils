@@ -1,13 +1,9 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 import { installStarterFixture } from "./starter.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
+const browser = await browserFixture();
 try {
   const page = await browser.newPage();
   const errors = [];
@@ -17,14 +13,12 @@ try {
       errors.push(event.text());
   });
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18188");
+  await selectRenderer(page);
   await page.waitForFunction(
     () =>
       window.app?.graph &&
-      window.LiteGraph?.registered_node_types.TuringCanvasInputs &&
-      window.app.extensionManager.workflow.activeWorkflow?.isLoaded &&
-      !window.app.extensionManager.workflow.isBusy,
+      window.LiteGraph?.registered_node_types.TuringCanvasInputs,
   );
-  await selectRenderer(page);
   await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
@@ -78,7 +72,7 @@ try {
       }
       check(!draws.some((d) => d.text === "ports"), "Hidden metadata was drawn");
     };
-    const checkMaterials = () => {
+    const checkMaterials = (codec = "h264") => {
       for (const node of app.graph._nodes.filter((n) =>
         n.type.startsWith("TuringMaterial"),
       )) {
@@ -92,7 +86,7 @@ try {
           check(values.fps === 30, `Video FPS shifted: ${values.fps}`);
           check(values.bit_depth === "auto", "Video bit depth shifted");
           check(values.color_space === "sRGB", "Video color space shifted");
-          check(values.codec === "none", "Video codec shifted");
+          check(values.codec === codec, "Video codec shifted");
         }
       }
     };
@@ -204,7 +198,7 @@ try {
     }
     await workspace.openTab(legacy, `legacy-endpoints-${Date.now()}.json`);
     endpoints().forEach(checkEndpoint);
-    checkMaterials();
+    checkMaterials("none");
     await checkPrompt();
     const inner = app.graph.convertToSubgraph(new Set(app.graph._nodes));
     app.graph.convertToSubgraph(new Set([inner.node]));

@@ -158,6 +158,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 from .workspace.nodes import PUBLIC_NODES as MATERIAL_NODES
 from .workspace.routes import install_routes
 from .workspace.cache import install_task_cleanup
+from .job_api.routes import install_routes as install_job_routes
 
 NODE_CLASS_MAPPINGS.update(MATERIAL_NODES)
 for _name in MATERIAL_NODES:
@@ -166,6 +167,7 @@ for _name in MATERIAL_NODES:
     )
 install_routes()
 install_task_cleanup()
+install_job_routes()
 NODE_DISPLAY_NAME_MAPPINGS.update(
     {"TuringCanvasInputs": "Canvas Inputs", "TuringCanvasOutputs": "Canvas Outputs"}
 )

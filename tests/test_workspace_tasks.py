@@ -1,5 +1,7 @@
 """Native execution contracts at the material/task boundary; no model weights."""
 
+from comfyui_turing_utils.workspace import transactions
+
 import asyncio
 import copy
 import json
@@ -895,7 +897,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
         original = path.read_bytes()
         changed = json.loads(original)
         changed["nodes"][0]["pos"] = [987, 654]
-        workflow_files.atomic_json(path, changed)
+        transactions.atomic_json(path, changed)
         read = Path.read_bytes
 
         def stale_bytes(file):
@@ -923,7 +925,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
         original = workflow_files.load_json(path)
         damaged = copy.deepcopy(original)
         damaged["extra"]["turing_card"]["prompt"]["1"]["inputs"]["ports"] = "invalid"
-        workflow_files.atomic_json(path, damaged)
+        transactions.atomic_json(path, damaged)
         document = self.project.document()
         self.assertIn(
             "error", next(c for c in document["cards"] if c["id"] == destination)
@@ -1139,7 +1141,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
             dict(source=first[0], slot=0, target=destination, port="incoming")
         ]
         canvas["revision"] += 1
-        workflow_files.atomic_json(path, canvas)
+        transactions.atomic_json(path, canvas)
         operation = await self.tasks.start(
             "project", canvas["revision"], cards=[destination, source]
         )
@@ -1349,7 +1351,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
         opened = workflow_files.read_instance(self.project.root, card)
         workflow = copy.deepcopy(opened["workflow"])
         workflow["nodes"][0]["pos"] = [400, 400]
-        native = workflow_files.atomic_json
+        native = transactions.atomic_json
         failed = False
 
         def write(path, value):
@@ -1359,7 +1361,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
                 raise OSError("power interruption")
             return native(path, value)
 
-        with mock.patch.object(workflow_files, "atomic_json", side_effect=write):
+        with mock.patch.object(transactions, "atomic_json", side_effect=write):
             with self.assertRaises(OSError):
                 workflow_files.save_instance(
                     self.project.root,
@@ -1381,16 +1383,16 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
         card, _ = self.card()
         path = workflow_files.card_path(self.project.root, card)
         before = workflow_files.load_json(path)
-        native = workflow_files.atomic_json
+        native = transactions.atomic_json
 
         def interrupted(destination, value):
             if destination == path:
                 raise OSError("interrupted before workflow write")
             return native(destination, value)
 
-        with mock.patch.object(workflow_files, "atomic_json", side_effect=interrupted):
+        with mock.patch.object(transactions, "atomic_json", side_effect=interrupted):
             with self.assertRaises(OSError):
-                workflow_files.commit_project(
+                transactions.commit_project(
                     self.project.root, [(path, {"new": True})]
                 )
         external = {**before, "external_edit": True}
@@ -1406,7 +1408,7 @@ class WorkspaceTasksTest(unittest.IsolatedAsyncioTestCase):
         path = workflow_files.card_path(self.project.root, broken)
         for invalid in [None, [], {"extra": []}, {"extra": {"turing_card": []}}]:
             with self.subTest(invalid=invalid):
-                workflow_files.atomic_json(path, invalid)
+                transactions.atomic_json(path, invalid)
                 document = self.project.document()
                 damaged = next(
                     card for card in document["cards"] if card["id"] == broken

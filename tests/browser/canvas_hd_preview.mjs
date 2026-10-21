@@ -1,18 +1,14 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 import { installStarterFixture } from "./starter.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
+const browser = await browserFixture();
 try {
   const page = await browser.newPage({ viewport: { width: 1800, height: 1600 } });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18187");
+  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:8188");
   await selectRenderer(page);
   await installStarterFixture(page);
   const result = await page.evaluate(async () => {
@@ -37,6 +33,7 @@ try {
     await app.extensionManager.command.execute("Turing.MaterialWorkspace.New");
     window.wireStarter();
     const stub = app.rootGraph._nodes.find((n) => n.type === "TuringMaterialImage");
+    stub.properties.canvas_show_generate = true;
     const pixels = LiteGraph.createNode("EmptyImage");
     app.rootGraph.add(pixels);
     pixels.widgets.find((w) => w.name === "width").value = 1280;

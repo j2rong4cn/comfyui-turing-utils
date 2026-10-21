@@ -1,12 +1,8 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
+const browser = await browserFixture();
 try {
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
   const errors = [];
@@ -64,7 +60,9 @@ try {
     const { settleMaterials } = await import("/extensions/comfyui-turing-utils/workspace/material_selection.js");
     const card = portCard(portTest.source);
     card.setSize([320, 0]);
-    const material = card.properties.materials.find((m) => m.kind === "image");
+    const visible = new Set(card.properties.card.layout.map((item) => item.material));
+    const material = card.properties.materials.find((m) => m.kind === "image" && visible.has(m.id));
+    if (!material) throw Error("Fixture must expose an image preview");
     const image = document.createElement("canvas");
     image.width = 320; image.height = 180;
     const ctx = image.getContext("2d");

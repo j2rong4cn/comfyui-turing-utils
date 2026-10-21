@@ -1,9 +1,8 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ["--no-sandbox"] });
+const browser = await browserFixture();
 try {
   const page = await browser.newPage();
   const errors = [];

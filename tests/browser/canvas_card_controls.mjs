@@ -1,23 +1,19 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 import { installStarterFixture } from "./starter.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
+const browser = await browserFixture();
 try {
   const page = await browser.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18188");
+  await selectRenderer(page);
   await page.waitForFunction(
     () =>
       window.LiteGraph?.registered_node_types.TuringCanvasInputs && window.app?.graph,
   );
-  await selectRenderer(page);
   await installStarterFixture(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
@@ -39,10 +35,10 @@ try {
     window.wireStarter();
     const image = app.graph._nodes.find((n) => n.type === "TuringMaterialImage");
     const toggleUpload = (node) => {
-      const item = node.widgets.find((w) => w.name === "canvas_allow_upload");
-      check(item?.label === "在卡片显示上传入口", "Upload policy field missing");
-      item.value = !item.value;
-      item.callback(item.value);
+      const item = node.getExtraMenuOptions(app.canvas, [])
+        .find((option) => option.content.includes("允许上传素材"));
+      check(item, "Upload policy menu missing");
+      item.callback();
     };
     toggleUpload(image);
     check(

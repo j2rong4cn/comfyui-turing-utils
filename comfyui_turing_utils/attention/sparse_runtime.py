@@ -76,6 +76,12 @@ class SparseSchedule:
         self.dense_suffix_steps = int(dense_suffix_steps)
         self.dense_prefix_layers = int(dense_prefix_layers)
         self.dense_suffix_layers = int(dense_suffix_layers)
+        for name in (
+            "dense_prefix_steps", "dense_suffix_steps",
+            "dense_prefix_layers", "dense_suffix_layers",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative")
 
     def state_for(self, transformer_options) -> dict[str, object]:
         if not isinstance(transformer_options, dict):

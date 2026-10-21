@@ -1,14 +1,13 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, args: ["--no-sandbox"] });
+const browser = await browserFixture();
 try {
   const page = await browser.newPage();
   await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:8188");
-  await page.waitForFunction(() => window.LiteGraph?.registered_node_types?.TuringUtilsMiniMaxH3KSampler);
   await selectRenderer(page);
+  await page.waitForFunction(() => window.LiteGraph?.registered_node_types?.TuringUtilsMiniMaxH3KSampler);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
     const check = (value, message) => { if (!value) throw Error(message); };

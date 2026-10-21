@@ -83,10 +83,6 @@ def make_sparse_attention_override(
     sparse_reference_image = bool(sparse_reference_image)
     sparse_reference_video = bool(sparse_reference_video)
     sparse_reference_audio = bool(sparse_reference_audio)
-    dense_prefix_steps = int(dense_prefix_steps)
-    dense_suffix_steps = int(dense_suffix_steps)
-    dense_prefix_layers = int(dense_prefix_layers)
-    dense_suffix_layers = int(dense_suffix_layers)
     debug_route_density = bool(debug_route_density)
     if dense_backend not in {"kitchen", "upstream"}:
         dense_backend = normalize_attention_backend(dense_backend)
@@ -95,14 +91,12 @@ def make_sparse_attention_override(
         raise ValueError("routing_threshold must be finite")
     if skipped_residual not in {"1x64", "2x32"}:
         raise ValueError("skipped_residual must be 1x64 or 2x32")
-    if dense_prefix_steps < 0:
-        raise ValueError("dense_prefix_steps must be non-negative")
-    if dense_suffix_steps < 0:
-        raise ValueError("dense_suffix_steps must be non-negative")
-    if dense_prefix_layers < 0:
-        raise ValueError("dense_prefix_layers must be non-negative")
-    if dense_suffix_layers < 0:
-        raise ValueError("dense_suffix_layers must be non-negative")
+    schedule = SparseSchedule(
+        dense_prefix_steps=dense_prefix_steps,
+        dense_suffix_steps=dense_suffix_steps,
+        dense_prefix_layers=dense_prefix_layers,
+        dense_suffix_layers=dense_suffix_layers,
+    )
     if not is_supported_attention_device(device):
         raise RuntimeError(
             "Sol sparse attention requires a CUDA Tensor Core GPU (sm75 or newer)"
@@ -119,12 +113,6 @@ def make_sparse_attention_override(
             raise RuntimeError(
                 "Sol W8A8 requires comfyui-turing-utils-kernel 0.28.0 or newer"
             )
-    schedule = SparseSchedule(
-        dense_prefix_steps=dense_prefix_steps,
-        dense_suffix_steps=dense_suffix_steps,
-        dense_prefix_layers=dense_prefix_layers,
-        dense_suffix_layers=dense_suffix_layers,
-    )
     schedule_state_for = schedule.state_for
     debug_route_keys: set[tuple] = set()
     debug_route_state: dict[tuple, list[tuple[torch.Tensor, int, int]]] = {}
@@ -158,7 +146,7 @@ def make_sparse_attention_override(
         step = schedule_state.get("step")
         sampling_steps = schedule_state.get("sampling_steps")
         last_sparse_layer = (
-            layer_count - dense_suffix_layers - 1
+            layer_count - schedule.dense_suffix_layers - 1
             if isinstance(layer_count, int) and not isinstance(layer_count, bool)
             else None
         )
@@ -507,7 +495,7 @@ def make_sparse_attention_override(
                 "layer_index": layer_index,
                 "layer_count": layer_count,
                 "last_sparse_layer": (
-                    layer_count - dense_suffix_layers - 1
+                    layer_count - schedule.dense_suffix_layers - 1
                     if isinstance(layer_count, int)
                     and not isinstance(layer_count, bool)
                     else None

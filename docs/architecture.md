@@ -96,6 +96,7 @@ effects.
 | `runtime/stage_barrier_prompt.py` | pre-validation expansion of visual multi-port barriers into independent unary cache/execution paths |
 | `runtime/sampling.py` | execution-local task step progress and native solver-loop bridge; no MODEL/global mutation or duplicated solver math |
 | `adapters/minimax/sampling.py` | H3 task preflight, complete first sampling, clean upscale/inpaint handoff and second restart; one attention/preview timeline |
+| `adapters/minimax/sampling_sigmas.py`, `sampling_masks.py` | curve policy and conservative spatial edit coverage, separate from task execution |
 | `adapters/memory.py` | common quantized workspace scan and BaseModel memory-hook installation |
 | `adapters/minimax/policy_config.py` | environment/config parsing only; no live CUDA state |
 | `adapters/minimax/memory_state.py` | live allocator/DynamicVRAM observation and bounded reclaim requests |
@@ -114,6 +115,7 @@ effects.
 | `media/` | reusable image/video sampling, geometry, mask mapping, file and timeline operations |
 | `prompt/chat.py` | chat options, presentation, request/response handling and transport |
 | `workspace/` | project-owned material storage, native graph projection, card validation and segment compilation |
+| `workspace/transactions.py`, `template_files.py` | recoverable file journals/shared lock and card-library persistence; HTTP adapters delegate file operations |
 | `web/workspace/` | request feedback, project save ordering and material-control resource ownership |
 | `web/lib/` | native combo adaptation, directory selection, endpoint interaction and port reordering |
 
@@ -121,6 +123,20 @@ effects.
 facts with operator-level ABI probes without launching CUDA. `kernel_api.py` is the only module
 allowed to import the independently installed kernel package. `registration.py`
 is the only node mapping table.
+
+Document saves and execution share `settleProjectState` in the frontend project
+state owner. It drains material mutations before parameter writes and reports
+unresolved save failures before a snapshot is submitted. Snapshot capture still
+has its own serialization queue because ComfyUI's active graph is shared.
+
+Testing entry points, quick selection, full matrices, and coverage ownership are
+documented in [testing.md](testing.md). Tests do not initialize the plugin root
+implicitly; scoped fixtures own native runtime setup.
+
+Dynamic input restoration preserves existing wires before native widget setters
+rebuild nested branches. Saved links temporarily leave the slots being rebuilt,
+then return by input name when configure finishes. This applies only to configure;
+ordinary branch edits keep native connection-removal behavior.
 
 H3 sampling separates task progress from numerical solver state. One
 `H3SamplingTask` owns both stages and their clean upscale/mask handoff;
@@ -190,7 +206,9 @@ from the node module that happens to consume them.
 
 | Module | Owns |
 |---|---|
-| `workflow_files.py` | ordinary workflow serialization, instance files and atomic project updates |
+| `workflow_files.py` | ordinary workflow serialization and instance-file operations |
+| `transactions.py` | shared file lock, atomic writes and recoverable project commit journals |
+| `template_files.py` | card-library reading, revision checks, save/rename and recoverable deletion |
 | `projection.py` | lightweight display descriptors or explicitly requested execution expansion |
 | `compiler.py`, `tasks.py` | material-boundary graph cuts and validated task creation |
 | `execution.py` | server-owned operations, dependency waits and the single native-queue adapter |

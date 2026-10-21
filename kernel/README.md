@@ -139,7 +139,7 @@ loads; SM75 retains synchronous copies and the 32-KiB D128 attention footprint.
 By default only target video is reblocked. Explicitly allowed references use
 separate clusters, with original-token protection applied before clustering.
 Mixed boundary blocks stay exact. Spark requires kernel 0.48.0 and has no FP16-PV or diagnostic kernel branch.
-The PyTorch mathematical oracles live in `tests/spark_reference.py`.
+The PyTorch mathematical oracles live in `tests/turing_test_support/spark_reference.py`.
 
 `scripts/benchmark_spark.py --tokens 19968 52842 --heads 14 --profile`
 reports complete-call latency, peak scratch, retained-block budget and CUDA-event

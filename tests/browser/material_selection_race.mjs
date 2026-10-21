@@ -1,14 +1,10 @@
-import { pathToFileURL } from "node:url";
+import { browserFixture } from "./harness.mjs";
 import { selectRenderer } from "./renderer.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
+const browser = await browserFixture();
 try {
   const page = await browser.newPage();
-  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18187");
+  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:8188");
   await selectRenderer(page);
   console.log(
     await page.evaluate(async () => {
@@ -120,6 +116,7 @@ try {
           kind: "text",
           selection: {},
           executable: true,
+          showGenerate: true,
         };
         selections.set("source", source.selection);
         const parameter = {
@@ -288,7 +285,7 @@ try {
         setWidgetValue(text, "new editor");
         await Promise.all([
           text.callback("new editor"),
-          stub.widgets.find((widget) => widget._executionTarget).callback(),
+          stub.getExtraMenuOptions(app.canvas, []).find((option) => option.content === "运行此素材").callback(),
         ]);
         check(observed === "new editor", "Editor execution read stale text");
         materialChanged(directory, target, { text: "old response", revision: 0 });

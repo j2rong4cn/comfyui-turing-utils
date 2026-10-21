@@ -1,14 +1,10 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
-const base = process.env.CANVAS_URL || "http://127.0.0.1:18187";
+const browser = await browserFixture();
+const base = process.env.CANVAS_URL || "http://127.0.0.1:8188";
 try {
   const page = await browser.newPage();
   const errors = [],
@@ -131,7 +127,7 @@ try {
   });
   const restarted = await context.newPage();
   await restarted.goto(base);
-  await selectRenderer(restarted);
+  await selectRenderer(restarted, { restore: true });
   assert.deepEqual(
     await restarted.evaluate(() =>
       app.extensionManager.workflow.openWorkflows.map((tab) => tab.path),

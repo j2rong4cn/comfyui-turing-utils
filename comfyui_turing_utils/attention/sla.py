@@ -78,26 +78,18 @@ def make_sla_attention_override(
     sparse_reference_image = bool(sparse_reference_image)
     sparse_reference_video = bool(sparse_reference_video)
     sparse_reference_audio = bool(sparse_reference_audio)
-    dense_prefix_steps = int(dense_prefix_steps)
-    dense_suffix_steps = int(dense_suffix_steps)
-    dense_prefix_layers = int(dense_prefix_layers)
-    dense_suffix_layers = int(dense_suffix_layers)
     debug_route_density = bool(debug_route_density)
     if dense_backend not in {"kitchen", "upstream"}:
         dense_backend = normalize_attention_backend(dense_backend)
     use_w8a8 = dense_backend == "w8a8"
     if not math.isfinite(sparsity_ratio) or not 0.0 <= sparsity_ratio < 1.0:
         raise ValueError("sparsity_ratio must be finite and in [0, 1)")
-    if (
-        min(
-            dense_prefix_steps,
-            dense_suffix_steps,
-            dense_prefix_layers,
-            dense_suffix_layers,
-        )
-        < 0
-    ):
-        raise ValueError("dense step/layer counts must be non-negative")
+    schedule = SparseSchedule(
+        dense_prefix_steps=dense_prefix_steps,
+        dense_suffix_steps=dense_suffix_steps,
+        dense_prefix_layers=dense_prefix_layers,
+        dense_suffix_layers=dense_suffix_layers,
+    )
     if not is_supported_attention_device(device):
         raise RuntimeError(
             "SLA sparse attention requires a CUDA Tensor Core GPU (sm75 or newer)"
@@ -111,12 +103,6 @@ def make_sla_attention_override(
     if use_w8a8 and not bundled_w8a8_available():
         raise RuntimeError("SLA W8A8 requires the bundled W8A8 attention ABI")
 
-    schedule = SparseSchedule(
-        dense_prefix_steps=dense_prefix_steps,
-        dense_suffix_steps=dense_suffix_steps,
-        dense_prefix_layers=dense_prefix_layers,
-        dense_suffix_layers=dense_suffix_layers,
-    )
     schedule_state_for = schedule.state_for
     debug_route_keys: set[tuple] = set()
     if dense_override is None:

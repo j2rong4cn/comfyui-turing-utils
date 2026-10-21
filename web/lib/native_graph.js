@@ -1,4 +1,4 @@
-import { captureInputLinks, reorderInputs } from "./input_slots.js";
+import { captureInputLinks, reorderInputs, vacateInputLinks } from "./input_slots.js";
 
 // Frontend 1.53.6 rebuilds Autogrow/DynamicCombo slots during native configure.
 // Subgraph clones have null input.link mirrors but already installed boundary
@@ -77,9 +77,12 @@ export function preserveInputLayout(owner, dynamic = false) {
     )
       return configure.call(this, data, ...args);
     const links = captureInputLinks(this, slots);
-    const result = configure.call(this, data, ...args);
+    // Native nested DynamicCombo setters replace input objects during configure.
+    // Keep saved links outside those transient slots so replacement cannot
+    // delete a real wire before the final name-based mapping restores it.
+    vacateInputLinks(this, links, slots.length);
     const order = new Map(slots.map((slot, i) => [slot.name, i]));
-    reorderInputs(this, order, links);
-    return result;
+    try { return configure.call(this, data, ...args); }
+    finally { reorderInputs(this, order, links); }
   };
 }

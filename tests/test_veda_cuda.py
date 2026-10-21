@@ -20,9 +20,9 @@ from comfyui_turing_utils.adapters.minimax.veda.predictor import (
 )
 from comfyui_turing_utils.adapters.minimax.veda.plans import PlanTable, TilePlan
 from comfyui_turing_utils.adapters.minimax.veda.selection import select_tiles
-from .veda_pooling_reference import pool_video_tiles
-from .veda_tiling_reference import gather_tiles, scatter_tiles_
-from .veda_selection_reference import select_tiles as select_tiles_reference
+from turing_test_support.veda_pooling_reference import pool_video_tiles
+from turing_test_support.veda_tiling_reference import gather_tiles, scatter_tiles_
+from turing_test_support.veda_selection_reference import select_tiles as select_tiles_reference
 from comfyui_turing_utils.adapters.minimax.veda.tiling import (
     TileShape,
     TiledSpan,

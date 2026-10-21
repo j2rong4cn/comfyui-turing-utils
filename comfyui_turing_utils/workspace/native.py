@@ -4,13 +4,14 @@ import copy
 import math
 
 from . import workflow_files as files
+from . import transactions
 
 PROJECT = "TuringCanvasProject"
 CARD = "TuringCanvasCard"
 
 
 def project_workflow(project):
-    with files.LOCK:
+    with transactions.LOCK:
         canvas = files.load_json(project.root / "canvas.json")
         document = project.document(canvas)
         positions = canvas.get("layout", {})
@@ -75,7 +76,7 @@ def project_workflow(project):
 
 
 def save_layout(project, workflow, revision):
-    with files.LOCK:
+    with transactions.LOCK:
         path = project.root / "canvas.json"
         canvas = files.load_json(path)
         if canvas["revision"] != revision:
@@ -210,7 +211,7 @@ def save_layout(project, workflow, revision):
         canvas["view"] = copy.deepcopy(workflow.get("extra", {}).get("ds", {}))
         canvas["groups"] = copy.deepcopy(workflow.get("groups", []))
         canvas["revision"] += 1
-        files.atomic_json(path, canvas)
+        transactions.atomic_json(path, canvas)
         return {
             "revision": canvas["revision"],
             "statistics": project.statistics(canvas),

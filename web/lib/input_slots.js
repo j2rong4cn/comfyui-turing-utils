@@ -25,13 +25,17 @@ export function captureInputLinks(node, slots) {
   return links;
 }
 
-export function reorderInputs(node, order, links, key = (slot) => slot.name) {
-  let offset = node.inputs.length;
+export function vacateInputLinks(node, links, minimum = 0) {
+  let offset = Math.max(node.inputs.length, minimum);
   for (const link of links.values())
     if (link) offset = Math.max(offset, link.target_slot + 1);
   // Target slots are unique in native LiteGraph. Vacate before moving any
   // descriptor; otherwise swapping two slots can displace a live connection.
   for (const link of links.values()) if (link) link.target_slot = offset++;
+}
+
+export function reorderInputs(node, order, links, key = (slot) => slot.name) {
+  vacateInputLinks(node, links);
   node.inputs.sort(
     (a, b) => (order.get(key(a)) ?? Infinity) - (order.get(key(b)) ?? Infinity),
   );

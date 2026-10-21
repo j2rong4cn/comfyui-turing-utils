@@ -27,7 +27,7 @@ from comfyui_turing_utils_kernel.turing_sage.spark import (
 from comfyui_turing_utils_kernel.turing_sage.quant import per_warp_int8, per_warp_int8_hadamard
 from comfyui_turing_utils_kernel.turing_sage import spark_available
 
-from .spark_reference import _partition, _directions_reference, reblock_reference, reweight_reference
+from turing_test_support.spark_reference import _partition, _directions_reference, reblock_reference, reweight_reference
 
 
 def test_spark_uses_shared_step_schedule_with_two_dense_steps():

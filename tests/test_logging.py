@@ -92,6 +92,7 @@ class RuntimeLoggingTest(unittest.TestCase):
             {
                 "COMFYUI_TURING_UTILS_PROFILE",
                 "COMFYUI_TURING_UTILS_H3_ACTIVATION_MODE",
+                "TURING_API_RESULT_TTL_SECONDS",
             },
         )
 

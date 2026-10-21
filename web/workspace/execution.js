@@ -2,7 +2,7 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import { report, request } from "./api.js";
-import { materialChanged, settleMaterials } from "./material_selection.js";
+import { materialChanged } from "./material_selection.js";
 import { fileTab } from "./documents.js";
 import {
   assertProjectSaved,
@@ -13,14 +13,13 @@ import {
   projectState,
   saveProject,
   setProjectStatus,
-  settleProjectWrites,
+  settleProjectState,
   restoreSavedValues,
   CARD,
 } from "./project_state.js";
 
 async function start(state, spec) {
-  await settleMaterials(state.directory);
-  await settleProjectWrites(state.directory);
+  await settleProjectState(state.directory);
   const operation = await enqueueSave(state, async (revision) => {
     assertProjectSaved(state.directory);
     return {
@@ -110,8 +109,7 @@ function watchTask(directory, id) {
 }
 
 export async function restoreTasks(directory) {
-  await settleMaterials(directory);
-  await settleProjectWrites(directory);
+  await settleProjectState(directory);
   const [{ items }, selections] = await Promise.all([
     request("task/list", { directory }),
     request("selections", { directory }),

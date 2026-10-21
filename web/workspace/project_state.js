@@ -212,10 +212,16 @@ export async function settleProjectWrites(directory) {
     return;
   }
 }
-export async function saveProject(directory = project()?.directory) {
-  if (typeof directory !== "string") directory = project()?.directory;
+export async function settleProjectState(directory) {
+  // Imports can publish a new selection, which in turn updates card state.
+  // Preserve this order for every execution and document-save entry point.
   await settleMaterials(directory);
   await settleProjectWrites(directory);
+  assertProjectSaved(directory);
+}
+export async function saveProject(directory = project()?.directory) {
+  if (typeof directory !== "string") directory = project()?.directory;
+  await settleProjectState(directory);
   const result = await saveProjectLayout(directory);
   assertProjectSaved(directory);
   return result;

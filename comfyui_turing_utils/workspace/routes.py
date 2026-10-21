@@ -1,13 +1,11 @@
 """Project routes; inference belongs to the server-owned material task service."""
 
+from . import transactions
+
 import asyncio
-import copy
-import hashlib
-import json
 from pathlib import Path
 import shutil
 import tempfile
-import uuid
 
 import av
 import folder_paths
@@ -23,7 +21,8 @@ from .previews import PreviewBusy, PreviewStore
 from ..media.files import probe
 from .store import Conflict, Project, inside
 from . import workflow_files
-from .templates import material_template, new_card_template, export_card
+from .templates import material_template, new_card_template
+from .template_files import TemplateLibrary
 from .native import project_workflow, save_layout
 from .editor import select_material
 
@@ -34,6 +33,7 @@ def install_routes():
         return
     server._turing_material_workspace = True
     tasks = MaterialTasks(server)
+    server._turing_material_tasks = tasks
     previews = PreviewStore(
         Path(folder_paths.base_path) / ".cache" / "material-previews"
     )
@@ -158,143 +158,56 @@ def install_routes():
         return web.FileResponse(poster, headers={"X-Content-Type-Options": "nosniff"})
 
     def template_path(request, name):
-        root = library(request)
-        path = inside(root, name)
-        if path.parent != root.resolve() or path.suffix != ".json":
-            raise ValueError("Use a single .json filename for a card template")
-        return path
+        return TemplateLibrary(library(request)).path(name)
 
     @endpoint("post", "/template/open")
     async def open_template(request):
         data = await request.json()
-        raw = await asyncio.to_thread(template_path(request, data["name"]).read_bytes)
-        return web.json_response(
-            {"workflow": json.loads(raw), "revision": hashlib.sha256(raw).hexdigest()}
-        )
+        return web.json_response(await asyncio.to_thread(
+            TemplateLibrary(library(request)).open, data["name"],
+        ))
 
     @endpoint("post", "/templates")
     async def templates(request):
-        root = library(request)
-        return web.json_response(
-            {
-                "items": await asyncio.to_thread(
-                    lambda: sorted(p.name for p in root.glob("*.json"))
-                )
-            }
-        )
+        return web.json_response({"items": await asyncio.to_thread(
+            TemplateLibrary(library(request)).names,
+        )})
 
     @endpoint("post", "/template/browse")
     async def browse_templates(request):
         data = await request.json()
         if data.get("path"):
             raise ValueError("Card library files are in its root directory")
-
-        def listing():
-            root = library(request)
-            items = [
-                {
-                    "name": p.name,
-                    "path": p.name,
-                    "directory": False,
-                    "bytes": p.stat().st_size,
-                }
-                for p in sorted(root.glob("*.json"))
-                if p.is_file() and not p.is_symlink()
-            ]
-            return {"items": items, "path": "", "empty": not items, "project": False}
-
-        return web.json_response(await asyncio.to_thread(listing))
+        return web.json_response(await asyncio.to_thread(
+            TemplateLibrary(library(request)).browse,
+        ))
 
     @endpoint("post", "/template/save")
     async def save_template(request):
         data = await request.json()
-        path = template_path(request, data["name"])
-
-        def save_file():
-            with workflow_files.LOCK:
-                if path.exists():
-                    if data.get("create_only"):
-                        raise Conflict(
-                            "Template name already exists; choose a new name"
-                        )
-                    if (
-                        data.get("revision")
-                        != hashlib.sha256(path.read_bytes()).hexdigest()
-                    ):
-                        raise Conflict(
-                            "Template exists or changed; open it before replacing it"
-                        )
-                elif data.get("revision") is not None:
-                    raise Conflict("Template was deleted; save the draft under a new name")
-                try:
-                    if data.get("prompt") is None:
-                        raise ValueError(data.get("error") or "工作流尚未完成")
-                    if data.get("create_only"):
-                        workflow = export_card(
-                            data["workflow"],
-                            data["prompt"],
-                            project=data.get("export_instance", False),
-                        )
-                    else:
-                        workflow = workflow_files.pack(data["workflow"], data["prompt"])
-                except ValueError as error:
-                    if not data.get("draft") or data.get("export_instance"):
-                        raise
-                    workflow = copy.deepcopy(data["workflow"])
-                    workflow.setdefault("extra", {}).pop("turing_editor", None)
-                    metadata = workflow["extra"].setdefault(
-                        workflow_files.KEY,
-                        {"version": 2, "prompt": {}, "state": {}},
-                    )
-                    metadata["invalid"] = str(error)
-                workflow_files.atomic_json(path, workflow)
-                return hashlib.sha256(path.read_bytes()).hexdigest()
-
-        revision = await asyncio.to_thread(save_file)
-        return web.json_response({"name": path.name, "revision": revision})
+        result = await asyncio.to_thread(
+            TemplateLibrary(library(request)).save,
+            data["name"], data["workflow"], data.get("prompt"),
+            revision=data.get("revision"), create_only=data.get("create_only", False),
+            export_instance=data.get("export_instance", False),
+            draft=data.get("draft", False), error=data.get("error"),
+        )
+        return web.json_response(result)
 
     @endpoint("post", "/template/rename")
     async def rename_template(request):
         data = await request.json()
-        path = template_path(request, data["name"])
-        destination = template_path(request, data["new_name"])
-        root = library(request)
-        if any((root / name).is_symlink() for name in (data["name"], data["new_name"])):
-            raise ValueError("Cannot rename a card template through a symbolic link")
-
-        def rename():
-            with workflow_files.LOCK:
-                if not path.exists():
-                    raise Conflict("Template was deleted; reopen the card library")
-                revision = hashlib.sha256(path.read_bytes()).hexdigest()
-                if revision != data["revision"]:
-                    raise Conflict("Template changed; reopen before renaming it")
-                if destination != path:
-                    if destination.exists():
-                        raise Conflict("Template name already exists; choose a new name")
-                    path.rename(destination)
-                return {"name": destination.name, "revision": revision}
-
-        return web.json_response(await asyncio.to_thread(rename))
+        return web.json_response(await asyncio.to_thread(
+            TemplateLibrary(library(request)).rename,
+            data["name"], data["new_name"], data["revision"],
+        ))
 
     @endpoint("post", "/template/delete")
     async def delete_template(request):
         data = await request.json()
-        path = template_path(request, data["name"])
-        if (library(request) / data["name"]).is_symlink():
-            raise ValueError("Cannot delete a card template through a symbolic link")
-
-        def remove():
-            with workflow_files.LOCK:
-                if hashlib.sha256(path.read_bytes()).hexdigest() != data["revision"]:
-                    raise Conflict("Template changed; reopen before deleting it")
-                trash = inside(library(request), ".trash")
-                trash.mkdir(exist_ok=True)
-                destination = trash / f"{path.stem}.{uuid.uuid4().hex[:12]}.json"
-                path.replace(destination)
-                return {"name": path.name, "recoverable": True}
-
-        return web.json_response(await asyncio.to_thread(remove))
+        return web.json_response(await asyncio.to_thread(
+            TemplateLibrary(library(request)).delete, data["name"], data["revision"],
+        ))
 
     @endpoint("post", "/card/add")
     async def add_card(request):
@@ -362,7 +275,7 @@ def install_routes():
             }
 
         def locked_add():
-            with workflow_files.LOCK:
+            with transactions.LOCK:
                 return add()
 
         return web.json_response(await asyncio.to_thread(locked_add))
@@ -372,7 +285,7 @@ def install_routes():
         data = await request.json()
 
         def copy():
-            with workflow_files.LOCK:
+            with transactions.LOCK:
                 project = Project(data["directory"])
                 identity = workflow_files.copy_instance(
                     project.root, data["source"], data["id"], data["revision"]
@@ -422,7 +335,7 @@ def install_routes():
         data = await request.json()
 
         def select():
-            with workflow_files.LOCK:
+            with transactions.LOCK:
                 return select_material(
                     Project(data["directory"]),
                     data["id"],
@@ -453,7 +366,7 @@ def install_routes():
 
         def update():
             project = Project(data["directory"])
-            with workflow_files.LOCK:
+            with transactions.LOCK:
                 project.patch(data["revision"], data["changes"])
                 return workflow_files.parameter_state(
                     project.root,
@@ -483,7 +396,7 @@ def install_routes():
 
         def state():
             project = Project(data["directory"])
-            with workflow_files.LOCK:
+            with transactions.LOCK:
                 canvas = workflow_files.load_json(project.root / "canvas.json")
                 return {
                     "items": project.selections(canvas),

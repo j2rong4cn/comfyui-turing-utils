@@ -1,5 +1,7 @@
 """Server-owned material tasks over ComfyUI's single native inference queue."""
 
+from . import transactions
+
 import asyncio
 import copy
 import json
@@ -87,7 +89,7 @@ class MaterialTasks:
         selected = {target.split(":", 1)[0]} if target else set(cards)
         if not selected or None in selected:
             raise ValueError("Select at least one Canvas card")
-        with workflow_files.LOCK:
+        with transactions.LOCK:
             canvas = workflow_files.load_json(project.root / "canvas.json")
             document = project.document(canvas, card_ids=selected, execution=True)
             document["max_megapixels"] = project.settings(canvas)["max_megapixels"]
@@ -341,6 +343,7 @@ class MaterialTasks:
     async def _enqueue(self, project, prepared, client_id, continuation):
         # Version-sensitive enqueue lives here, never in media/node code.
         # Preserve normal hooks, replacement, validation and the native worker.
+        self._check_interrupted(project.directory)
         first = "control_updates" not in prepared
         if first:
             prepared["controls"], prepared["control_updates"] = (
@@ -409,10 +412,18 @@ class MaterialTasks:
             key: extra.pop(key) for key in SENSITIVE_EXTRA_DATA_KEYS if key in extra
         }
         project.run_state(prepared["run_id"], "queued")
+        self._check_interrupted(project.directory)
         self.server.prompt_queue.put(
             (number, native_id, prompt, extra, valid[2], sensitive)
         )
         return native_id
+
+    def _check_interrupted(self, directory):
+        if any(
+            owned == directory and record.get("interrupt_requested")
+            for (owned, _), record in self.active.items()
+        ):
+            raise MaterialInterrupted("Task was cancelled")
 
     async def status(self, directory, identity):
         project = await asyncio.to_thread(Project, directory)
@@ -449,6 +460,27 @@ class MaterialTasks:
         if record:
             record["cancel_requested"] = True
         return await self.status(directory, identity)
+
+    async def wait(self, directory, identity):
+        record = self.active.get((directory, identity))
+        if record:
+            await asyncio.shield(record["task"])
+        return await self.status(directory, identity)
+
+    def interrupt(self, directory, identity):
+        record = self.active.get((directory, identity))
+        if not record:
+            return
+        record.update(cancel_requested=True, interrupt_requested=True)
+        queue = self.server.prompt_queue
+        with queue.mutex:
+            running, queued = queue.get_current_queue_volatile()
+            for item in queued:
+                if item[3].get("turing_material_run", {}).get("directory") == directory:
+                    queue.delete_queue_item(lambda entry: entry[1] == item[1])
+            for item in running:
+                if item[3].get("turing_material_run", {}).get("directory") == directory:
+                    queue.interrupt_if_running(item[1])
 
     async def list(self, directory):
         project = await asyncio.to_thread(Project, directory)

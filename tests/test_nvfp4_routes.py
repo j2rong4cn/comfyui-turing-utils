@@ -17,6 +17,7 @@ from comfyui_turing_utils_kernel.nvfp4 import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class NVFP4RoutesTest(unittest.TestCase):
+
     def test_automatic_pipeline_and_capture_serial_fallback(self):
         if torch.cuda.get_device_capability() != (8, 6):
             self.skipTest("automatic pipeline is validated for SM86")
@@ -232,6 +233,7 @@ class NVFP4RoutesTest(unittest.TestCase):
                 other = linear(x, p, b, scale, bias, output_columns=137)
             torch.cuda.current_stream().wait_stream(stream)
             torch.testing.assert_close(other, y, rtol=0, atol=0)
+
 
     def test_fused_weight_quantization(self):
         torch.manual_seed(537)

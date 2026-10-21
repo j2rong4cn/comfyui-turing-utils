@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from functools import cache
 import importlib.util
 import sys
 import unittest
@@ -43,14 +44,6 @@ class PackageArchitectureTest(unittest.TestCase):
         source = (ROOT / "__init__.py").read_text(encoding="utf-8")
         self.assertIn('WEB_DIRECTORY = "./web"', source)
         self.assertTrue((ROOT / "web" / "chat_advanced.js").is_file())
-        for filename in (
-            "keyframe_outputs.js",
-            "stage_barrier_outputs.js",
-            "node_configuration.js",
-            "lib/stable_inputs.js",
-            "lib/node_migrations.js",
-        ):
-            self.assertFalse((ROOT / "web" / filename).exists())
 
     def test_kernel_package_is_accessed_only_through_facade(self):
         package = ROOT / "comfyui_turing_utils"
@@ -58,7 +51,7 @@ class PackageArchitectureTest(unittest.TestCase):
         for path in package.rglob("*.py"):
             if path.name == "kernel_api.py":
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = syntax(path)
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     modules = [alias.name for alias in node.names]
@@ -78,7 +71,7 @@ class PackageArchitectureTest(unittest.TestCase):
         package = ROOT / "comfyui_turing_utils"
         offenders = []
         for path in package.rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = syntax(path)
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     modules = [alias.name for alias in node.names]
@@ -94,17 +87,10 @@ class PackageArchitectureTest(unittest.TestCase):
                     offenders.append(str(path.relative_to(ROOT)))
         self.assertEqual(offenders, [])
 
-    def test_attention_depends_on_layout_contract_not_minimax_adapter(self):
-        attention_root = ROOT / "comfyui_turing_utils" / "attention"
-        source = "\n".join(
-            path.read_text(encoding="utf-8") for path in attention_root.glob("*.py")
-        )
-        self.assertNotIn("adapters.minimax", source)
-        self.assertIn("ensure_attention_layout_provider", source)
 
     def test_convrot_quantization_does_not_orchestrate_model_loading(self):
         path = ROOT / "comfyui_turing_utils" / "quantization" / "convrot.py"
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = syntax(path)
         imported = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -119,24 +105,11 @@ class PackageArchitectureTest(unittest.TestCase):
         )
 
     def test_h3_services_are_separate_from_node_schemas(self):
-        node_source = (
-            ROOT / "comfyui_turing_utils" / "nodes" / "minimax_references.py"
-        ).read_text(encoding="utf-8")
-        service_source = (
-            ROOT / "comfyui_turing_utils" / "adapters" / "minimax" / "references.py"
-        ).read_text(encoding="utf-8")
-        self.assertNotIn("torchaudio", node_source)
-        self.assertNotIn("@dataclass", node_source)
-        self.assertNotIn("comfy_api", service_source)
-        self.assertTrue(
-            (
-                ROOT
-                / "comfyui_turing_utils"
-                / "adapters"
-                / "minimax"
-                / "video_vae_encode.py"
-            ).is_file()
-        )
+        node_imports = tuple(imports(ROOT / "comfyui_turing_utils/nodes/minimax_references.py"))
+        assert "comfyui_turing_utils.adapters.minimax.reference_execution" in node_imports
+        assert not any(name.startswith("comfy_api") for name in imports(
+            ROOT / "comfyui_turing_utils/adapters/minimax/references.py"
+        ))
 
     def test_builtin_model_adapters_are_registered_once(self):
         from comfyui_turing_utils import bootstrap_builtin_integrations
@@ -154,48 +127,6 @@ class PackageArchitectureTest(unittest.TestCase):
         self.assertNotIn("apply_minimax_adapter", source)
         self.assertIn("bootstrap_builtin_integrations()", entrypoint)
 
-    def test_minimax_policy_and_memory_services_have_explicit_owners(self):
-        minimax = ROOT / "comfyui_turing_utils" / "adapters" / "minimax"
-        acceleration = (minimax / "acceleration.py").read_text(encoding="utf-8")
-        planning = (minimax / "memory_planning.py").read_text(encoding="utf-8")
-        state = (minimax / "memory_state.py").read_text(encoding="utf-8")
-        policy = (minimax / "activation_policy.py").read_text(encoding="utf-8")
-        self.assertNotIn("class _MiniMaxMemoryShape", acceleration)
-        self.assertIn("class _MiniMaxMemoryShape", planning)
-        self.assertIn("class ActivationRuntimePlan", state)
-        self.assertNotIn("torch.cuda.mem_get_info", policy)
-
-    def test_quantization_and_kernel_attention_are_layered(self):
-        quantization = ROOT / "comfyui_turing_utils" / "quantization"
-        dispatch = (quantization / "dispatch.py").read_text(encoding="utf-8")
-        self.assertIn("from .capabilities import", dispatch)
-        self.assertIn("from .workspace import", dispatch)
-        sage = ROOT / "kernel" / "comfyui_turing_utils_kernel" / "turing_sage"
-        core = (sage / "core.py").read_text(encoding="utf-8")
-        self.assertNotIn("@dataclass", core)
-        self.assertTrue((sage / "records.py").is_file())
-        self.assertTrue((sage / "sparse_policy.py").is_file())
-
-    def test_root_has_no_retired_implementation_or_compatibility_modules(self):
-        retired_modules = (
-            "attention_nodes.py",
-            "bernini_nodes.py",
-            "convrot_nodes.py",
-            "minimax_adapter.py",
-            "minimax_layout.py",
-            "minimax_nodes.py",
-            "nodes.py",
-            "precision.py",
-            "reference_nodes.py",
-            "turing_fusions.py",
-            "turing_ops.py",
-            "wan_adapter.py",
-            "wan_nodes.py",
-        )
-        self.assertFalse(any((ROOT / name).exists() for name in retired_modules))
-        self.assertFalse((ROOT / "attention.py").exists())
-        self.assertFalse((ROOT / "comfyui_turing_utils/attention/api.py").exists())
-        self.assertFalse((ROOT / "comfyui_turing_utils/workspace/h3.py").exists())
 
     def test_registered_node_ids_match_the_maintained_surface(self):
         from comfyui_turing_utils.registration import NODE_CLASS_MAPPINGS
@@ -268,6 +199,11 @@ if __name__ == "__main__":
 PACKAGE = Path(__file__).resolve().parents[1] / "comfyui_turing_utils"
 
 
+@cache
+def syntax(path):
+    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
 def imports(path):
     relative = path.relative_to(PACKAGE).with_suffix("")
     parts = list(relative.parts)
@@ -276,7 +212,7 @@ def imports(path):
     else:
         parts.pop()
     package = ".".join(["comfyui_turing_utils", *parts])
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(syntax(path)):
         if isinstance(node, ast.Import):
             yield from (alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):

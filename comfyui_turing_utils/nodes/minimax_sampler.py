@@ -9,13 +9,12 @@ from comfy_api.latest import io
 from . import INTERNAL_NODE_NOTE
 from .minimax import H3LatentUpscaleModel
 from ..adapters.minimax.latent_upscaler import load_h3_latent_upscaler
-from ..adapters.minimax.sampling import (
+from ..adapters.minimax.sampling_sigmas import (
     DEFAULT_SIGMAS,
     DEFAULT_SECOND_SIGMAS,
     SECOND_PASS_PRESETS,
-    needs_upscaler,
-    sample_h3,
 )
+from ..adapters.minimax.sampling import needs_upscaler, sample_h3
 
 
 def _curve_input(name, *, second=False):

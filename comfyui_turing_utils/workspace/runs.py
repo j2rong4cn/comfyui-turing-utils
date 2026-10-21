@@ -5,13 +5,14 @@ reopening the project) finishes that intent without incrementing a selection
 twice and without overwriting a newer manual selection.
 """
 
+from . import transactions
+
 import json
 
-from . import workflow_files
 
 
 def finish_run(project, run_id, asset=None, text=None, configuration=None):
-    with workflow_files.LOCK:
+    with transactions.LOCK:
         with project.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             run = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()

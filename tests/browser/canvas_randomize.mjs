@@ -1,17 +1,13 @@
+import { browserFixture } from "./harness.mjs";
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
 import { selectRenderer } from "./renderer.mjs";
 
-const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
-const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH,
-  args: ["--no-sandbox"],
-});
+const browser = await browserFixture();
 try {
   const page = await browser.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:18187");
+  await page.goto(process.env.CANVAS_URL || "http://127.0.0.1:8188");
   await selectRenderer(page);
   const result = await page.evaluate(async () => {
     const { app } = await import("/scripts/app.js");
@@ -20,7 +16,7 @@ try {
     const { snapshotCard } = await import(
       "/extensions/comfyui-turing-utils/workspace/documents.js"
     );
-    const { entries } = await import(
+    const { entries, syncPorts } = await import(
       "/extensions/comfyui-turing-utils/lib/canvas_ports.js"
     );
     const workspace = await import(
@@ -37,6 +33,7 @@ try {
     const input = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasInputs");
     const output = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasOutputs");
     const image = app.rootGraph._nodes.find((n) => n.type === "TuringMaterialImage");
+    image.properties.canvas_show_generate = true;
     for (const node of [...app.rootGraph._nodes])
       if (node.type.startsWith("TuringMaterial") && node !== image)
         app.rootGraph.remove(node);
@@ -53,6 +50,8 @@ try {
       source.inputs.findIndex((p) => p.name === "color"),
     );
     const colorPort = entries(input).at(-1);
+    colorPort.canvas_hidden = false;
+    syncPorts(input, entries(input).map((port) => port.id === colorPort.id ? colorPort : port));
     check(
       colorPort.control?.mode === "randomize",
       "Exposed form lost its linked control",
@@ -143,7 +142,7 @@ try {
         restoredColor.linkedWidgets?.[0]?.value === "increment",
       "Reopen lost the value/control mode",
     );
-    await reopened.widgets.find((w) => w.name === "编辑工作流").callback();
+    await reopened.getExtraMenuOptions().find((option) => option.content === "编辑工作流").callback();
     const endpoint = app.rootGraph._nodes.find((n) => n.type === "TuringCanvasInputs");
     const editorColor = endpoint.widgets.find(
       (w) => w._portId === colorPort.id && !w._valueControlTarget,
