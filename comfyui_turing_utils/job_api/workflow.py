@@ -10,6 +10,7 @@ import nodes
 
 from . import API_VERSION
 from .bindings import input_location, target_key
+from .errors import ValidationError
 
 
 SAVERS = {
@@ -91,7 +92,17 @@ def prepare(workflow, request, uploads, root):
                 "Use a native API graph with string node IDs, class_type and inputs; export UI workflows first"
             )
         if node.get("class_type") not in nodes.NODE_CLASS_MAPPINGS:
-            raise ValueError(f"Unknown node {identity}: {node.get('class_type')}")
+            raise ValidationError(
+                f"Unknown node {identity}: {node.get('class_type')}",
+                issues=[
+                    {
+                        "node_id": identity,
+                        "class_type": node.get("class_type"),
+                        "code": "missing_node",
+                        "message": "Node is not installed",
+                    }
+                ],
+            )
     outputs = request["outputs"]
     for name, entry in outputs.items():
         node = prompt.get(entry["node_id"])

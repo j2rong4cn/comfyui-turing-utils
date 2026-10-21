@@ -18,6 +18,7 @@ from server import PromptServer
 from . import REQUEST_JSON_BYTES, UPLOAD_IDLE_SECONDS
 from .service import Jobs, disk
 from .workflow import request_fields
+from .errors import ValidationError, describe
 from .discovery import node_catalog, server_information
 
 
@@ -61,6 +62,11 @@ def install_routes():
                     return await function(request)
                 except TimeoutError:
                     return web.json_response({"error": "Upload timed out"}, status=408)
+                except ValidationError as error:
+                    return web.json_response(
+                        {"error": str(error), "error_details": error.details},
+                        status=400,
+                    )
                 except (
                     ValueError,
                     KeyError,
@@ -68,7 +74,13 @@ def install_routes():
                     OSError,
                     av.error.FFmpegError,
                 ) as error:
-                    return web.json_response({"error": str(error)}, status=400)
+                    return web.json_response(
+                        {
+                            "error": str(error),
+                            "error_details": describe(error, "request"),
+                        },
+                        status=400,
+                    )
 
             getattr(server.routes, method)("/turing" + path)(handler)
             return handler

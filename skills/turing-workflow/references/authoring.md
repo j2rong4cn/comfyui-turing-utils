@@ -21,7 +21,7 @@ limitation; you can still author a fresh native API graph from node schemas.
 1. Query `server`, search `nodes`, inspect individual `node` schemas and query
    only relevant model folders. Reuse native and installed public nodes.
 2. Construct the smallest complete graph for the requested result. Use actual
-   class IDs and input keys, including nested dynamic branches. Links are
+   class IDs and input keys, including selected dynamic branches. Links are
    `["source_node_id", output_index]`; literal values preserve JSON types.
 3. Choose ordinary output nodes such as `SaveImage`, `SaveAudio`, `SaveVideo` or
    `VHS_VideoCombine`. Select their IDs as capability outputs. No API-specific
@@ -30,9 +30,12 @@ limitation; you can still author a fresh native API graph from node schemas.
    a small representative input, and inspect the result. Increase cost or scope
    only as needed to verify the intended behavior.
 
-`check` validates local bindings and types; native validation at submission checks
-the installed nodes. Neither proves output quality, memory fit or correct editing
-semantics. An unexecuted capability must be described as unverified.
+`check` validates local bindings and types. `check --online` additionally reads
+installed node schemas: required inputs, connections, current combo/model options
+and selected dynamic branches. It uploads nothing and queues nothing. It reports
+branches it cannot resolve as warnings; native custom validators run at submission.
+Neither check proves output quality, memory fit or correct editing semantics.
+An unexecuted capability must be described as unverified.
 
 ## Files and contract
 
@@ -42,6 +45,7 @@ Create `turing/capabilities/<name>/` with:
 - `capability.json`: the machine-readable parameter/file/output contract.
 - `USAGE.md`: maintained instructions, required and nonempty.
 - `source.ui.json`: optional supplied UI source.
+- `verification.json`: helper-maintained execution evidence after a successful run.
 
 Example contract (the IDs must match the actual authored graph):
 
@@ -83,17 +87,21 @@ Multiple targets share the same value. Bind literals at their real owning node;
 the helper rejects replacing existing graph connections. Topology changes belong
 in a revised workflow, not in hidden string substitution or arbitrary scripts.
 
-For a DynamicCombo object, address its scalar field with an optional `path`, for
-example `{"node_id":"65","input":"sigmas","path":["denoise"]}`. This changes
-only `inputs.sigmas.denoise`, preserving the selector and other branch parameters.
-Read the actual API graph/schema to choose the keys; a displayed dotted widget
-label does not imply a flat input. File targets support the same nested address.
+Use the actual native API graph's representation for dynamic inputs. Flat keys
+such as `sigmas.denoise` are addressed as `"input":"sigmas.denoise"`. For an
+object input, use `{"node_id":"65","input":"sigmas","path":["denoise"]}`;
+this changes only `inputs.sigmas.denoise`. File targets support the same address.
+Display labels do not determine the representation. Changing a branch selector
+does not create its required inputs: include every supported branch's fields or
+use separate capability graphs when the topology differs.
 
 Files are required by default. Standard loaders use annotated paths; path loaders
 can use `"path_mode": "absolute"` on the target. Uploads are stored in the job's
 output subtree and annotated with `[output]`, without changing global input paths.
 Native validation catches loaders that reject these paths. Record such node
 requirements in `USAGE.md` and use a compatible loader.
+`"required":false` only permits omitting the upload; it does not disable a loader
+or graph branch. An omitted upload leaves the graph's existing literal intact.
 
 Saver prefixes are replaced with job-owned prefixes for execution. PreviewImage
 and PreviewAudio are routed through their native saving equivalents. Standard
@@ -106,3 +114,9 @@ Arbitrary custom-node side effects outside managed paths cannot be auto-cleaned.
 Do not place credentials in the graph, contract or usage examples. Workflow
 snapshots are retained locally for reproducibility and savers may embed metadata.
 Use environment-based credential handling already supported by the selected node.
+
+`list` and `show` report `unverified`, `execution_verified` or `stale`. Evidence
+tracks the source graph and parameter/file/output contract, server versions,
+successful run ID and actual parameters. Editing usage notes alone does not
+invalidate execution evidence. Record inspected quality and the tested input
+range in `USAGE.md`; a successful execution of one parameter set proves no more.

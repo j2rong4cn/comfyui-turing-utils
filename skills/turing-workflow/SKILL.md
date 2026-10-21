@@ -10,11 +10,12 @@ inside the current project's `turing/` subdirectory. Preserve other project
 directories. Workflows, parameter contracts and usage instructions belong to the
 local project; the server owns temporary execution files only.
 
-The helper is `scripts/turing.py`, relative to this skill. Run it with Python and
-aiohttp; it imports no ComfyUI runtime, Torch or kernel. Its companion HTTP client
-and local file implementation live in this plugin's `comfyui_turing_utils/job_api/`.
-Run the helper from this repository; the user's project does not need the plugin
-installed as a Python package. Do not introduce MCP or comfy-cli dependencies.
+The helper is `scripts/turing.py`, relative to this skill. The entire skill folder
+is portable: use Python 3.11+ with `aiohttp` (`python -m pip install -r
+SKILL/requirements.txt` when missing). It imports no ComfyUI runtime, Torch or
+kernel and can run from any working directory. Invoke it by its actual path, or
+copy the whole skill folder into the agent's existing skill directory when the
+user requests installation. Do not introduce MCP or comfy-cli dependencies.
 
 ## Choose the work
 
@@ -57,7 +58,15 @@ with all files in one multipart request. The server reports node validation
 errors, uses the native queue, and returns downloadable results. It stores no
 capability registry, Canvas project or card.
 
-After a verified run, update the capability's usage instructions with relevant
+Use `check --online` to check installed node schemas and current model options
+without uploading or queuing. Native custom validators still run at submission.
+Use `--params FILE` for multiline prompts and other JSON parameters; `--set`
+overrides individual values. For long jobs, use `run --detach` and later
+`resume JOB_ID`; resume waits, downloads and cleans the existing task only.
+
+The helper records successful execution against a workflow/contract hash. A
+changed graph or contract makes this verification stale; it is not an output
+quality verdict. After inspecting the result, update the usage instructions with relevant
 input requirements, parameter interactions and demonstrated limitations. Record
 the triggering conditions and run ID for new issues; distinguish observations
 from hypotheses. When a fix is verified, update the old limitation rather than

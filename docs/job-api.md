@@ -73,6 +73,9 @@ API v2 执行普通 ComfyUI API prompt 图，不依赖卡片、Canvas Inputs/Out
 从零查询节点和模型、搭建工作流，或分析用户提供的工作流并提取可调参数。普通 UI JSON
 需要通过 ComfyUI 原生导出得到 API 格式；不按 widgets_values 位序猜测复杂子图或动态输入。
 USAGE.md 记录输入要求、参数关系、输出行为和已验证问题；运行会保留当时的说明快照。
+skill 整个目录可以独立复制，客户端只需 Python 3.11+ 和 aiohttp。自动生成的
+verification.json 关联工作流／接口定义哈希、成功运行 ID、服务器版本和实际参数；
+图或接口定义变化后显示 stale。此标记只证明执行成功，结果质量仍需检查并写入说明。
 
 ## 提交与下载
 
@@ -179,8 +182,10 @@ HEAD 不表示下载完成，不触发删除。
 
 ## Python 客户端和项目工具
 
-`comfyui_turing_utils/job_api/client.py` 仅依赖 aiohttp 和标准库，可独立复制使用。
-导入该模块不加载 ComfyUI、Torch 或模型。发现方法为 server()、nodes()、node_info()、
+客户端实现统一位于 `skills/turing-workflow/scripts/turing_client/`，仅依赖 aiohttp
+和标准库；复制使用时保留整个 skill 目录。插件内原有
+`comfyui_turing_utils.job_api.client`、`project` 等导入路径仍解析到这套实现。
+导入不加载 ComfyUI、Torch 或模型。发现方法为 server()、nodes()、node_info()、
 models()；完整节点 schema 和模型目录复用原生接口。
 
 ```python
@@ -199,18 +204,36 @@ submit() 提交后可用 watch() 异步迭代或 wait() 等待；run() 合并提
 回调支持普通或异步函数；默认每 0.5 秒查询一次，可设置 poll_interval。
 等待超时不会取消、重交或删除任务。失败／取消会抛异常。
 
-项目工具无需客户端项目安装 ComfyUI，通过插件内 skill 的脚本运行：
+项目工具无需客户端项目安装 ComfyUI，通过 skill 的脚本运行（也可复制到其他目录）：
 
 ```bash
 python skills/turing-workflow/scripts/turing.py --project /path/to/project init --url http://127.0.0.1:18189
 python skills/turing-workflow/scripts/turing.py --project /path/to/project show video-edit
-python skills/turing-workflow/scripts/turing.py --project /path/to/project run video-edit --set 'seed=42' --file source=source.mp4
+python skills/turing-workflow/scripts/turing.py --project /path/to/project check video-edit --params /path/to/parameters.json --file source=source.mp4 --online
+python skills/turing-workflow/scripts/turing.py --project /path/to/project run video-edit --params /path/to/parameters.json --set 'seed=42' --file source=source.mp4 --detach
+python skills/turing-workflow/scripts/turing.py --project /path/to/project resume JOB_ID --timeout 3600
 ```
 
 init 只创建项目下的 turing/，拒绝覆盖已有配置。show 返回参数定义和使用说明。
-check 检查本地类型、绑定和文件，原生校验发生在提交时。run 在 turing/runs/<id>/ 保存
+check 检查本地类型、绑定和文件；`--online` 只读原生节点 schema，额外检查已安装节点、
+当前 combo／模型选项、连接类型、输出槽和动态分支必填参数，不上传或执行。
+无法确定的动态输入返回 warnings，原生自定义校验仍发生在提交时。run 在 turing/runs/<id>/ 保存
 渲染工作流、能力定义、说明快照和运行记录，下载到 turing/outputs/<id>/。
-`--set NAME=JSON` 保留数值、布尔和字符串类型；文件使用 --file NAME=PATH。
+`--set NAME=JSON` 保留数值、布尔和字符串类型；`--params FILE` 从 JSON 对象读取长文本等
+参数，--set 覆盖同名值。文件使用 --file NAME=PATH。`headers_env` 配置可将 header 名映射
+到环境变量名，避免把认证凭据写入项目。
+
+`run --detach` 提交后立即返回记录；`resume JOB_ID` 接续已有任务，等待、下载并清理。
+未启用 detach 时 run 完成同样的全流程。远端 status 与本地 activity 分开记录，等待超时
+不冒充任务失败；不确定的提交不自动重交。恢复失败时结构化错误返回 run_id／job_id。
+下载成功记录先落盘再 DELETE；清理失败保留成功结果并标记 cleanup_pending，resume 可重试。
+清理完成后的 status／resume 可离线读取本地结果，不依赖服务器或认证配置；resume 会重新
+校验 SHA256。远端重启标记 invalidated，同一会话中不存在的任务标记 unavailable。
+
+HTTP 错误保留原 `error` 字符串，增加 `error_details` 对象：code、phase、message，以及
+适用时的 node_id、class_type、exception_type 或原生 node_errors。客户端不再将原生错误
+二次序列化为字符串。CLI 成功 JSON 写 stdout，进度与错误 JSON 写 stderr；成功退出 0，
+请求／执行错误退出 1，参数语法错误退出 2。API 协议仍为 v2。
 
 下载先写 .partial，核对 bytes/SHA256 后改名，全部成功后 DELETE。
 下载失败保留服务器结果并清理本地未完成文件。重试会核对并跳过已有完整文件，

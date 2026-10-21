@@ -401,6 +401,18 @@ class JobApiTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(data=data, graph=graph):
                 status, result = await self.submit(data, graph=graph)
                 self.assertEqual(status, 400, result)
+                if graph == {"out": {"class_type": "ApiResult", "inputs": {}}}:
+                    details = result["error_details"]
+                    self.assertEqual(details["code"], "workflow_invalid")
+                    self.assertIsInstance(details["node_errors"]["out"], dict)
+                    self.assertEqual(
+                        details["node_errors"]["out"]["errors"][0]["type"],
+                        "required_input_missing",
+                    )
+                if graph == text_graph("MissingNode"):
+                    self.assertEqual(
+                        result["error_details"]["issues"][0]["node_id"], "compute"
+                    )
                 self.assertFalse(self.jobs.jobs)
                 self.assertEqual(
                     list((self.jobs.root / self.jobs.session_id).iterdir()), []
@@ -412,6 +424,8 @@ class JobApiTest(unittest.IsolatedAsyncioTestCase):
         state = await self.finished(submitted["id"])
         self.assertEqual(state["status"], "failed")
         self.assertIn("test execution failed", state["error"])
+        self.assertEqual(state["error_details"]["node_id"], "compute")
+        self.assertEqual(state["error_details"]["class_type"], "ApiBroken")
         self.assertFalse(self.jobs.jobs[state["id"]].root.exists())
         self.assertEqual(self.server.prompt_queue.history, {})
         self.jobs.jobs[state["id"]].expires = time.time() - 1
@@ -518,7 +532,7 @@ class JobApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(paths[0].read_text(), "source!")
             self.assertNotIn(result["id"], self.jobs.jobs)
 
-    async def test_local_capability_run_snapshots_usage_and_keeps_project_root_clean(
+    async def test_local_capability_detach_timeout_resume_snapshots_and_cleans(
         self,
     ):
         root = project.initialize(self.root, str(self.client.make_url("")))
@@ -538,12 +552,23 @@ class JobApiTest(unittest.IsolatedAsyncioTestCase):
             "outputs": {"text": {"node_id": "out"}},
         }
         project.write(directory / "capability.json", manifest)
-        project.write(directory / "workflow.api.json", text_graph())
+        project.write(directory / "workflow.api.json", text_graph("ApiProgress"))
         (directory / "USAGE.md").write_text("Verified text generation.\n")
         async with Client(str(self.client.make_url("")), poll_interval=0.01) as client:
             record = await project.run(
-                client, root, "text", {"prompt": "edited"}, {}, timeout=10
+                client, root, "text", {"prompt": "edited"}, {}, detach=True
             )
+            self.assertEqual(await asyncio.wait_for(ProgressText.steps.get(), 5), 0)
+            with self.assertRaises(TimeoutError) as caught:
+                await project.resume(client, root, record["id"], timeout=0.02)
+            self.assertEqual(caught.exception.details["job_id"], record["id"])
+            waiting = project.read(root / "runs" / record["id"] / "run.json")
+            self.assertEqual(waiting["status"], "running")
+            self.assertEqual(waiting["activity"], "waiting_timeout")
+            for _ in range(6):
+                ProgressText.release.put_nowait(None)
+            record = await project.resume(client, root, record["id"], timeout=10)
+        self.assertEqual(record["state"]["progress"]["executions_started"], 1)
         self.assertEqual((root / record["outputs"][0]).read_text(), "edited!")
         saved = root / "runs" / record["id"]
         self.assertEqual(
@@ -555,6 +580,12 @@ class JobApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(project.read(saved / "run.json")["server_deleted"])
         self.assertNotIn(record["job_id"], self.jobs.jobs)
+        self.assertEqual(
+            project.verification(root, "text")["status"], "execution_verified"
+        )
+        self.assertEqual(
+            (await project.status(None, root, record["id"]))["status"], "succeeded"
+        )
 
     async def test_aliased_outputs_have_unique_download_names(self):
         async with Client(str(self.client.make_url("")), poll_interval=0.01) as client:

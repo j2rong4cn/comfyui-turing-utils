@@ -550,6 +550,8 @@ original loading functions; callers bypassing the prompt server must invoke
   See [Temporary Job API](docs/job-api.md) for the HTTP contract and Python client.
   The [project workflow skill](skills/turing-workflow/SKILL.md) guides local
   capability authoring and maintained usage notes, with all project assets under `turing/`.
+  Its portable helper supports read-only online schema checks, JSON parameter
+  files, detached submission and recovery of existing jobs without resubmission.
 - `Configure Attention Strategy` selects Sol, SLA, Veda, Spark, or `none`.
   H3 Image Sol and Static Virtual KV have been removed, including their node IDs.
   Its dynamic selector exposes only

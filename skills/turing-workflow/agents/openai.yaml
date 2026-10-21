@@ -1,0 +1,4 @@
+interface:
+  display_name: "ComfyUI Workflow Tasks"
+  short_description: "Build and run project-local ComfyUI workflows"
+  default_prompt: "Use $turing-workflow to build or run a ComfyUI workflow, retain project-local assets, and update its usage instructions."

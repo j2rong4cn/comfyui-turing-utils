@@ -23,6 +23,7 @@ from execution import SENSITIVE_EXTRA_DATA_KEYS, validate_prompt
 from ..log import get_logger
 from .workflow import prepare, result_files
 from .progress import Observer, Progress
+from .errors import ValidationError, describe
 
 OWNER = {"owner": "turing-job-api", "format": 1}
 TERMINAL = {"succeeded", "failed"}
@@ -49,6 +50,7 @@ class Job:
     expires: float | None = None
     outputs: list = field(default_factory=list)
     error: str | None = None
+    error_details: dict | None = None
     cleanup_error: str | None = None
     delete_requested: bool = False
     readers: int = 0
@@ -213,6 +215,7 @@ class Jobs:
             "created": job.created,
             "expires": job.expires,
             "error": job.error,
+            "error_details": job.error_details,
             "cleanup_error": job.cleanup_error,
             "outputs": [
                 {k: v for k, v in item.items() if k != "path"} for item in job.outputs
@@ -238,10 +241,11 @@ class Jobs:
         )
         valid = await validate_prompt(job.id, prompt, targets)
         if not valid[0] or set(valid[2]) != set(targets):
-            raise ValueError(
-                json.dumps(
-                    {"error": valid[1], "node_errors": valid[3]}, ensure_ascii=False
-                )
+            raise ValidationError(
+                (valid[1] or {}).get(
+                    "message", "One or more declared outputs failed validation"
+                ),
+                node_errors=valid[3],
             )
         job.progress.signature, job.progress.targets = (
             (job.owner, signature),
@@ -309,16 +313,31 @@ class Jobs:
                     active = any(item[1] == job.id for item in (*running, *queued))
                 if record is not None:
                     if record["status"]["status_str"] != "success":
-                        details = next(
+                        event, details = next(
                             (
-                                data
+                                (event, data)
                                 for event, data in reversed(
                                     record["status"]["messages"]
                                 )
                                 if event in {"execution_error", "execution_interrupted"}
                             ),
-                            {},
+                            ("execution_error", {}),
                         )
+                        job.error_details = {
+                            "code": "execution_interrupted"
+                            if event == "execution_interrupted"
+                            else "execution_failed",
+                            "phase": "executing",
+                            "node_id": details.get("node_id"),
+                            "class_type": details.get("node_type"),
+                            "exception_type": details.get("exception_type"),
+                            "message": details.get("exception_message")
+                            or (
+                                "Workflow execution was interrupted"
+                                if event == "execution_interrupted"
+                                else "Workflow execution failed"
+                            ),
+                        }
                         raise ValueError(
                             details.get("exception_message")
                             or "Workflow execution failed or was interrupted"
@@ -341,6 +360,8 @@ class Jobs:
         except Exception as error:
             job.native_active = False
             job.status, job.error = "failed", str(error)
+            if job.error_details is None:
+                job.error_details = describe(error, job.progress.phase)
         finally:
             if not job.native_active:
                 await self._finish(job)

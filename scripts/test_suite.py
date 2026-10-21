@@ -48,7 +48,14 @@ AREAS = {
         "tests/test_canvas_dynamic_parameters.py",
         *SAMPLED["tests/test_workspace_tasks.py"],
     ),
-    "api": ("tests/test_job_discovery.py", "tests/test_job_progress.py", "tests/test_job_project.py", *SAMPLED["tests/test_job_api.py"]),
+    "api": (
+        "tests/test_job_discovery.py",
+        "tests/test_job_progress.py",
+        "tests/test_job_project.py",
+        "tests/test_job_recovery.py",
+        "tests/test_job_validation.py",
+        *SAMPLED["tests/test_job_api.py"],
+    ),
     "media": (
         "tests/test_video_latent_mask.py",
         "tests/test_video_mask_roi.py",

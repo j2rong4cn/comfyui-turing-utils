@@ -11,15 +11,9 @@ from urllib.parse import quote
 
 import aiohttp
 
+from .errors import ApiError, JobFailed, ServerRestarted
 
-class ApiError(RuntimeError):
-    def __init__(self, status, message):
-        self.status = status
-        super().__init__(message)
-
-
-class ServerRestarted(RuntimeError):
-    pass
+__all__ = ["ApiError", "JobFailed", "ServerRestarted", "Client"]
 
 
 class Client:
@@ -159,7 +153,7 @@ class Client:
             if state["status"] == "succeeded":
                 return state
             if state["status"] in {"failed", "deleting"}:
-                raise RuntimeError(state["error"] or state["status"])
+                raise JobFailed(state)
 
     async def run(self, *, timeout=None, on_progress=None, **kwargs):
         job = await self.submit(**kwargs)

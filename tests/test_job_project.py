@@ -4,9 +4,11 @@ import copy
 import json
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -168,3 +170,122 @@ class JobProjectTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_copied_skill_runs_without_the_plugin_repository(self):
+        destination = self.root / "standalone/skills/turing-workflow"
+        shutil.copytree(
+            ROOT / "skills/turing-workflow",
+            destination,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(destination / "scripts/turing.py"),
+                "--project",
+                str(self.root),
+                "check",
+                "example",
+            ],
+            cwd=destination.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(json.loads(result.stdout)["parameters"], {"amount": 0.4})
+
+    def test_cli_parameter_file_preserves_multiline_text_and_set_overrides(self):
+        self.manifest["parameters"]["prompt"] = {
+            "type": "string",
+            "default": "default",
+            "targets": [{"node_id": "1", "input": "text"}],
+        }
+        self.workflow["1"]["inputs"]["text"] = "placeholder"
+        project.write(self.directory / "capability.json", self.manifest)
+        project.write(self.directory / "workflow.api.json", self.workflow)
+        path = self.turing / "inputs/parameters.json"
+        project.write(
+            path, {"amount": 0.2, "prompt": "第一行\nsecond line: `literal` $value"}
+        )
+        command = [
+            sys.executable,
+            str(ROOT / "skills/turing-workflow/scripts/turing.py"),
+            "--project",
+            str(self.root),
+            "check",
+            "example",
+            "--params",
+            str(path),
+            "--set",
+            "amount=0.125",
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertEqual(
+            json.loads(result.stdout)["parameters"],
+            {"amount": 0.125, "prompt": "第一行\nsecond line: `literal` $value"},
+        )
+        path.write_text("[]")
+        failed = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(json.loads(failed.stderr)["error"]["code"], "invalid_input")
+        self.assertNotIn("Traceback", failed.stderr)
+
+    def test_cli_completed_status_and_resume_need_no_server_config_or_credentials(self):
+        identity = str(uuid.uuid4())
+        directory = self.turing / "runs" / identity
+        directory.mkdir()
+        output = self.turing / "outputs" / identity
+        output.mkdir()
+        (output / "text.txt").write_bytes(b"test")
+        project.write(
+            directory / "run.json",
+            {
+                "id": identity,
+                "job_id": identity,
+                "status": "succeeded",
+                "server_deleted": True,
+                "outputs": [f"outputs/{identity}/text.txt"],
+                "output_manifest": [
+                    {
+                        "filename": "text.txt",
+                        "bytes": 4,
+                        "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                    }
+                ],
+            },
+        )
+        (self.turing / "turing.json").unlink()
+        for command in ("status", "resume"):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "skills/turing-workflow/scripts/turing.py"),
+                    "--project",
+                    str(self.root),
+                    command,
+                    identity,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(json.loads(result.stdout)["status"], "succeeded")
+        path = directory / "run.json"
+        record = project.read(path)
+        record.pop("server_deleted")
+        record["activity"] = "cleanup_pending"
+        project.write(path, record)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "skills/turing-workflow/scripts/turing.py"),
+                "--project",
+                str(self.root),
+                "status",
+                identity,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(json.loads(result.stdout)["activity"], "cleanup_pending")

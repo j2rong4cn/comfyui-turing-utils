@@ -299,10 +299,14 @@ there is no supported single-definition API in frontend 1.53.6.
 `job_api/workflow.py` binds native API prompts to job-owned uploads and saver paths.
 The service submits directly to the native queue and observes its history/events;
 it does not construct Canvas projects, persist card templates or use material tasks.
-`job_api/project.py` owns local typed capability rendering and run snapshots, without
-importing ComfyUI. Project assets live below one `turing/` subdirectory; usage notes
-evolve per capability and are snapshotted with each run. The repository skill guides
-authoring, verification and maintenance through the same lightweight HTTP client.
+`skills/turing-workflow/scripts/turing_client/` owns the portable HTTP client,
+local typed capability rendering, schema checks and resumable run snapshots, without
+importing ComfyUI. The server's `job_api` package resolves its existing lightweight
+module imports to that implementation; there is no second client to maintain.
+Project assets live below one `turing/` subdirectory. Usage notes evolve per
+capability and are snapshotted with each run; execution verification tracks the
+source graph/contract hash. Remote status and local download/cleanup activity are
+recorded separately. The skill guides authoring and result review using this client.
 
 `job_api/discovery.py` owns the small server manifest and searchable node
 summaries. `/turing/server` includes usage guidance; full node schemas and model
