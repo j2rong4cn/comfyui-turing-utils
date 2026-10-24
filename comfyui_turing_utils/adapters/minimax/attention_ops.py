@@ -612,6 +612,7 @@ def _head_sharded_attention(
     executor,
     head_group: int,
     cache_quantized_input: bool,
+    head_range=None,
 ):
     import comfy.ops
     from comfy.ldm.modules.attention import optimized_attention
@@ -643,11 +644,19 @@ def _head_sharded_attention(
             else None
         )
         sequence = int(x.shape[0])
-        heads = int(attention.heads)
         head_dim = int(attention.head_dim)
-        output = torch.empty(
-            (sequence, heads * head_dim), dtype=x.dtype, device=x.device
-        )
+        if head_range is not None:
+            g0, g1 = head_range
+            ph = g1 - g0
+            head_iter = range(g0, g1, head_group)
+            offset_base = g0
+        else:
+            g0, g1 = 0, int(attention.heads)
+            ph = g1 - g0
+            head_iter = range(0, g1, head_group)
+            offset_base = 0
+
+        output = torch.empty((sequence, ph * head_dim), dtype=x.dtype, device=x.device)
         streamed_executor = (
             getattr(executor, _STREAMED_QKV_EXECUTOR_ATTR, None)
             if executor is not None
@@ -657,8 +666,8 @@ def _head_sharded_attention(
         compact = (
             callable(streamed_executor) and reusable_k_anchor_available() and not veda
         )
-        for head_start in range(0, heads, head_group):
-            head_stop = min(head_start + head_group, heads)
+        for head_start in head_iter:
+            head_stop = min(head_start + head_group, g1)
             group = head_stop - head_start
             group_options = transformer_options
             if veda:
@@ -783,7 +792,7 @@ def _head_sharded_attention(
                 del query, key, value
             _profile_cuda(
                 "minimax.head_output_store",
-                output[:, head_start * head_dim : head_stop * head_dim].copy_,
+                output[:, (head_start - offset_base) * head_dim : (head_stop - offset_base) * head_dim].copy_,
                 group_output,
             )
             del group_output
@@ -965,10 +974,21 @@ def _make_attention_forward(
     base_model = _weak_model_reference(base_model)
 
     def forward(self, x, rope_freqs=None, transformer_options={}):
+        # Read split-mode attributes FIRST: the fallback check below has to
+        # know whether it is allowed to hand control back to the original
+        # single-GPU forward.
+        head_range = getattr(self, "head_range", None)
+        return_pre_out_proj = bool(getattr(self, "return_pre_out_proj", False))
+        if return_pre_out_proj and head_range is None:
+            raise RuntimeError(
+                "return_pre_out_proj requires head_range; split callers must "
+                "set both attributes on the attention module before calling it"
+            )
         executor = prepared_attention_executor(transformer_options)
-        if (
+
+        fallback = (
             x.ndim != 2
-            or x.shape[0] < 64
+            or (head_range is None and x.shape[0] < 64)
             or x.dtype not in (torch.float16, torch.bfloat16)
             or self.head_dim not in (64, 128)
             or (
@@ -978,7 +998,17 @@ def _make_attention_forward(
                     or any(parameter.requires_grad for parameter in self.parameters())
                 )
             )
-        ):
+        )
+        if fallback:
+            if head_range is not None:
+                # The original forward runs every head over the full token
+                # range: in split mode that duplicates every other rank's
+                # work and returns a tensor the caller cannot consume.
+                raise RuntimeError(
+                    "split attention cannot fall back to the original forward "
+                    f"(x.ndim={x.ndim}, rows={int(x.shape[0])}, dtype={x.dtype}, "
+                    f"head_dim={self.head_dim})"
+                )
             return original(
                 self,
                 x,
@@ -1024,25 +1054,37 @@ def _make_attention_forward(
                     transformer_options.get("turing_utils_veda_forward_cache"),
                     transformer_options=transformer_options,
                 )
+
         qkv_is_w8 = convrot_weight_kind(self.qkv_proj.weight) == "w8a8"
         runtime_plan = _runtime_activation_plan(base_model)
         head_decision = None
-        if qkv_is_w8:
+        compact_qk = bool(callable(streamed_executor) and stream_abi_available)
+        ph = (head_range[1] - head_range[0]) if head_range is not None else int(self.heads)
+
+        # In split mode we MUST run head-sharded regardless of what
+        # decide_attention_heads would pick: the rank owns only [g0, g1) of the
+        # attention heads, and the full-width path would duplicate every other
+        # rank's work. decide_attention_heads is still allowed to pick the
+        # head_group size (heads processed per iteration).
+        if qkv_is_w8 or head_range is not None:
             head_decision = decide_attention_heads(
                 x,
-                heads=int(self.heads),
+                heads=ph,
                 head_dim=int(self.head_dim),
-                compact_qk=bool(callable(streamed_executor) and stream_abi_available),
+                compact_qk=compact_qk,
                 quantized_input=True,
                 quantized_value=callable(streamed_executor),
                 runtime_plan=runtime_plan,
                 base_model=base_model,
                 extra_workspace_per_head=attention_extra_workspace,
             )
-            if head_decision.sharded or transformer_options.get(
-                "turing_utils_veda_projected_qkv", False
+            force_sharded = head_range is not None and (qkv_is_w8 or compact_qk)
+            if (
+                force_sharded
+                or head_decision.sharded
+                or transformer_options.get("turing_utils_veda_projected_qkv", False)
             ):
-                profile_shape = (1, self.heads, x.shape[0], self.head_dim)
+                profile_shape = (1, ph, x.shape[0], self.head_dim)
                 CUDA_PHASE_PROFILER.begin_operation(
                     "attention",
                     profile_shape,
@@ -1069,8 +1111,12 @@ def _make_attention_forward(
                     executor,
                     head_decision.head_group,
                     head_decision.cache_quantized_input,
+                    head_range=head_range,
                 )
                 if output is not None:
+                    if return_pre_out_proj:
+                        CUDA_PHASE_PROFILER.complete_operation("attention", profile_shape)
+                        return output
                     output = _profile_cuda(
                         "minimax.out_projection", self.out_proj, output
                     )
@@ -1093,6 +1139,11 @@ def _make_attention_forward(
                 )
 
         if executor is None:
+            if head_range is not None:
+                raise RuntimeError(
+                    "split attention requires a prepared attention executor "
+                    "(prepared_attention_executor returned None)"
+                )
             _warn_attention_fallback(
                 transformer_options,
                 path="prepared",
@@ -1105,8 +1156,13 @@ def _make_attention_forward(
                 rope_freqs=rope_freqs,
                 transformer_options=transformer_options,
             )
+
+        # Row streaming always projects the FULL head dimension:
+        # _stream_qkv_projection assumes heads == self.heads. Split mode never
+        # enters it -- it goes through head-sharded above, or the head-sliced
+        # full path below.
         decision = None
-        if callable(streamed_executor) and stream_abi_available:
+        if head_range is None and compact_qk:
             decision = decide_activation_chunks(
                 x,
                 operation="qkv",
@@ -1116,7 +1172,7 @@ def _make_attention_forward(
                 runtime_plan=runtime_plan,
                 base_model=base_model,
             )
-        profile_shape = (1, self.heads, x.shape[0], self.head_dim)
+        profile_shape = (1, ph, x.shape[0], self.head_dim)
         CUDA_PHASE_PROFILER.begin_operation(
             "attention",
             profile_shape,
@@ -1126,55 +1182,83 @@ def _make_attention_forward(
             else "full",
             qkv_rows=(decision.chunk_rows if decision is not None else 0),
         )
-        if decision is not None:
-            if decision.streamed:
-                if base_model is not None:
-                    ensure_dynamic_vram_headroom(
-                        base_model,
-                        x.device,
-                        rows=int(x.shape[0]),
-                        operation="qkv",
-                        estimated_peak_bytes=decision.streamed_peak_bytes,
-                        runtime_plan=runtime_plan,
-                    )
-                qk, value = _stream_qkv_projection(
-                    self,
-                    x,
-                    transform,
-                    decision.chunk_rows,
+        if decision is not None and decision.streamed:
+            if base_model is not None:
+                ensure_dynamic_vram_headroom(
+                    base_model,
+                    x.device,
+                    rows=int(x.shape[0]),
+                    operation="qkv",
+                    estimated_peak_bytes=decision.streamed_peak_bytes,
+                    runtime_plan=runtime_plan,
                 )
-                outcome = streamed_executor(
-                    qk,
-                    value,
-                    heads=self.heads,
-                    qk_transform=transform,
-                    transformer_options=transformer_options,
+            qk, value = _stream_qkv_projection(
+                self,
+                x,
+                transform,
+                decision.chunk_rows,
+            )
+            outcome = streamed_executor(
+                qk,
+                value,
+                heads=self.heads,
+                qk_transform=transform,
+                transformer_options=transformer_options,
+            )
+            del qk, value
+            if not outcome.supported:
+                CUDA_PHASE_PROFILER.cancel_operation()
+                raise RuntimeError(
+                    "streamed H3 QKV executor rejected a committed projection: "
+                    f"{outcome.reason}"
                 )
-                del qk, value
-                if not outcome.supported:
-                    CUDA_PHASE_PROFILER.cancel_operation()
-                    raise RuntimeError(
-                        "streamed H3 QKV executor rejected a committed projection: "
-                        f"{outcome.reason}"
-                    )
-                output = outcome.output.squeeze(0)
-                output = _profile_cuda("minimax.out_projection", self.out_proj, output)
+            output = outcome.output.squeeze(0)
+            if return_pre_out_proj:
                 CUDA_PHASE_PROFILER.complete_operation("attention", profile_shape)
                 return output
+            output = _profile_cuda("minimax.out_projection", self.out_proj, output)
+            CUDA_PHASE_PROFILER.complete_operation("attention", profile_shape)
+            return output
 
-        qkv = _profile_cuda("minimax.qkv_projection", self.qkv_proj, x)
         sequence = x.shape[0]
-        inner = self.heads * self.head_dim
-        query, key, value = qkv.split(inner, dim=-1)
-        query = query.view(sequence, self.heads, self.head_dim)
-        key = key.view(sequence, self.heads, self.head_dim)
-        value = value.view(sequence, self.heads, self.head_dim)
-        del qkv
+        if head_range is not None:
+            g0, g1 = head_range
+            ph = g1 - g0
+            qkv_fn = transformer_options.get("_split_qkv_group_fn")
+            if qkv_fn is not None:
+                qkv = qkv_fn(x)
+                query, key, value = qkv.split(ph * self.head_dim, dim=-1)
+                query = query.view(sequence, ph, self.head_dim)
+                key = key.view(sequence, ph, self.head_dim)
+                value = value.view(sequence, ph, self.head_dim)
+                del qkv
+            else:
+                # No injected projection callable: project the full width and
+                # slice. Correct but wasteful; split callers that care should
+                # supply transformer_options["_split_qkv_group_fn"].
+                inner = self.heads * self.head_dim
+                qkv = _profile_cuda("minimax.qkv_projection", self.qkv_proj, x)
+                q, k, v = qkv.split(inner, dim=-1)
+                sl = slice(g0 * self.head_dim, g1 * self.head_dim)
+                query = q[:, sl].contiguous().view(sequence, ph, self.head_dim)
+                key = k[:, sl].contiguous().view(sequence, ph, self.head_dim)
+                value = v[:, sl].contiguous().view(sequence, ph, self.head_dim)
+                del qkv, q, k, v
+        else:
+            inner = self.heads * self.head_dim
+            qkv = _profile_cuda("minimax.qkv_projection", self.qkv_proj, x)
+            query, key, value = qkv.split(inner, dim=-1)
+            query = query.view(sequence, self.heads, self.head_dim)
+            key = key.view(sequence, self.heads, self.head_dim)
+            value = value.view(sequence, self.heads, self.head_dim)
+            del qkv
+            ph = self.heads
+
         outcome = execute_projected_attention(
             query.transpose(0, 1).unsqueeze(0),
             key.transpose(0, 1).unsqueeze(0),
             value.transpose(0, 1).unsqueeze(0),
-            heads=self.heads,
+            heads=ph,
             qk_transform=transform,
             transformer_options=transformer_options,
             container_factory=attention_container,
@@ -1182,6 +1266,11 @@ def _make_attention_forward(
         if not outcome.supported:
             del query, key, value
             CUDA_PHASE_PROFILER.cancel_operation()
+            if head_range is not None:
+                raise RuntimeError(
+                    "split attention: execute_projected_attention rejected the "
+                    f"head-sliced projection: {outcome.reason}"
+                )
             _warn_attention_fallback(
                 transformer_options,
                 path="projected",
@@ -1195,6 +1284,9 @@ def _make_attention_forward(
                 transformer_options=transformer_options,
             )
         output = outcome.output.squeeze(0)
+        if return_pre_out_proj:
+            CUDA_PHASE_PROFILER.complete_operation("attention", profile_shape)
+            return output
         output = _profile_cuda("minimax.out_projection", self.out_proj, output)
         CUDA_PHASE_PROFILER.complete_operation("attention", profile_shape)
         return output
